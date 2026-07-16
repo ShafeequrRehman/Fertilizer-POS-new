@@ -1,0 +1,10 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#F9F2EB"/>
+  <!-- Coffee -->
+  <path d="M125 100L135 200H185L195 100H125Z" fill="#9F6844"/>
+  <path d="M120 80L125 100H195L200 80H120Z" fill="#F4E9DC"/>
+  <path d="M125 100C125 100 140 110 160 110C180 110 195 100 195 100V120C195 120 180 130 160 130C140 130 125 120 125 120V100Z" fill="#875333"/>
+  
+  <rect x="115" y="70" width="90" height="10" rx="4" fill="#F3ECE4"/>
+  <path d="M160 70V30C160 20 150 15 140 20" stroke="#4B9573" stroke-width="6" stroke-linecap="round" fill="none"/>
+</svg>

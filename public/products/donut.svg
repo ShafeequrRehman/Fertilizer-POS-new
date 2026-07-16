@@ -1,0 +1,16 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FFF2F9"/>
+  <!-- Dough -->
+  <circle cx="160" cy="120" r="70" fill="#E4B56C"/>
+  <circle cx="160" cy="120" r="25" fill="#FFF2F9"/>
+  <!-- Icing -->
+  <path d="M93 100C100 70 120 50 160 50C200 50 220 70 227 100C233 130 220 160 210 170C190 190 170 195 160 185C150 175 140 190 130 185C120 180 110 185 100 175C90 165 85 130 93 100Z" fill="#E671AC"/>
+  <circle cx="160" cy="120" r="28" fill="#FFF2F9"/>
+  <!-- Sprinkles -->
+  <rect x="130" y="70" width="12" height="4" rx="2" fill="#FFF" transform="rotate(30 130 70)"/>
+  <rect x="180" y="65" width="12" height="4" rx="2" fill="#82E1D4" transform="rotate(-40 180 65)"/>
+  <rect x="200" y="100" width="12" height="4" rx="2" fill="#F6D978" transform="rotate(70 200 100)"/>
+  <rect x="110" y="130" width="12" height="4" rx="2" fill="#F6D978" transform="rotate(-60 110 130)"/>
+  <rect x="135" y="160" width="12" height="4" rx="2" fill="#FFF" transform="rotate(10 135 160)"/>
+  <rect x="185" y="150" width="12" height="4" rx="2" fill="#82E1D4" transform="rotate(-20 185 150)"/>
+</svg>

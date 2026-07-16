@@ -1,0 +1,9 @@
+export const AUTH_TOKEN_KEY = "token";
+export const AUTH_COOKIE_KEY = "pos_session";
+export const REFRESH_TOKEN_KEY = "pos_refresh_token";
+export const AUTH_ROLE_KEY = "pos_user_role";
+export const AUTH_SHOP_ID_KEY = "pos_shop_id";
+export const AUTH_PERMISSIONS_KEY = "pos_permissions";
+export const AUTH_USER_KEY = "pos_user";
+export const AUTH_SHOP_KEY = "pos_shop";
+export const AUTH_LICENSE_KEY = "pos_license";

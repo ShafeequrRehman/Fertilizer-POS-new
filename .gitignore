@@ -1,0 +1,53 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies - unanchored so this also catches backend/node_modules (and
+# any other nested node_modules), not just the one at the repo root
+node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# vite
+/dist/
+dist-electron/
+
+# electron-builder installer output (large - installers, unpacked builds, caches)
+/release/
+
+# production
+/build
+
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+
+# editor/IDE
+.vscode/
+.idea/
+
+# debug / logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# env files - never commit real secrets/connection strings; .env.example
+# stays tracked since it has no real values
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo

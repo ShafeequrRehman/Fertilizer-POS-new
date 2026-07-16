@@ -1,0 +1,15 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#2D2845"/>
+  <!-- Moon -->
+  <path d="M80 60A40 40 0 1 0 120 100 40.05 40.05 0 0 1 80 60Z" fill="#F6D978"/>
+  <!-- Stars -->
+  <circle cx="240" cy="50" r="3" fill="#FFF"/>
+  <circle cx="210" cy="90" r="2" fill="#FFF"/>
+  <circle cx="60" cy="140" r="2" fill="#FFF"/>
+  <circle cx="280" cy="180" r="3" fill="#FFF"/>
+  <!-- Burger -->
+  <path d="M120 160C120 140 135 125 160 125H160C185 125 200 140 200 160H120Z" fill="#F0B04A"/>
+  <rect x="122" y="160" width="76" height="10" rx="5" fill="#7A492A"/>
+  <rect x="124" y="170" width="72" height="8" rx="4" fill="#7AC657"/>
+  <path d="M125 178H195C195 190 180 200 160 200H160C140 200 125 190 125 178Z" fill="#E49C42"/>
+</svg>

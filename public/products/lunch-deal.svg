@@ -1,0 +1,15 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FFF6D1"/>
+  <!-- Sun -->
+  <circle cx="260" cy="60" r="30" fill="#F6D978"/>
+  <circle cx="260" cy="60" r="40" fill="#F6D978" opacity="0.3"/>
+  <!-- Sandwhich -->
+  <path d="M80 160L160 80L160 160Z" fill="#F0C986"/>
+  <path d="M80 160L85 165L165 165L165 85L160 80L160 160Z" fill="#6EA551"/>
+  <path d="M85 165L90 170L170 170L170 90L165 85L165 165Z" fill="#E45B5B"/>
+  <path d="M90 170L95 175L175 175L175 95L170 90L170 170Z" fill="#EAC274"/>
+  <!-- Lemonade -->
+  <rect x="190" y="110" width="40" height="60" rx="4" fill="#F5E495"/>
+  <rect x="185" y="105" width="50" height="8" rx="2" fill="#EAEAEA"/>
+  <rect x="207" y="85" width="6" height="30" fill="#EAEAEA"/>
+</svg>

@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Segoe UI", Arial, Helvetica, sans-serif;
+  --font-mono: "Consolas", "Courier New", monospace;
+}
+
+/* Deliberately NOT following prefers-color-scheme for the page background
+   anymore. This app's pages set their own explicit backgrounds (LoginPage
+   is a dark gradient by design, the dashboard shells are light) - a global
+   dark-mode override on <body> meant that on any OS with dark mode on, a
+   rendering failure (a crashed import, an uncaught error before React
+   mounts, etc.) was visually indistinguishable from "app is fine, still
+   loading": both showed a near-black #0a0a0a screen with nothing on it.
+   Keeping the body a known, light, visibly-wrong color makes a real
+   failure obvious instead of invisible - see src/components/ErrorBoundary.tsx
+   and the fatal-error handling in src/main.tsx for the actual crash UI. */
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
