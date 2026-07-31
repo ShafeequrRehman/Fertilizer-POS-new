@@ -51,3 +51,7 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+
+# local-only working docs (application-overview.md, test-seed.js) - kept
+# on-disk for local development reference only, never pushed to git
+/local-docs/
