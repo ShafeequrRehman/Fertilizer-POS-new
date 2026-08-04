@@ -10,18 +10,15 @@ import {
 } from 'lucide-react';
 import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
 import { Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { getBusinessWindow, filterOrdersInBusinessWindow, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
 
 type EmployeeStat = { name: string; sales: number; count: number };
 type InventoryItem = { id: string | number; name: string; stock: number };
-type BusinessWindow = {
-  start: Date;
-  end: Date;
-  label: string;
-  /** True while the shift backing this window is still open (numbers update live). */
-  isOpen: boolean;
-  /** False when the shop has never been opened at all - nothing to count yet. */
-  hasSession: boolean;
-};
+// Extends the shared window (src/lib/shop-session.ts - the single source
+// of truth for the actual date-math, shared with Record/Sales) with the
+// display label this page renders in the header, which is presentation
+// detail specific to this page rather than something other pages need.
+type BusinessWindow = SessionBusinessWindow & { label: string };
 type ServiceStats = {
   totalRevenue: number;
   totalOrders: number;
@@ -100,15 +97,9 @@ export default function DashboardPageClient() {
     return () => clearInterval(intervalId);
   }, []);
 
-  const businessWindow = useMemo<BusinessWindow>(() => getBusinessWindow(shopSession, currentTime), [shopSession, currentTime]);
+  const businessWindow = useMemo<BusinessWindow>(() => buildDashboardWindow(shopSession, currentTime), [shopSession, currentTime]);
   const businessOrders = useMemo(
-    () => {
-      if (!businessWindow.hasSession) return [];
-      return orders.filter((order) => {
-        const createdAt = new Date(order.createdAt);
-        return createdAt >= businessWindow.start && createdAt < businessWindow.end;
-      });
-    },
+    () => filterOrdersInBusinessWindow(orders, businessWindow),
     [orders, businessWindow],
   );
 
@@ -424,30 +415,23 @@ function formatTime(value: Date) {
   return value.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
-// The dashboard's "today" is exactly one ShopSession (see ShopStatusControl
-// in DashboardShell / backend/controllers/shopSessionController.js) - no
-// fixed clock hours involved. `history[0]` (most recent session, open or
-// closed) is passed in from the effect above.
-function getBusinessWindow(session: ShopSession | null, now: Date): BusinessWindow {
-  if (!session) {
-    return {
-      start: now,
-      end: now,
-      label: 'No shift yet — open the shop to start counting orders',
-      isOpen: false,
-      hasSession: false,
-    };
+// The dashboard's "today" is exactly one ShopSession, computed by the
+// shared getBusinessWindow (src/lib/shop-session.tsx - the single source
+// of truth for this date-math, also used by Record/Sales) - no fixed clock
+// hours involved. This just adds the header label text on top, which is
+// display detail specific to this page. `history[0]` (most recent session,
+// open or closed) is passed in from the effect above.
+function buildDashboardWindow(session: ShopSession | null, now: Date): BusinessWindow {
+  const window = getBusinessWindow(session, now);
+  if (!window.hasSession) {
+    return { ...window, label: 'No shift yet — open the shop to start counting orders' };
   }
 
-  const start = new Date(session.openedAt);
-  const isOpen = session.status === 'open';
-  const end = isOpen ? now : new Date(session.closedAt as string);
+  const label = window.isOpen
+    ? `Open since ${formatWindowDate(window.start)} ${formatTime(window.start)} · Live`
+    : `${formatWindowDate(window.start)} ${formatTime(window.start)} - ${formatWindowDate(window.end)} ${formatTime(window.end)} · Closed`;
 
-  const label = isOpen
-    ? `Open since ${formatWindowDate(start)} ${formatTime(start)} · Live`
-    : `${formatWindowDate(start)} ${formatTime(start)} - ${formatWindowDate(end)} ${formatTime(end)} · Closed`;
-
-  return { start, end, label, isOpen, hasSession: true };
+  return { ...window, label };
 }
 
 function createBusinessHourBuckets(start: Date, end: Date) {

@@ -3,14 +3,55 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
 import { Product, SavedOrder } from '@/lib/pos-types';
+import { getStoreSettings } from '@/lib/pos-settings';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
+
+type ElectronWindow = Window & typeof globalThis & {
+  require?: (moduleName: 'electron') => {
+    ipcRenderer: {
+      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    };
+  };
+};
+
+// Fires a "do not prepare / discard" kitchen ticket for items taken off
+// an order that's still otherwise active - same idea as
+// CancelOrderModal.tsx's cancel ticket, but scoped to just the removed
+// items (see main.js's "kitchen-remove" receipt type) instead of saying
+// the whole order is cancelled, since it isn't.
+function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[]) {
+  if (removedItems.length === 0) return;
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter) {
+      ipcRenderer.invoke('print-kitchen-remove-receipt-data', { ...order, items: removedItems }, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+    } else {
+      console.warn('No kitchen printer configured in settings - removed-items ticket not printed.');
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen remove-items ticket):', err);
+  }
+}
 
 export default function EditOrderPage() {
   const params = useParams<{ id: string }>();
   const [order, setOrder] = useState<SavedOrder | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [items, setItems] = useState<DraftItem[]>([]);
+  // Items the user clicked "Remove" on since the order was loaded (or
+  // since the last save) - what actually needs printing for the kitchen
+  // to stop, as opposed to diffing the whole list at save time, which
+  // would also misfire on ordinary name/price/qty edits.
+  const [removedItems, setRemovedItems] = useState<DraftItem[]>([]);
   const [category, setCategory] = useState('All');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<string>('');
@@ -22,6 +63,7 @@ export default function EditOrderPage() {
         const [orderData, productData] = await Promise.all([fetchOrder(params.id), fetchProducts()]);
         setOrder(orderData);
         setItems(orderData.items);
+        setRemovedItems([]);
         setProducts(productData.products);
       } finally {
         setLoading(false);
@@ -55,6 +97,8 @@ export default function EditOrderPage() {
       remainingAmount: nextRemainingAmount,
       discount: order.discount ?? null,
     });
+    printKitchenRemoveTicket(updated, removedItems);
+    setRemovedItems([]);
     setStatus(`Order ${updated.id} saved successfully.`);
     setOrder(updated);
   }
@@ -106,7 +150,7 @@ export default function EditOrderPage() {
                   <input value={item.variation} onChange={(event) => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, variation: event.target.value } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={String(item.price)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: Number(event.target.value || 0) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={String(item.quantity)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Number(event.target.value || 1) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-                  <button type="button" onClick={() => setItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index))} className="rounded-2xl bg-rose-50 text-rose-600">
+                  <button type="button" onClick={() => { setRemovedItems((previous) => [...previous, items[index]]); setItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index)); }} className="rounded-2xl bg-rose-50 text-rose-600">
                     <Trash2 size={16} className="mx-auto" />
                   </button>
                 </div>

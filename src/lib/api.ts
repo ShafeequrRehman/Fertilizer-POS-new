@@ -8,9 +8,15 @@ const IN_APP_POS_API_BASE = "/api/pos";
 const IN_APP_SYSTEM_API_BASE = "/api/system";
 const AXIOS_REQUEST_TIMEOUT_MS = 8000;
 
+// VITE_API_URL (pos-web/.env, baked in at `npm run build` time) comes
+// first when set - that's how a till gets pointed at a centrally-hosted
+// backend (see backend/README-deploy.md) instead of the one it used to
+// run in-process (see main.js's startBackendServer, now skipped when this
+// is set). LOCAL_API_BASE stays as a fallback candidate either way, so a
+// shop that never sets VITE_API_URL keeps working exactly as before.
 const DEFAULT_CLOUD_API_BASES = [
-  LOCAL_API_BASE,
   import.meta.env.VITE_API_URL,
+  LOCAL_API_BASE,
 ].filter((value): value is string => Boolean(value));
 
 function unique(values: string[]) {
@@ -45,8 +51,8 @@ function getRuntimeCloudApiBaseCandidates() {
   }
 
   const browserCandidates = [
-    LOCAL_API_BASE,
     import.meta.env.VITE_API_URL,
+    LOCAL_API_BASE,
   ];
 
   return unique(browserCandidates.filter(isNonEmptyString));
@@ -167,8 +173,19 @@ api.interceptors.response.use(
     // Route the user to the License Expired screen instead of leaving them
     // on a broken dashboard full of failed requests.
     if (typeof window !== "undefined" && error?.response?.status === 402 && !isLoginRequest) {
-      if (window.location.pathname !== "/license-expired") {
-        window.location.href = "/license-expired";
+      // This app is HashRouter-based (see src/main.tsx) so the current
+      // route lives in window.location.hash ("#/dashboard"), never in
+      // window.location.pathname - that's always the loaded HTML file's
+      // own path (e.g. "/dist/index.html", or under Electron's packaged
+      // file:// protocol, the drive-root-relative file path). Comparing
+      // pathname against a route name here was always false, and setting
+      // window.location.href to a bare route path ("/license-expired")
+      // made the browser/Electron try to load that as an actual file -
+      // exactly the "Not allowed to load local resource: file:///C:/..."
+      // error seen after packaging. Hash assignment is the fix: it's a
+      // same-document navigation that HashRouter already listens for.
+      if (!window.location.hash.startsWith("#/license-expired")) {
+        window.location.hash = "/license-expired";
       }
       return Promise.reject(error);
     }
@@ -195,8 +212,9 @@ api.interceptors.response.use(
       }
 
       clearAuthSession();
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
+      // Same HashRouter fix as the 402 branch above - hash, not pathname/href.
+      if (!window.location.hash.startsWith("#/login")) {
+        window.location.hash = "/login";
       }
     }
 

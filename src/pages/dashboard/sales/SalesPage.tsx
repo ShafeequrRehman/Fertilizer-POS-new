@@ -5,6 +5,7 @@ import { fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetch
 import { Discount, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
+import { getBusinessWindow, filterOrdersInBusinessWindow } from '@/lib/shop-session';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 
@@ -105,20 +106,12 @@ export default function SalesPage() {
   // calendar date. While a shift is open the window is [openedAt, now)
   // and keeps growing across midnight instead of splitting into two
   // separate "days"; once closed it freezes at [openedAt, closedAt).
-  const sessionWindow = useMemo(() => {
-    if (!shopSession) return null;
-    const start = new Date(shopSession.openedAt);
-    const end = shopSession.status === 'open' ? new Date() : new Date(shopSession.closedAt as string);
-    return { start, end };
-  }, [shopSession]);
+  const sessionWindow = useMemo(() => getBusinessWindow(shopSession, new Date()), [shopSession]);
 
-  const shiftOrders = useMemo(() => {
-    if (!sessionWindow) return [];
-    return orders.filter((order) => {
-      const createdAt = new Date(order.createdAt);
-      return createdAt >= sessionWindow.start && createdAt <= sessionWindow.end;
-    });
-  }, [orders, sessionWindow]);
+  const shiftOrders = useMemo(
+    () => filterOrdersInBusinessWindow(orders, sessionWindow),
+    [orders, sessionWindow],
+  );
 
   const visibleOrders = useMemo(() => shiftOrders.filter((order) => {
     const byFilter = filter === 'All'
@@ -157,12 +150,7 @@ export default function SalesPage() {
         // on load could be a stale order from a previous shift that isn't
         // even in the visible list below it. A selection the user already
         // made is left alone as long as the order still exists at all.
-        const start = latestSession ? new Date(latestSession.openedAt) : null;
-        const end = latestSession ? (latestSession.status === 'open' ? new Date() : new Date(latestSession.closedAt as string)) : null;
-        const scoped = start && end ? data.filter((order) => {
-          const createdAt = new Date(order.createdAt);
-          return createdAt >= start && createdAt <= end;
-        }) : [];
+        const scoped = filterOrdersInBusinessWindow(data, getBusinessWindow(latestSession, new Date()));
 
         setSelectedOrder((current) => current ? data.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null);
       }
@@ -201,6 +189,22 @@ export default function SalesPage() {
       return updated;
     }
 
+    // Browser/no-printer fallback goes through PrintOrderPage.tsx, which
+    // fetches the order fresh (full merged item list) - so for an
+    // addItems kitchen ticket, stash just the new items here for that
+    // page to pick up, same reasoning as kitchenReceiptData below.
+    function printPageUrl(type: 'kitchen' | 'cashier') {
+      if (type === 'kitchen' && payload.action === 'addItems' && payload.items) {
+        try {
+          sessionStorage.setItem(`kitchen-add-items-${updated.id}`, JSON.stringify(payload.items));
+        } catch {
+          // sessionStorage unavailable - the fallback page will just show
+          // the full item list instead, which is an acceptable degradation.
+        }
+      }
+      return `/dashboard/sales/print/${updated.id}?auto=true&type=${type}`;
+    }
+
     const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
     if (isElectron && settings) {
       try {
@@ -213,20 +217,29 @@ export default function SalesPage() {
         // Complete Payment panel for this order - carried onto the printed
         // receipt so the customer sees the same combined total they were
         // actually charged.
-        const receiptData = targetPrintType === 'cashier' ? { ...updated, previousDues: customerDue } : updated;
+        // Adding items to an already-fired order should only send the
+        // NEW items to the kitchen - reprinting the whole order's items
+        // would have the kitchen re-cook stuff they already started (or
+        // finished) on the original ticket. `payload.items` is exactly
+        // what the user just added (see addItems() below); `updated.items`
+        // is the full merged list and must never go to the kitchen here.
+        const kitchenReceiptData = payload.action === 'addItems' && payload.items
+          ? { ...updated, items: payload.items }
+          : updated;
+        const receiptData = targetPrintType === 'cashier' ? { ...updated, previousDues: customerDue } : kitchenReceiptData;
 
         if (targetPrintType === 'cashier' && settings.counterPrinter) {
           ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings).catch(console.error);
         } else if (targetPrintType === 'kitchen' && settings.kitchenPrinter) {
-          ipcRenderer.invoke('print-kitchen-receipt-data', updated, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+          ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, settings.kitchenPrinter, printLogo, settings).catch(console.error);
         } else {
-          setPrintReadyUrl(`/dashboard/sales/print/${updated.id}?auto=true&type=${targetPrintType}`);
+          setPrintReadyUrl(printPageUrl(targetPrintType));
         }
       } catch {
-        setPrintReadyUrl(`/dashboard/sales/print/${updated.id}?auto=true&type=${targetPrintType}`);
+        setPrintReadyUrl(printPageUrl(targetPrintType));
       }
     } else {
-      setPrintReadyUrl(`/dashboard/sales/print/${updated.id}?auto=true&type=${targetPrintType}`);
+      setPrintReadyUrl(printPageUrl(targetPrintType));
     }
 
     return updated;
@@ -270,7 +283,12 @@ export default function SalesPage() {
       const receiptNumber = orderNumber(order);
       // Same "Previous Dues" figure the cashier saw in the Complete Payment
       // panel when they completed this order - see saveUpdate above.
-      const result = await ipcRenderer.invoke('create-customer-receipt-pdf-data', { ...order, previousDues: customerDue }, `customer_receipt_${receiptNumber}`, printLogo);
+      // settings must be passed through here too, exactly like the
+      // print-cashier/print-kitchen calls above - without it this PDF's
+      // ReceiptPdf() has no receiptHeader to read and silently falls back
+      // to a hardcoded store name instead of whatever was configured in
+      // Settings -> Manage Receipt.
+      const result = await ipcRenderer.invoke('create-customer-receipt-pdf-data', { ...order, previousDues: customerDue }, `customer_receipt_${receiptNumber}`, printLogo, settings);
       if (!isReceiptPdfResult(result) || !result.success || !result.pdfPath) {
         throw new Error(isReceiptPdfResult(result) ? result.error || 'Customer receipt PDF was not created.' : 'Invalid receipt PDF response.');
       }
@@ -333,7 +351,9 @@ export default function SalesPage() {
   return (
     <div className="space-y-6">
       {status ? <Banner tone={status.tone} text={status.text} /> : null}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-4">
+      {/* Fixed 4-up grid (not auto-fit) so these always sit in a single
+          compact row instead of wrapping to 2 across on narrower windows. */}
+      <div className="grid grid-cols-4 gap-2">
         <StatCard label="Pending Orders" value={String(visibleOrders.filter((order) => order.status === 'pending').length)} />
         <StatCard label="Completed" value={String(visibleOrders.filter((order) => order.status === 'completed').length)} />
         <StatCard label="Cancelled" value={String(visibleOrders.filter((order) => order.status === 'cancelled').length)} />
@@ -346,23 +366,23 @@ export default function SalesPage() {
           collapsing to a single stacked column on narrower windows. */}
       <div className="grid grid-cols-[minmax(0,1fr)_260px] gap-3 sm:grid-cols-[minmax(0,1fr)_300px] sm:gap-4 lg:min-h-[calc(100vh-14rem)] lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,26%)] lg:gap-6 lg:items-stretch">
         <section className="min-w-0 space-y-5 lg:flex lg:min-h-0 lg:flex-col">
-          <div className="rounded-[32px] bg-white p-5 shadow-sm">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="rounded-[24px] bg-white p-3.5 shadow-sm">
+            <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search orders, tables, customers, waiters" className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-4 pl-12 pr-4 outline-none focus:border-[#D6E332]" />
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={15} />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search orders, tables, customers, waiters" className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-2.5 pl-10 pr-4 text-sm outline-none focus:border-[#D6E332]" />
               </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <p className="max-w-xs text-xs font-bold text-gray-400">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="max-w-xs text-[11px] font-bold text-gray-400">
                   {shopSession
                     ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - not split by calendar date.`
                     : 'No shift recorded yet. Open the shop to start taking orders.'}
                 </p>
-                <button type="button" onClick={() => void refresh()} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white"><RefreshCcw size={16} className="mr-2 inline" />Refresh</button>
+                <button type="button" onClick={() => void refresh()} className="shrink-0 rounded-2xl bg-black px-3 py-2 text-xs font-black text-white"><RefreshCcw size={13} className="mr-1.5 inline" />Refresh</button>
               </div>
             </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {filters.map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-4 py-2 text-sm font-bold ${filter === item ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500'}`}>{item}</button>)}
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              {filters.map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-3 py-1.5 text-xs font-bold ${filter === item ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500'}`}>{item}</button>)}
             </div>
           </div>
 
@@ -373,23 +393,27 @@ export default function SalesPage() {
             // cards resize fluidly with the available width (which now
             // varies since the detail panel is always pinned to the right)
             // instead of ever needing a horizontal scrollbar.
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-2.5 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
               {visibleOrders.map((order) => (
-                <button key={order.id} type="button" onClick={() => setSelectedOrder(order)} className={`min-w-0 overflow-hidden rounded-[28px] border p-4 text-left shadow-sm transition hover:-translate-y-0.5 ${selectedOrder?.id === order.id ? 'border-[#D6E332] bg-[#FBFDEB]' : 'border-transparent bg-white'}`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate text-xs font-black uppercase tracking-[0.18em] text-gray-400">{age(order.createdAt)}</p>
-                      <h3 className="mt-1.5 truncate text-lg font-black text-gray-900">Order #{orderNumber(order)}</h3>
-                      <p className="mt-1 truncate text-xs font-semibold text-gray-500">{formatOrderDateTime(order.createdAt)}</p>
-                    </div>
-                    <span className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-black uppercase ${order.status === 'pending' ? 'bg-amber-100 text-amber-700' : order.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{order.status}</span>
+                <button key={order.id} type="button" onClick={() => setSelectedOrder(order)} className={`min-w-0 overflow-hidden rounded-[18px] border p-2.5 text-left shadow-sm transition hover:-translate-y-0.5 ${selectedOrder?.id === order.id ? 'border-[#D6E332] bg-[#FBFDEB]' : 'border-transparent bg-white'}`}>
+                  {/* The order # is the single most important thing on this
+                      card - it shares its own full-width line instead of
+                      competing with the status badge for space, so it never
+                      gets clipped ("Order #0..."), and gets a bit of extra
+                      top margin so it reads as clearly separate from the
+                      age/status row above it, not squeezed together. */}
+                  <div className="flex items-center justify-between gap-1.5">
+                    <p className="truncate text-[9px] font-black uppercase tracking-[0.14em] text-gray-400">{age(order.createdAt)}</p>
+                    <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-black uppercase ${order.status === 'pending' ? 'bg-amber-100 text-amber-700' : order.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{order.status}</span>
                   </div>
-                  <div className="mt-4 space-y-1.5 text-sm text-gray-600">
-                    <Line icon={<UserRound size={15} />} text={label(order)} />
-                    <Line icon={<Phone size={15} />} text={phoneLabel(order)} />
-                    <Line icon={<ShoppingBag size={15} />} text={`${prettyType(order)} • ${order.items.length} items`} />
+                  <h3 className="mt-2 break-words text-sm font-black text-gray-900">Order #{orderNumber(order)}</h3>
+                  <p className="mt-0.5 truncate text-[10px] font-semibold text-gray-500">{formatOrderDateTime(order.createdAt)}</p>
+                  <div className="mt-2 space-y-0.5 text-[11px] text-gray-600">
+                    <Line icon={<UserRound size={11} />} text={label(order)} />
+                    <Line icon={<Phone size={11} />} text={phoneLabel(order)} />
+                    <Line icon={<ShoppingBag size={11} />} text={`${prettyType(order)} • ${order.items.length} items`} />
                   </div>
-                  <div className="mt-4 truncate rounded-[20px] bg-[#F8F9FB] px-3.5 py-3 text-sm font-black text-gray-900">Rs {order.total}</div>
+                  <div className="mt-2 truncate rounded-[12px] bg-[#F8F9FB] px-2.5 py-1.5 text-xs font-black text-gray-900">Rs {order.total}</div>
                 </button>
               ))}
             </div>
@@ -563,8 +587,8 @@ function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toL
 
 function Banner({ tone, text }: { tone: 'success' | 'error' | 'info'; text: string }) { return <div className={`rounded-[28px] border px-5 py-4 text-sm shadow-sm ${tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : tone === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-sky-200 bg-sky-50 text-sky-700'}`}>{text}</div>; }
 function Surface({ text }: { text: string }) { return <div className="rounded-[32px] bg-white p-8 text-sm text-gray-500 shadow-sm">{text}</div>; }
-function StatCard({ label, value }: { label: string; value: string }) { return <div className="rounded-[28px] bg-white px-5 py-5 shadow-sm"><p className="text-[11px] font-black uppercase tracking-[0.18em] text-gray-400">{label}</p><p className="mt-2 text-3xl font-black text-gray-900">{value}</p></div>; }
-function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="flex min-w-0 items-center gap-2 text-sm text-gray-600"><span className="shrink-0">{icon}</span><span className="truncate">{text}</span></div>; }
+function StatCard({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[16px] bg-white px-3 py-2.5 shadow-sm"><p className="truncate text-[9px] font-black uppercase tracking-[0.1em] text-gray-400">{label}</p><p className="mt-0.5 truncate text-lg font-black text-gray-900">{value}</p></div>; }
+function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="flex min-w-0 items-center gap-2 text-xs text-gray-600"><span className="shrink-0">{icon}</span><span className="truncate">{text}</span></div>; }
 function Box({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3"><p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{label}</p><p className="mt-1 break-words text-sm font-bold text-gray-900">{value}</p></div>; }
 function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) { return <div className={`flex items-center justify-between py-1.5 ${strong ? 'text-lg font-black text-gray-900' : 'text-sm text-gray-500'}`}><span>{label}</span><span>{value}</span></div>; }
 function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) { return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm sm:p-6"><div className={`flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] bg-white shadow-2xl transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-gray-100 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-3 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>; }

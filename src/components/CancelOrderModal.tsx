@@ -2,6 +2,42 @@ import { useState } from 'react';
 import { Lock, XCircle } from 'lucide-react';
 import { cancelOrder } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
+import { getStoreSettings } from '@/lib/pos-settings';
+
+type ElectronWindow = Window & typeof globalThis & {
+  require?: (moduleName: 'electron') => {
+    ipcRenderer: {
+      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    };
+  };
+};
+
+// Fires the "stop preparation" kitchen ticket the instant an order is
+// cancelled, so the kitchen doesn't keep cooking items nobody's paying
+// for anymore. Mirrors how POSPage.tsx prints the original kitchen
+// ticket on order creation - same printer, same IPC pattern - just a
+// different receipt type ("kitchen-cancel", see main.js) that prints
+// "*** ORDER CANCELLED ***" plus the reason instead of prices.
+function printKitchenCancelTicket(order: SavedOrder) {
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter) {
+      ipcRenderer.invoke('print-kitchen-cancel-receipt-data', order, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+    } else {
+      console.warn('No kitchen printer configured in settings - cancel ticket not printed.');
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen cancel ticket):', err);
+  }
+}
 
 // Shared by SalesPage and RecordPage so both places cancel an order the
 // same way: the shop's Cancel Order Key (set per-shop by the Super Admin -
@@ -33,7 +69,10 @@ export default function CancelOrderModal({
     setError('');
     try {
       const updated = await cancelOrder(order.id, { key: key.trim(), reason: reason.trim() || undefined });
-      if (updated) onCancelled(updated);
+      if (updated) {
+        printKitchenCancelTicket(updated);
+        onCancelled(updated);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to cancel order.');
     } finally {

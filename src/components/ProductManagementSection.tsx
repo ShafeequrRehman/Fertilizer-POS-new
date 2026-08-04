@@ -30,7 +30,7 @@ const AVAILABLE_ICONS = [
   "cold-coffee.svg",
   // Added for pizza/desi-menu items (pizza slice, paratha roll, etc.)
   "pizza-slice.svg", "paratha-roll.svg", "chicken-roll.svg", "biryani.svg",
-  "chai-tea.svg", "samosa.svg", "sandwich.svg", "nuggets.svg"
+  "chai-tea.svg", "samosa.svg", "sandwich.svg", "nuggets.svg", "chicken-wings.svg"
 ];
 
 export function ProductManagementSection({
@@ -59,14 +59,19 @@ export function ProductManagementSection({
   const [image, setImage] = useState("");
   const [variation, setVariation] = useState("Standard");
 
-  // Variations states (Products only)
-  const [hasVariations, setHasVariations] = useState(false);
+  // Variations states (Products only) - defaults ON, see resetForm() below.
+  const [hasVariations, setHasVariations] = useState(true);
   const [variationsData, setVariationsData] = useState<Array<{ id: string; name: string; price: string; qty: string }>>([
     { id: "1", name: "", price: "", qty: "" },
   ]);
 
   // Deals states
   const [dealItems, setDealItems] = useState<string[]>([]);
+  // Filters the "Select Items for this Deal" checkbox grid below - with
+  // 100+ products in the full catalog, scrolling to find one by eye was
+  // the actual complaint, so this is purely a client-side name/category
+  // filter over the same `products` list already in memory.
+  const [dealItemSearch, setDealItemSearch] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -106,9 +111,22 @@ export function ProductManagementSection({
     setImage("");
     setFormType("Product");
     setVariation("Standard");
-    setHasVariations(false);
+    // Defaults to ON for a brand new product - most menu items (pizzas,
+    // burgers, etc.) come in more than one size, so leading with the
+    // Small/Medium/Large rows front-and-center is the common case. A
+    // single-price item (like a canned drink) is still just one unchecked
+    // click away.
+    setHasVariations(true);
     setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "" }]);
     setDealItems([]);
+  }
+
+  // One-tap presets for the most common size/flavour patterns - replaces
+  // whatever rows are currently in the variations list so picking a preset
+  // twice doesn't pile up duplicates.
+  function applySizePreset(names: string[]) {
+    setHasVariations(true);
+    setVariationsData(names.map((n, i) => ({ id: `${Date.now()}-${i}`, name: n, price: "", qty: "" })));
   }
 
   function getBasePayload() {
@@ -360,9 +378,9 @@ export function ProductManagementSection({
         {/* Toggle Form Type */}
         {!editingId && (
           <div className="flex bg-slate-200/40 p-1.5 rounded-[20px] mb-2">
-            <button 
+            <button
               type="button"
-              onClick={() => { setFormType("Product"); setHasVariations(false); }} 
+              onClick={() => { setFormType("Product"); setHasVariations(true); }}
               className={`flex-1 py-3 px-4 rounded-2xl text-sm transition-all ${formType === "Product" ? "bg-white text-indigo-700 font-black shadow-sm" : "text-slate-500 font-bold hover:text-slate-900 hover:bg-slate-200/50"}`}>
               Add Product
             </button>
@@ -381,43 +399,83 @@ export function ProductManagementSection({
           </h4>
         )}
         
+        {/* Category comes first on purpose - it's the top of the hierarchy
+            (Category -> Sub Category/Item -> Sizes) a menu naturally follows,
+            e.g. "Pizza" -> "Behari Kabab" -> Small/Medium/Large. Existing
+            categories are one tap away as chips so building out a menu
+            doesn't mean retyping "Pizza" for every single item. */}
+        {formType === "Product" && (
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
+            <input
+              type="text"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              list="categories-list"
+              placeholder="e.g. Pizza"
+              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            />
+            <datalist id="categories-list">
+              {categories.map((c, i) => (
+                <option key={i} value={c} />
+              ))}
+            </datalist>
+            {categories.filter((c) => c !== "All").length > 0 ? (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {categories.filter((c) => c !== "All").map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setCategory(c)}
+                    className={`rounded-full px-3.5 py-1.5 text-[11px] font-black transition-all ${category === c ? "bg-indigo-600 text-white shadow-sm" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-600"}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{formType} Name</label>
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">
+              {formType === "Deal" ? "Deal Name" : "Sub Category (Item Name)"}
+            </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={formType === "Deal" ? "e.g. Family Feast Combo" : "e.g. Zinger Burger"}
+              placeholder={formType === "Deal" ? "e.g. Family Feast Combo" : "e.g. Behari Kabab"}
               className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
             />
+            {formType === "Product" ? (
+              <p className="text-[10px] font-bold text-slate-400 ml-1">This is what shows as its own card under "{category || "Category"}" - add its sizes/flavours below.</p>
+            ) : null}
           </div>
-
-          {formType === "Product" && (
-            <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
-              <input
-                type="text"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                list="categories-list"
-                placeholder="e.g. Pizzas"
-                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-              />
-              <datalist id="categories-list">
-                {categories.map((c, i) => (
-                  <option key={i} value={c} />
-                ))}
-              </datalist>
-            </div>
-          )}
         </div>
 
         {formType === "Deal" && (
            <div className="space-y-2">
-             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2"><ListChecks size={14} /> Select Items for this Deal</label>
+             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2"><ListChecks size={14} /> Select Items for this Deal {dealItems.length > 0 ? <span className="text-indigo-500">({dealItems.length} selected)</span> : null}</label>
+             <div className="relative">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <input
+                   value={dealItemSearch}
+                   onChange={(event) => setDealItemSearch(event.target.value)}
+                   placeholder="Search products to add..."
+                   className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm font-semibold outline-none focus:border-indigo-400"
+                />
+             </div>
              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[280px] overflow-y-auto p-4 bg-slate-100/50 rounded-3xl ring-1 ring-slate-200 inset-shadow-sm">
-                {products.filter(p => !p.isDeal && !p.category.toLowerCase().includes("deal")).map(p => {
+                {products
+                  .filter(p => !p.isDeal && !p.category.toLowerCase().includes("deal"))
+                  .filter(p => {
+                     const q = dealItemSearch.trim().toLowerCase();
+                     if (!q) return true;
+                     return p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || (p.variation || "").toLowerCase().includes(q);
+                  })
+                  .map(p => {
                    const isSelected = dealItems.includes(String(p.id));
                    return (
                      <label key={p.id} className={`flex items-start gap-4 p-4 rounded-[20px] cursor-pointer transition-all ${isSelected ? 'bg-indigo-600 ring-2 ring-indigo-600 shadow-md text-white' : 'bg-white ring-1 ring-slate-200 hover:ring-indigo-300 text-slate-700'}`}>
@@ -497,29 +555,41 @@ export function ProductManagementSection({
         {formType === "Product" && !editingId && (
           <div className="pt-2">
             <label className="flex items-center gap-3 cursor-pointer mb-4 p-4 rounded-2xl bg-white ring-1 ring-slate-200 hover:bg-slate-50 transition-colors">
-              <input 
-                type="checkbox" 
-                checked={hasVariations} 
+              <input
+                type="checkbox"
+                checked={hasVariations}
                 onChange={(e) => {
                   setHasVariations(e.target.checked);
                   if (e.target.checked) setPrice("");
-                }} 
-                className="w-5 h-5 text-indigo-600 rounded accent-indigo-600" 
+                }}
+                className="w-5 h-5 text-indigo-600 rounded accent-indigo-600"
               />
               <div className="flex flex-col">
-                <span className="text-sm font-black text-slate-800">Add multiple variations</span>
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">e.g. Sizes, Flavors</span>
+                <span className="text-sm font-black text-slate-800">Add sizes / flavours</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">e.g. Small, Medium, Large - each with its own price</span>
               </div>
             </label>
-            
+
             {hasVariations && (
               <div className="space-y-3 pl-6 border-l-2 border-indigo-100 py-2">
+                <div className="flex flex-wrap items-center gap-2 pb-1">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Quick fill:</span>
+                  <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
+                    Small / Medium / Large
+                  </button>
+                  <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large", "X-Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
+                    + X-Large
+                  </button>
+                  <button type="button" onClick={() => applySizePreset(["Half", "Full"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
+                    Half / Full
+                  </button>
+                </div>
                 {variationsData.map((v, i) => (
                   <div key={v.id} className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-2xl ring-1 ring-slate-200 shadow-sm relative group">
                     <div className="flex-1 min-w-[150px]">
                       <input 
                         type="text" 
-                        placeholder="Variation Name (e.g. Half, Large)" 
+                        placeholder="Size / Flavour Name (e.g. Small)"
                         value={v.name} 
                         onChange={(e) => {
                           const newVars = [...variationsData];

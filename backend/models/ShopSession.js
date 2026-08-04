@@ -9,8 +9,19 @@ const mongoose = require("mongoose");
 // summary computed from Orders created in [openedAt, closedAt) at close
 // time - see controllers/shopSessionController.js.
 //
-// Only one session per shop should ever be "open" at a time - enforced in
-// the controller (openSession refuses if one is already open), not here.
+// Only one session per shop should ever be "open" at a time. The
+// controller's openSession does a friendly find-then-create check first
+// (so a normal double-click just gets a clean "already open" error), but
+// that check-then-create is not atomic on its own - two concurrent open
+// requests (double-click, two tabs/devices) could both pass the check and
+// each create their own "open" session for the same shop. The partial
+// unique index below is what actually makes that impossible at the
+// database level: MongoDB itself will reject the second insert with an
+// E11000 duplicate-key error, which openSession catches and turns into the
+// same friendly "already open" response. Without this, a duplicate open
+// session could silently start its own orderCounter at 0, which is exactly
+// what caused order numbers to reset mid-shift instead of continuing
+// (createOrder's findOneAndUpdate could land on either session).
 const shopSessionSchema = new mongoose.Schema(
   {
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", required: true, index: true },
@@ -50,5 +61,12 @@ const shopSessionSchema = new mongoose.Schema(
 );
 
 shopSessionSchema.index({ shopId: 1, status: 1 });
+// Partial unique index: only applies to documents where status is "open",
+// so a shop can have unlimited "closed" session history but never more
+// than one "open" session at once.
+shopSessionSchema.index(
+  { shopId: 1 },
+  { unique: true, partialFilterExpression: { status: "open" }, name: "one_open_session_per_shop" }
+);
 
 module.exports = mongoose.model("ShopSession", shopSessionSchema);

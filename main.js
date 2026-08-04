@@ -436,7 +436,12 @@ if (!gotTheLock) {
 
   const mmToPt = (mm) => (mm * 72) / 25.4;
   const RECEIPT_WIDTH_PT = mmToPt(80);
-  const RECEIPT_CONTENT_WIDTH_PT = mmToPt(72);
+  // Was 72mm, leaving only ~4mm of margin per side on an 80mm roll - too
+  // tight a safety margin against real-world thermal printer calibration
+  // drift, which is why price digits on the right (e.g. "Rs 550.00") were
+  // getting clipped by the actual printer even though they measured fine
+  // on-screen. 68mm gives an extra ~2mm of buffer on each side.
+  const RECEIPT_CONTENT_WIDTH_PT = mmToPt(68);
   const h = React.createElement;
 
   function formatReceiptDate(value) {
@@ -463,11 +468,17 @@ if (!gotTheLock) {
   function estimateReceiptHeightPt(orderData, type, hasLogo) {
     let h = 50; // paddingBottom + safety margin
 
-    if (hasLogo) h += 85;
+    if (hasLogo) h += 115;
     h += 60; // Store Name + address + rule
     h += 65; // Order label + large number + rule
     if (type === "kitchen") h += 25;
-    
+    // kitchen-cancel (whole order cancelled) and kitchen-remove (some
+    // items edited out of a still-active order) both print two label
+    // lines instead of kitchen's one, plus an optional reason line -
+    // see ReceiptPdf below.
+    if (type === "kitchen-cancel" || type === "kitchen-remove") h += 50;
+    if (type === "kitchen-cancel" && orderData?.cancelReason) h += 20;
+
     h += 45; // Date, Time, Type
     if (orderData?.customer?.name) h += 15;
     if (orderData?.table) h += 15;
@@ -520,7 +531,7 @@ if (!gotTheLock) {
       fontSize: 14,
       fontWeight: "bold",
       marginTop: 0,
-      marginBottom: 2,
+      marginBottom: 4, // ~5px gap down to the sub-heading line below it
       textAlign: "center",
     },
     small: {
@@ -567,6 +578,23 @@ if (!gotTheLock) {
       marginTop: 4,
       marginBottom: 2,
     },
+    // Deliberately louder than the normal kitchen ticketLabel (bigger,
+    // red) - this is the one label a busy kitchen printer needs to be
+    // impossible to miss at a glance among a stack of tickets.
+    ticketLabelCancel: {
+      fontSize: 13,
+      fontWeight: "bold",
+      textAlign: "center",
+      marginTop: 4,
+      marginBottom: 2,
+      color: "#C0392B",
+    },
+    cancelReason: {
+      fontSize: 9,
+      fontWeight: "bold",
+      textAlign: "center",
+      marginBottom: 4,
+    },
     meta: {
     },
     variation: {
@@ -585,6 +613,8 @@ if (!gotTheLock) {
     rowRight: {
       flexGrow: 0,
       flexShrink: 0,
+      fontSize: 8.5, // slightly smaller than the base 9.5 so a wide price
+      // ("Rs 1234.00") never has to fight the right-hand margin for room
     },
     footer: {
       fontSize: 9,
@@ -613,7 +643,13 @@ if (!gotTheLock) {
     return h(Document, null,
       h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
         h(View, { style: receiptStyles.center },
-          printLogo ? h(Image, { src: printLogo, style: { width: 70, height: 70, marginBottom: 5, objectFit: 'contain' } }) : null,
+          // No fixed height here on purpose - a fixed square box with
+          // objectFit:'contain' letterboxes any logo that isn't itself
+          // square, which is exactly the visible blank strip above/below
+          // the logo on a printed receipt. Capping only the width and
+          // letting react-pdf scale height by the image's own aspect ratio
+          // means the logo fills its box edge-to-edge for any shape logo.
+          printLogo ? h(Image, { src: printLogo, style: { width: 95, marginBottom: 0 } }) : null,
           h(Text, { style: receiptStyles.storeName }, settings?.receiptHeader || "THE HEAVEN SLICE"),
           settings?.receiptSubHeader ? h(Text, { style: receiptStyles.small }, settings.receiptSubHeader) : null,
           settings?.receiptAddress ? h(Text, { style: receiptStyles.small }, settings.receiptAddress) : null,
@@ -622,8 +658,17 @@ if (!gotTheLock) {
         ),
         h(View, { style: receiptStyles.rule }),
         h(Text, { style: receiptStyles.orderLabel }, "ORDER NO."),
-        h(Text, { style: type === "kitchen" ? receiptStyles.orderNumberKitchen : receiptStyles.orderNumber }, orderNumber),
+        h(Text, { style: (type === "kitchen" || type === "kitchen-cancel" || type === "kitchen-remove") ? receiptStyles.orderNumberKitchen : receiptStyles.orderNumber }, orderNumber),
         type === "kitchen" ? h(Text, { style: receiptStyles.ticketLabel }, "*** KITCHEN TICKET ***") : null,
+        type === "kitchen-cancel" ? h(Text, { style: receiptStyles.ticketLabelCancel }, "*** ORDER CANCELLED ***") : null,
+        type === "kitchen-cancel" ? h(Text, { style: receiptStyles.ticketLabel }, "STOP PREPARATION / DISCARD ITEMS") : null,
+        type === "kitchen-cancel" && orderData?.cancelReason ? h(Text, { style: receiptStyles.cancelReason }, `REASON: ${String(orderData.cancelReason).toUpperCase()}`) : null,
+        // The order itself is still active here - only these specific
+        // items were edited out - so the wording deliberately does NOT
+        // say "ORDER CANCELLED" (that would wrongly tell the kitchen to
+        // stop the whole ticket, see kitchen-cancel above).
+        type === "kitchen-remove" ? h(Text, { style: receiptStyles.ticketLabelCancel }, "*** ITEMS REMOVED FROM ORDER ***") : null,
+        type === "kitchen-remove" ? h(Text, { style: receiptStyles.ticketLabel }, "DO NOT PREPARE / DISCARD BELOW ITEMS") : null,
         h(View, { style: receiptStyles.rule }),
         h(View, { style: receiptStyles.meta },
           h(Text, null, `DATE: ${formatReceiptDate(orderData?.createdAt)}`),
@@ -653,11 +698,11 @@ if (!gotTheLock) {
         type === "cashier" ? h(View, null,
           h(View, { style: receiptStyles.row },
             h(Text, null, "Items Total:"),
-            h(Text, null, `Rs ${total.toFixed(2)}`)
+            h(Text, { style: receiptStyles.rowRight }, `Rs ${total.toFixed(2)}`)
           ),
           h(View, { style: receiptStyles.row },
             h(Text, { style: receiptStyles.bold }, "TOTAL:"),
-            h(Text, { style: receiptStyles.bold }, `Rs ${total.toFixed(2)}`)
+            h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${total.toFixed(2)}`)
           ),
           h(Text, { style: { marginTop: 6 } }, `PAID: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
           amountTendered !== undefined ? h(Text, null, `AMOUNT TENDERED: Rs ${amountTendered.toFixed(2)}`) : null,
@@ -665,7 +710,7 @@ if (!gotTheLock) {
           previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `PREVIOUS DUES: Rs ${previousDues.toFixed(2)}`) : null,
           previousDues > 0 ? h(View, { style: receiptStyles.row },
             h(Text, { style: receiptStyles.bold }, "TOTAL OUTSTANDING:"),
-            h(Text, { style: receiptStyles.bold }, `Rs ${(total + previousDues).toFixed(2)}`)
+            h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${(total + previousDues).toFixed(2)}`)
           ) : null,
           h(View, { style: receiptStyles.dashedRule })
         ) : null,
@@ -711,6 +756,40 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle("print-kitchen-cancel-receipt-data", async (_event, orderData, printerName, printLogo, settings) => {
+    if (!printerName) {
+      return { success: false, error: "No kitchen printer configured" };
+    }
+
+    try {
+      const result = await createReceiptPdfFromOrderData(orderData, "kitchen-cancel", "kitchen_cancel_receipt", printLogo, settings);
+      await printReceiptPdfFile(result.pdfPath, printerName);
+      fs.unlink(result.pdfPath, () => {});
+      logRuntime(`ReactPDF kitchen cancel receipt printed on ${printerName}`);
+      return { success: true };
+    } catch (error) {
+      logRuntime(`ReactPDF kitchen cancel receipt print failed: ${error}`);
+      return { success: false, error: error.toString() };
+    }
+  });
+
+  ipcMain.handle("print-kitchen-remove-receipt-data", async (_event, orderData, printerName, printLogo, settings) => {
+    if (!printerName) {
+      return { success: false, error: "No kitchen printer configured" };
+    }
+
+    try {
+      const result = await createReceiptPdfFromOrderData(orderData, "kitchen-remove", "kitchen_remove_receipt", printLogo, settings);
+      await printReceiptPdfFile(result.pdfPath, printerName);
+      fs.unlink(result.pdfPath, () => {});
+      logRuntime(`ReactPDF kitchen remove-items receipt printed on ${printerName}`);
+      return { success: true };
+    } catch (error) {
+      logRuntime(`ReactPDF kitchen remove-items receipt print failed: ${error}`);
+      return { success: false, error: error.toString() };
+    }
+  });
+
   ipcMain.handle("print-cashier-receipt-data", async (_event, orderData, printerName, printLogo, settings) => {
     if (!printerName) {
       return { success: false, error: "No cashier printer configured" };
@@ -728,9 +807,9 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle("create-customer-receipt-pdf-data", async (_event, orderData, filePrefix, printLogo) => {
+  ipcMain.handle("create-customer-receipt-pdf-data", async (_event, orderData, filePrefix, printLogo, settings) => {
     try {
-      return await createReceiptPdfFromOrderData(orderData, "cashier", filePrefix || "customer_receipt", printLogo);
+      return await createReceiptPdfFromOrderData(orderData, "cashier", filePrefix || "customer_receipt", printLogo, settings);
     } catch (error) {
       logRuntime(`ReactPDF customer receipt creation failed: ${error}`);
       return { success: false, error: error.toString() };
@@ -926,11 +1005,21 @@ if (!gotTheLock) {
         logRuntime(`Dev mode: attaching to external dev server at ${devServerUrl}`);
         await loadApp(devServerUrl);
       } else {
-        // `npm run electron` (standalone) and the packaged production app:
-        // start the Express backend in-process, then load the static
-        // production build (dist/index.html) produced by `vite build`.
-        logRuntime("Starting backend server...");
-        await startBackendServer();
+        // `npm run electron` (standalone) and the packaged production app.
+        //
+        // If VITE_API_URL is set (see pos-web/.env), the backend now runs
+        // centrally on a server instead of in-process on this till - see
+        // backend/README-deploy.md. Starting a redundant local backend in
+        // that case would pointlessly try to connect to Atlas from every
+        // till and serve on a port nothing talks to (src/lib/api.ts
+        // already prefers VITE_API_URL over localhost:5000 - see
+        // DEFAULT_CLOUD_API_BASES there), so skip it entirely.
+        if (process.env.VITE_API_URL) {
+          logRuntime(`VITE_API_URL is set (${process.env.VITE_API_URL}) - skipping local backend, this till talks to the remote server only.`);
+        } else {
+          logRuntime("Starting backend server...");
+          await startBackendServer();
+        }
         await loadApp();
       }
     } catch (error) {

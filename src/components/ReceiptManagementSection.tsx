@@ -88,7 +88,7 @@ export function ReceiptManagementSection({ settings, onChange, printLogo }: Prop
         {/* Receipt Mockup */}
         <div className="bg-white border border-slate-200 shadow-md p-6 w-[300px] text-center shrink-0" style={{ fontFamily: 'monospace' }}>
           {printLogo && (
-            <img src={printLogo} alt="Logo" className="max-w-[80px] mx-auto mb-2 grayscale" />
+            <img src={printLogo} alt="Logo" className="max-w-[110px] mx-auto mb-2 grayscale" />
           )}
           
           <h2 className="font-bold text-xl uppercase leading-tight mt-2">

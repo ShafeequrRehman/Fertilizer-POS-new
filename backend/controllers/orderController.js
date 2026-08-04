@@ -101,10 +101,17 @@ exports.createOrder = async (req, res) => {
     // "#001" tickets under real-world concurrent submissions). A dropped
     // request after this point burns a number (a small gap in the
     // sequence), which is a fine trade-off for guaranteeing no duplicates.
+    // Defense-in-depth: ShopSession now has a partial unique index that
+    // makes more than one "open" session per shop impossible going forward
+    // (see models/ShopSession.js), but this `sort` guarantees that if any
+    // legacy duplicate ever slips through some other way, the oldest (the
+    // one actually carrying the real running count) always wins rather
+    // than a non-deterministic match landing on a fresher duplicate whose
+    // orderCounter defaults to 0.
     const openSession = await ShopSession.findOneAndUpdate(
       { ...buildShopScope(req), status: "open" },
       { $inc: { orderCounter: 1 } },
-      { new: true }
+      { new: true, sort: { openedAt: 1 } }
     );
     if (!openSession) {
       return res.status(409).json({ error: "The shop is closed. Open the shop before taking new orders.", reason: "shop_closed" });

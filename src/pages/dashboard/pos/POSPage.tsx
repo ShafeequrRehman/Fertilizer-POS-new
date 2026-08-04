@@ -494,9 +494,13 @@ export default function POSPage() {
                 <IconToggleButton active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={18} /></IconToggleButton>
               </div>
             </div>
-            <div className="mt-4 flex gap-3 overflow-x-auto pb-1">
+            {/* Wraps onto as many lines as needed instead of scrolling
+                sideways - every category is visible and one tap away
+                instead of needing to drag a horizontal scrollbar to find
+                it, which is what this replaces. */}
+            <div className="mt-4 flex flex-wrap gap-1.5">
               {categories.map((category) => (
-                <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-5 py-2.5 text-sm font-bold transition ${activeCategory === category ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500 hover:bg-gray-100'}`}>
+                <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-bold transition ${activeCategory === category ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500 hover:bg-gray-100'}`}>
                   {category}
                 </button>
               ))}
@@ -550,9 +554,13 @@ export default function POSPage() {
                         </div>
                       ) : null}
                     </div>
-                    <div className={`flex items-center justify-between gap-1 ${viewMode === 'list' ? '' : 'mt-3 pt-2 border-t border-gray-50'}`}>
-                      <span className="min-w-0 truncate text-[12px] font-black text-gray-900">{hasVariations ? `From PKR ${cheapestPrice}` : `PKR ${group.variations[0].price}`}</span>
-                      <span className="shrink-0 rounded-[8px] flex items-center justify-center bg-black h-[22px] px-2 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? 'Select' : 'Add'}</span>
+                    {/* Price gets its own line instead of sharing a row with
+                        the Select/Add button - squeezed side by side the two
+                        were fighting for width and the price (the important
+                        part) was the one getting truncated ("From PKR ..."). */}
+                    <div className={`${viewMode === 'list' ? '' : 'mt-3 pt-2 border-t border-gray-50'}`}>
+                      <p className="truncate text-[12px] font-black text-gray-900">{hasVariations ? `From PKR ${cheapestPrice}` : `PKR ${group.variations[0].price}`}</p>
+                      <span className="mt-1.5 inline-flex w-fit shrink-0 items-center justify-center rounded-[8px] bg-black h-[22px] px-2.5 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? 'Select' : 'Add'}</span>
                     </div>
                   </div>
                 </button>

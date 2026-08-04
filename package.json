@@ -11,6 +11,7 @@
     "dev:backend": "wait-on tcp:5173 && node backend/index.js",
     "dev:electron": "wait-on tcp:5173 tcp:5000 && cross-env ELECTRON_DEV_SERVER_URL=http://localhost:5173 electron .",
     "dev:web": "concurrently \"vite\" \"node backend/index.js\"",
+    "start:server": "node backend/index.js",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint",
@@ -20,7 +21,9 @@
     "postinstall": "electron-builder install-app-deps",
     "migrate": "node backend/scripts/migrateToMultiTenant.js",
     "reset-admin": "node backend/scripts/resetAdminPassword.js",
-    "fix-admin-role": "node backend/scripts/fixSuperAdminRole.js"
+    "fix-admin-role": "node backend/scripts/fixSuperAdminRole.js",
+    "export-menu": "node backend/scripts/exportMenuData.js",
+    "import-menu": "node backend/scripts/importMenuData.js"
   },
   "build": {
     "appId": "com.pos.system",

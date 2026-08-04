@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Eye, Lock, Search, XCircle } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { AlertCircle, Download, Eye, Lock, Printer, Search, X, XCircle } from 'lucide-react';
 import { fetchOrders, fetchShopSessionHistory } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
 import { hasPermission } from '@/lib/auth';
+import { getBusinessWindow, filterOrdersInBusinessWindow, filterOrdersInBusinessWindows, getSessionDateKey } from '@/lib/shop-session';
 import CancelOrderModal from '@/components/CancelOrderModal';
 
 type StatusFilter = 'All' | 'pending' | 'completed' | 'paid' | 'cancelled';
+type SearchField = 'all' | 'name' | 'phone' | 'orderId';
 
 const STATUS_TABS: { key: StatusFilter; label: string }[] = [
   { key: 'All', label: 'All' },
@@ -15,18 +18,27 @@ const STATUS_TABS: { key: StatusFilter; label: string }[] = [
   { key: 'cancelled', label: 'Cancelled' },
 ];
 
-// The "day" here is exactly the current/most recent shop shift - same
-// definition used on the Dashboard (see DashboardPageClient.tsx
-// getBusinessWindow) - not a fixed clock window. While a shift is open the
-// window is [openedAt, now) and keeps growing; once closed it freezes at
-// [openedAt, closedAt), so this stays "today's record" until the next
-// Open Shop starts a new one.
+// The "day" here is exactly the current/most recent shop shift - the same
+// shared definition used on the Dashboard and Sales page (see
+// getBusinessWindow / filterOrdersInBusinessWindow in
+// src/lib/shop-session.tsx, the single source of truth for this date-math)
+// - not a fixed clock window. While a shift is open the window is
+// [openedAt, now] and keeps growing; once closed it freezes at [openedAt,
+// closedAt], so this stays "today's record" until the next Open Shop
+// starts a new one.
 export default function RecordPage() {
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
+  // Full shift history (up to the last 60 shifts, per the backend) - needed
+  // so the date-range picker can find EVERY shift that opened on a picked
+  // date, not just whatever the current/latest shift happens to be.
+  const [sessionHistory, setSessionHistory] = useState<ShopSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
   const [search, setSearch] = useState('');
+  const [searchField, setSearchField] = useState<SearchField>('all');
+  const [rangeFrom, setRangeFrom] = useState('');
+  const [rangeTo, setRangeTo] = useState('');
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
   const [cancelOrderTarget, setCancelOrderTarget] = useState<SavedOrder | null>(null);
 
@@ -35,6 +47,7 @@ export default function RecordPage() {
       try {
         const [orderData, history] = await Promise.all([fetchOrders(), fetchShopSessionHistory()]);
         if (orderData) setOrders(orderData);
+        setSessionHistory(history ?? []);
         setShopSession(history && history.length > 0 ? history[0] : null);
       } catch (error) {
         console.error('Record page load error', error);
@@ -47,31 +60,99 @@ export default function RecordPage() {
     return () => clearInterval(intervalId);
   }, []);
 
-  const sessionWindow = useMemo(() => {
-    if (!shopSession) return null;
-    const start = new Date(shopSession.openedAt);
-    const end = shopSession.status === 'open' ? new Date() : new Date(shopSession.closedAt as string);
-    return { start, end };
-  }, [shopSession]);
+  const sessionWindow = useMemo(() => getBusinessWindow(shopSession, new Date()), [shopSession]);
+
+  // A picked date range is an explicit, deliberate request to browse PAST
+  // days by calendar date - the opposite of "today", which always stays
+  // shift-based. Picking From/To here doesn't change what "today" means
+  // anywhere else in the app; it only swaps what this page is looking at.
+  // Clearing either date snaps straight back to the live current-shift view.
+  //
+  // Every shift that OPENED on a picked date is matched (there can be more
+  // than one on the same day, or several days' worth for a multi-day
+  // range), and each one's own full open->close window is used - not a
+  // raw midnight-to-midnight slice of the picked date, which would miss or
+  // split a shift that ran past midnight (see getSessionDateKey in
+  // shop-session.tsx for why "opened on" is the rule, not "stamped with").
+  const isCustomRange = Boolean(rangeFrom && rangeTo);
+
+  const customWindows = useMemo(() => {
+    if (!isCustomRange) return [];
+    return sessionHistory
+      .filter((session) => {
+        const key = getSessionDateKey(session);
+        return key >= rangeFrom && key <= rangeTo;
+      })
+      .map((session) => getBusinessWindow(session, new Date()));
+  }, [isCustomRange, sessionHistory, rangeFrom, rangeTo]);
 
   const dayOrders = useMemo(() => {
-    if (!sessionWindow) return [];
-    return orders.filter((order) => {
-      const createdAt = new Date(order.createdAt);
-      return createdAt >= sessionWindow.start && createdAt <= sessionWindow.end;
-    });
-  }, [orders, sessionWindow]);
+    if (isCustomRange) return filterOrdersInBusinessWindows(orders, customWindows);
+    return filterOrdersInBusinessWindow(orders, sessionWindow);
+  }, [isCustomRange, orders, customWindows, sessionWindow]);
 
   const filteredOrders = useMemo(() => {
     return dayOrders
       .filter((order) => statusFilter === 'All' || order.status === statusFilter)
       .filter((order) => {
-        if (!search.trim()) return true;
+        const term = search.trim().toLowerCase();
+        if (!term) return true;
+        if (searchField === 'name') return (order.customer?.name ?? '').toLowerCase().includes(term);
+        if (searchField === 'phone') return (order.customer?.phone ?? '').toLowerCase().includes(term);
+        if (searchField === 'orderId') return `${order.dailyOrderNumber ?? ''} ${order.id}`.toLowerCase().includes(term);
         const haystack = `${order.dailyOrderNumber ?? ''} ${order.id} ${order.customer?.name ?? ''} ${order.customer?.phone ?? ''} ${order.table ?? ''} ${order.waiter ?? ''}`.toLowerCase();
-        return haystack.includes(search.trim().toLowerCase());
+        return haystack.includes(term);
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [dayOrders, statusFilter, search]);
+  }, [dayOrders, statusFilter, search, searchField]);
+
+  // Financial summary cards mirror the reference "Orders List & Analytics"
+  // layout - Total Orders counts every row shown, but the money figures
+  // exclude cancelled orders (they were never actually charged), matching
+  // the same convention already used by totalDiscountToday below and by
+  // the backend's own shift-close summary.
+  const orderStats = useMemo(() => {
+    const charged = dayOrders.filter((order) => order.status !== 'cancelled');
+    const totalAmount = charged.reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const paidAmount = charged.reduce((sum, order) => sum + Number(order.paidAmount ?? order.total ?? 0), 0);
+    const remainingAmount = charged.reduce((sum, order) => sum + Number(order.remainingAmount ?? 0), 0);
+    return { totalOrders: dayOrders.length, totalAmount, paidAmount, remainingAmount };
+  }, [dayOrders]);
+
+  function clearRange() {
+    setRangeFrom('');
+    setRangeTo('');
+  }
+
+  function exportCsv() {
+    const header = ['Order ID', 'Date', 'Time', 'Customer', 'Phone', 'Type', 'Status', 'Total', 'Paid', 'Remaining'];
+    const rows = filteredOrders.map((order) => {
+      const createdAt = new Date(order.createdAt);
+      const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
+      return [
+        `#${order.dailyOrderNumber ?? order.id.slice(-4)}`,
+        createdAt.toLocaleDateString('en-CA'),
+        createdAt.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }),
+        customerName,
+        order.customer?.phone || '',
+        order.orderType,
+        order.status,
+        order.total,
+        order.paidAmount ?? 0,
+        order.remainingAmount ?? 0,
+      ];
+    });
+    const csv = [header, ...rows]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `orders_${isCustomRange ? `${rangeFrom}_to_${rangeTo}` : 'current-shift'}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   const counts = useMemo(() => {
     const base: Record<StatusFilter, number> = { All: dayOrders.length, pending: 0, completed: 0, paid: 0, cancelled: 0 };
@@ -104,66 +185,131 @@ export default function RecordPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Record</h1>
-        <p className="text-xs text-gray-400">
-          {shopSession
-            ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - pending, completed, paid, and cancelled.`
-            : 'No shift recorded yet. Open the shop to start today\'s record.'}
-        </p>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold">Record</h1>
+          <p className="text-xs text-gray-400">
+            {isCustomRange
+              ? `Showing orders from ${rangeFrom} to ${rangeTo}`
+              : shopSession
+                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - pending, completed, paid, and cancelled.`
+                : 'No shift recorded yet. Open the shop to start today\'s record.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={exportCsv}
+          disabled={filteredOrders.length === 0}
+          className="flex items-center gap-2 rounded-full bg-[#D6E332] px-4 py-2 text-xs font-black text-gray-900 shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Download size={14} /> Export CSV
+        </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <StatCard label="Total Orders" value={String(orderStats.totalOrders)} />
+        <StatCard label="Total Amount" value={`Rs ${orderStats.totalAmount}`} tone="text-sky-600" />
+        <StatCard label="Paid Amount" value={`Rs ${orderStats.paidAmount}`} tone="text-emerald-600" />
+        <StatCard label="Remaining Amount" value={`Rs ${orderStats.remainingAmount}`} tone="text-rose-600" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {STATUS_TABS.map((tab) => (
           <button
             key={tab.key}
             type="button"
             onClick={() => setStatusFilter(tab.key)}
-            className={`rounded-[20px] p-4 text-left shadow-sm transition ${statusFilter === tab.key ? 'bg-black text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+            className={`rounded-[16px] p-2.5 text-left shadow-sm transition ${statusFilter === tab.key ? 'bg-black text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
           >
-            <p className={`text-[10px] font-black uppercase tracking-[0.16em] ${statusFilter === tab.key ? 'text-gray-300' : 'text-gray-400'}`}>{tab.label}</p>
-            <p className="mt-1 text-2xl font-black">{counts[tab.key]}</p>
+            <p className={`text-[9px] font-black uppercase tracking-[0.14em] ${statusFilter === tab.key ? 'text-gray-300' : 'text-gray-400'}`}>{tab.label}</p>
+            <p className="text-lg font-black">{counts[tab.key]}</p>
           </button>
         ))}
       </div>
 
-      <div className="rounded-[20px] bg-rose-50 p-4 shadow-sm sm:flex sm:items-center sm:justify-between">
+      <div className="rounded-[16px] bg-rose-50 p-3 shadow-sm sm:flex sm:items-center sm:justify-between">
         <div>
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-rose-500">Total Discount Today</p>
-          <p className="mt-1 text-2xl font-black text-rose-700">Rs {totalDiscountToday}</p>
+          <p className="text-[9px] font-black uppercase tracking-[0.14em] text-rose-500">Total Discount Today</p>
+          <p className="text-lg font-black text-rose-700">Rs {totalDiscountToday}</p>
         </div>
-        <p className="mt-2 text-xs font-semibold text-rose-500 sm:mt-0">{discountedOrderCount} order{discountedOrderCount === 1 ? '' : 's'} discounted this shift</p>
+        <p className="mt-1 text-xs font-semibold text-rose-500 sm:mt-0">{discountedOrderCount} order{discountedOrderCount === 1 ? '' : 's'} discounted this shift</p>
       </div>
 
-      <div className="rounded-[28px] bg-white p-4 shadow-sm">
-        <div className="relative w-full sm:max-w-sm">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search order #, customer, phone, table, waiter"
-            className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-3 pl-11 pr-4 text-sm outline-none transition focus:border-[#D6E332]"
-          />
+      <div className="grid grid-cols-1 gap-3 rounded-[20px] bg-white p-3 shadow-sm sm:grid-cols-2 lg:grid-cols-6">
+        <div className="lg:col-span-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <label className="block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Date Range</label>
+            {isCustomRange ? (
+              <button
+                type="button"
+                onClick={clearRange}
+                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-[0.1em] text-gray-400 transition hover:text-gray-700"
+              >
+                <X size={11} /> Back to shift
+              </button>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <input
+              type="date"
+              value={rangeFrom}
+              onChange={(event) => setRangeFrom(event.target.value)}
+              className="w-full min-w-0 rounded-full border border-transparent bg-[#F6F7FB] px-2.5 py-2 text-xs font-semibold outline-none transition focus:border-[#D6E332]"
+            />
+            <input
+              type="date"
+              value={rangeTo}
+              onChange={(event) => setRangeTo(event.target.value)}
+              className="w-full min-w-0 rounded-full border border-transparent bg-[#F6F7FB] px-2.5 py-2 text-xs font-semibold outline-none transition focus:border-[#D6E332]"
+            />
+          </div>
+        </div>
+
+        <div className="lg:col-span-1">
+          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Search By</label>
+          <select
+            value={searchField}
+            onChange={(event) => setSearchField(event.target.value as SearchField)}
+            className="w-full rounded-full border border-transparent bg-[#F6F7FB] px-3 py-2 text-xs font-semibold outline-none transition focus:border-[#D6E332]"
+          >
+            <option value="all">All Fields</option>
+            <option value="name">Customer Name</option>
+            <option value="phone">Phone</option>
+            <option value="orderId">Order ID</option>
+          </select>
+        </div>
+
+        <div className="sm:col-span-2 lg:col-span-3">
+          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Search</label>
+          <div className="relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search order #, customer, phone, table, waiter"
+              className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-2 pl-11 pr-4 text-sm outline-none transition focus:border-[#D6E332]"
+            />
+          </div>
         </div>
       </div>
 
       <div className="overflow-hidden rounded-[28px] bg-white shadow-sm">
-        <div className="hidden grid-cols-[90px_1.3fr_1fr_0.9fr_0.7fr_0.9fr_0.9fr_80px] gap-2 border-b border-gray-100 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
+        <div className="hidden grid-cols-[90px_1.3fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_100px] gap-2 border-b border-gray-100 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
           <span>Order</span>
           <span>Customer</span>
           <span>Type</span>
-          <span>Items</span>
           <span>Total</span>
-          <span>Payment</span>
+          <span>Paid</span>
+          <span>Remaining</span>
           <span>Status</span>
-          <span className="text-right">View</span>
+          <span className="text-right">Actions</span>
         </div>
 
         {loading ? (
-          <div className="p-10 text-center text-sm font-bold text-gray-400">Loading today's record...</div>
+          <div className="p-10 text-center text-sm font-bold text-gray-400">Loading record...</div>
         ) : filteredOrders.length === 0 ? (
-          <div className="p-10 text-center text-sm font-bold text-gray-400">No orders match this filter.</div>
+          <div className="p-10 text-center text-sm font-bold text-gray-400">No orders found in the selected range.</div>
         ) : (
           <div className="divide-y divide-gray-100">
             {filteredOrders.map((order) => (
@@ -191,41 +337,63 @@ export default function RecordPage() {
 
 function RecordRow({ order, onView }: { order: SavedOrder; onView: () => void }) {
   const time = new Date(order.createdAt).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' });
+  // A shift can run past midnight, so a bare time ("11:42 PM") is ambiguous
+  // once a date range spans more than one day - the date underneath makes
+  // it unambiguous which day each order actually belongs to.
+  const date = new Date(order.createdAt).toLocaleDateString('en-PK', { day: '2-digit', month: 'short' });
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
   const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
   const orderType = order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery';
 
   return (
-    <div className="grid grid-cols-2 gap-2 px-6 py-4 text-sm lg:grid-cols-[90px_1.3fr_1fr_0.9fr_0.7fr_0.9fr_0.9fr_80px] lg:items-center">
+    <div className="grid grid-cols-2 gap-2 px-6 py-4 text-sm lg:grid-cols-[90px_1.3fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_100px] lg:items-center">
       <div>
         <p className="font-black text-gray-900">#{orderLabel}</p>
         <p className="text-[11px] font-semibold text-gray-400">{time}</p>
+        <p className="text-[10px] font-semibold text-gray-400">{date}</p>
       </div>
       <div className="truncate">
         <p className="truncate font-bold text-gray-800">{customerName}</p>
         <p className="truncate text-[11px] text-gray-400">{order.customer?.phone || '—'}</p>
       </div>
       <span className="text-gray-600">{orderType}</span>
-      <span className="text-gray-600">{order.items?.length ?? 0} items</span>
       <div>
         <span className="font-black text-gray-900">Rs {order.total}</span>
         {order.discount && order.discount.amount > 0 ? (
           <p className="text-[10px] font-bold text-rose-500">-Rs {order.discount.amount} off</p>
         ) : null}
       </div>
-      <span className="text-gray-600">{order.paymentMethod}</span>
+      <span className="font-semibold text-emerald-600">Rs {order.paidAmount ?? 0}</span>
+      <span className="font-semibold text-rose-500">Rs {order.remainingAmount ?? 0}</span>
       <div>
         <StatusBadge status={order.status} />
       </div>
-      <div className="flex justify-end lg:justify-end">
+      <div className="flex justify-end gap-1.5 lg:justify-end">
         <button
           type="button"
           onClick={onView}
+          title="View order"
           className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
         >
-          <Eye size={13} /> View
+          <Eye size={13} />
         </button>
+        <Link
+          to={`/dashboard/sales/print/${order.id}`}
+          title="Print receipt"
+          className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
+        >
+          <Printer size={13} />
+        </Link>
       </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, tone = 'text-gray-900' }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="rounded-[16px] bg-white p-3 shadow-sm">
+      <p className="text-[9px] font-black uppercase tracking-[0.14em] text-gray-400">{label}</p>
+      <p className={`text-lg font-black ${tone}`}>{value}</p>
     </div>
   );
 }

@@ -46,6 +46,12 @@ yarn-error.log*
 .env.*
 !.env.example
 
+# WhatsApp/Baileys session credentials (backend/services/whatsappService.js)
+# - as sensitive as a password, never belongs in git. Written next to
+# wherever the backend process runs (till, or the server post-migration -
+# see backend/README-deploy.md).
+.auth_whatsapp/
+
 # vercel
 .vercel
 

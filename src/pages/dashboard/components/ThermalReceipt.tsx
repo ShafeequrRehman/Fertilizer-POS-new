@@ -64,18 +64,18 @@ export default function ThermalReceipt({
         }
       ` }} />
       {type === 'cashier' && logoSrc ? (
-        <div className="mb-3 flex justify-center">
+        <div className="flex justify-center">
           <img
             src={logoSrc}
             alt="Print logo"
-            className="max-h-[72px] w-auto max-w-[190px] object-contain"
+            className="max-h-[100px] w-auto max-w-[220px] object-contain"
           />
         </div>
       ) : null}
 
       {/* Header */}
       <div className="text-center mb-2">
-        <h1 className="text-[18px] leading-[20px] font-bold uppercase mb-1">{settings.receiptHeader || 'Store Name'}</h1>
+        <h1 className="text-[18px] leading-[20px] font-bold uppercase mb-[5px]">{settings.receiptHeader || 'Store Name'}</h1>
         {settings.receiptSubHeader && <p>{settings.receiptSubHeader}</p>}
         {settings.receiptAddress && <p>{settings.receiptAddress}</p>}
         {settings.receiptContact && <p>{settings.receiptContact}</p>}
@@ -135,9 +135,9 @@ export default function ThermalReceipt({
             <span>Items Total:</span>
             <span>Rs {itemsTotal.toFixed(2)}</span>
           </div>
-          <div className="flex justify-between font-bold text-[14px] mt-1">
+          <div className="flex justify-between gap-2 font-bold text-[13px] mt-1">
             <span>TOTAL:</span>
-            <span>Rs {itemsTotal.toFixed(2)}</span>
+            <span className="shrink-0">Rs {itemsTotal.toFixed(2)}</span>
           </div>
 
           <div className="mt-3">

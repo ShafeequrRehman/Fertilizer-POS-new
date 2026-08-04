@@ -88,7 +88,17 @@ function LoginPageContent() {
       // any) is active and licensed.
       const role = res.user?.role ?? null;
       const target = requestedNext || res.redirectTo || defaultPathForRole(role);
-      window.location.assign(target);
+      // NOT window.location.assign(target) - this app is HashRouter-based
+      // (src/main.tsx), so a bare path like "/dashboard" has no meaning as
+      // a real navigation target. In dev that's masked by the Vite server
+      // silently serving index.html for any path; under Electron's
+      // packaged file:// build there's no server to mask it, and the
+      // browser tries to load that path as an actual file on disk -
+      // "Not allowed to load local resource: file:///C:/dashboard" is
+      // exactly that failure. navigate() stays inside the SPA's hash
+      // routing regardless of dev vs. packaged, same as the
+      // already-authenticated redirect above.
+      navigate(target, { replace: true });
     } catch (error) {
       console.error("[Login] Request failed", error);
 

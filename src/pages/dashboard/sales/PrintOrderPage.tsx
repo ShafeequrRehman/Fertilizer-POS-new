@@ -59,6 +59,12 @@ export default function PrintOrderPage() {
   const defaultType = searchParams.get('type') === 'kitchen' ? 'kitchen' : 'cashier';
 
   const [order, setOrder] = useState<SavedOrder | null>(null);
+  // When SalesPage.tsx falls back to this manual-print page for a kitchen
+  // ticket right after "Add Items" (no Electron/kitchen printer available),
+  // it stashes ONLY the newly-added items here under this order's id so
+  // this page doesn't reprint the whole merged order (which would send
+  // already-cooking items back to the kitchen again). Consumed once below.
+  const [kitchenOnlyItems, setKitchenOnlyItems] = useState<SavedOrder['items'] | null>(null);
   // Dues carried forward from the customer's OTHER unpaid orders - fetched
   // separately since it's not part of the order document itself, so a
   // manual/re-print here shows the same "Previous Dues" figure the cashier
@@ -76,6 +82,20 @@ export default function PrintOrderPage() {
       setOrder(fetchedOrder);
     });
   }, [params.id]);
+
+  useEffect(() => {
+    if (!order || defaultType !== 'kitchen') return;
+    const key = `kitchen-add-items-${order.id}`;
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return;
+    window.sessionStorage.removeItem(key);
+    try {
+      setKitchenOnlyItems(JSON.parse(raw));
+    } catch {
+      setKitchenOnlyItems(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order?.id, defaultType]);
 
   useEffect(() => {
     const phone = order?.customer.phone;
@@ -140,6 +160,8 @@ export default function PrintOrderPage() {
     return <div className="rounded-[32px] bg-white p-8 text-sm text-gray-500 shadow-sm">Loading receipt...</div>;
   }
 
+  const renderOrder = kitchenOnlyItems ? { ...order, items: kitchenOnlyItems } : order;
+
   if (isSilent) {
     return (
       <div className="bg-white m-0 p-0">
@@ -168,7 +190,7 @@ export default function PrintOrderPage() {
         `}} />
         <div id="silent-wrapper">
           <div id="receipt-print-area" className="w-[72mm] m-0 p-0 overflow-visible">
-            <ThermalReceipt order={order} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+            <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </div>
       </div>
@@ -254,14 +276,14 @@ export default function PrintOrderPage() {
         <section className="rounded-[32px] bg-white p-8 shadow-sm flex items-start justify-center">
           {/* Visible in UI */}
           <div className="border shadow-lg p-4">
-             <ThermalReceipt order={order} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+             <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </section>
       </div>
 
       {/* This is the only thing visible during actual printing natively */}
       <div className="hidden print:block" id="receipt-print-area">
-        <ThermalReceipt order={order} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+        <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
       </div>
 
     </div>

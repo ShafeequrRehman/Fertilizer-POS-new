@@ -87,13 +87,28 @@ exports.openSession = async (req, res) => {
     const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
     const openedByName = user?.name || user?.username || "";
 
-    const session = await ShopSession.create({
-      shopId,
-      status: "open",
-      openedAt: new Date(),
-      openedBy: req.user?.id ? String(req.user.id) : "",
-      openedByName,
-    });
+    let session;
+    try {
+      session = await ShopSession.create({
+        shopId,
+        status: "open",
+        openedAt: new Date(),
+        openedBy: req.user?.id ? String(req.user.id) : "",
+        openedByName,
+      });
+    } catch (createError) {
+      // The findOne check above is a friendly fast-path, not the real
+      // guarantee - the partial unique index on ShopSession (shopId,
+      // status: "open") is what actually prevents two concurrent opens
+      // (double-click, two tabs/devices) from both succeeding. If that
+      // race happens, this is the same "already open" response the normal
+      // path gives, just reached via the database's own duplicate-key
+      // rejection instead of the earlier find.
+      if (createError?.code === 11000) {
+        return res.status(409).json({ error: "The shop is already open." });
+      }
+      throw createError;
+    }
 
     res.status(201).json({ ...session.toObject(), id: String(session._id) });
   } catch (error) {
