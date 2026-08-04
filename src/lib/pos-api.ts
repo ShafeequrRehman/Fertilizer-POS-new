@@ -300,9 +300,13 @@ export async function sendWhatsappMessage(phone: string, message: string) {
   }
 }
 
-export async function sendWhatsappDocument(phone: string, filePath: string, fileName: string) {
+// fileBase64: the actual PDF bytes, base64-encoded - NOT a filesystem
+// path. The backend may run on a different machine than this till (see
+// pos-web/backend/README-deploy.md), so a local path would mean nothing
+// to it; sending the real bytes works no matter where the backend runs.
+export async function sendWhatsappDocument(phone: string, fileBase64: string, fileName: string) {
   try {
-    const response = await api.post<{ success: boolean; error?: string }>('/whatsapp/send-document', { phone, filePath, fileName }, {
+    const response = await api.post<{ success: boolean; error?: string }>('/whatsapp/send-document', { phone, fileBase64, fileName }, {
       baseURL: getSystemApiBaseUrl(),
     });
     return response.data;

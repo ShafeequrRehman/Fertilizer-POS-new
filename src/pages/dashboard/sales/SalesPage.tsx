@@ -22,6 +22,7 @@ type ElectronWindow = Window & typeof globalThis & {
 type ReceiptPdfResult = {
   success: boolean;
   pdfPath?: string;
+  fileBase64?: string;
   error?: string;
 };
 
@@ -289,11 +290,11 @@ export default function SalesPage() {
       // to a hardcoded store name instead of whatever was configured in
       // Settings -> Manage Receipt.
       const result = await ipcRenderer.invoke('create-customer-receipt-pdf-data', { ...order, previousDues: customerDue }, `customer_receipt_${receiptNumber}`, printLogo, settings);
-      if (!isReceiptPdfResult(result) || !result.success || !result.pdfPath) {
+      if (!isReceiptPdfResult(result) || !result.success || !result.fileBase64) {
         throw new Error(isReceiptPdfResult(result) ? result.error || 'Customer receipt PDF was not created.' : 'Invalid receipt PDF response.');
       }
 
-      await sendWhatsappDocument(order.customer.phone, result.pdfPath, `receipt-${receiptNumber}.pdf`);
+      await sendWhatsappDocument(order.customer.phone, result.fileBase64, `receipt-${receiptNumber}.pdf`);
     } catch (error) {
       console.error('Failed to send completed receipt PDF on WhatsApp:', error);
       setStatus({ tone: 'error', text: 'Order completed, but WhatsApp PDF receipt could not be sent.' });

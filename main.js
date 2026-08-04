@@ -809,7 +809,16 @@ if (!gotTheLock) {
 
   ipcMain.handle("create-customer-receipt-pdf-data", async (_event, orderData, filePrefix, printLogo, settings) => {
     try {
-      return await createReceiptPdfFromOrderData(orderData, "cashier", filePrefix || "customer_receipt", printLogo, settings);
+      const result = await createReceiptPdfFromOrderData(orderData, "cashier", filePrefix || "customer_receipt", printLogo, settings);
+      // Also read the PDF back as base64 - the WhatsApp send flow
+      // (sendWhatsappDocument in src/lib/pos-api.ts) needs the actual
+      // bytes, not this till's local pdfPath. The backend may now run on
+      // a completely different machine (see backend/README-deploy.md),
+      // so a path from this disk means nothing to it - result.pdfPath
+      // stays here only for any other local-only use of this handler.
+      const fileBase64 = fs.readFileSync(result.pdfPath).toString("base64");
+      fs.unlink(result.pdfPath, () => {});
+      return { ...result, fileBase64 };
     } catch (error) {
       logRuntime(`ReactPDF customer receipt creation failed: ${error}`);
       return { success: false, error: error.toString() };
