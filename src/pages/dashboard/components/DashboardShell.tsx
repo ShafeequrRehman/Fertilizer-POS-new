@@ -230,6 +230,14 @@ function ReceiptPrintWatcher() {
 
         claimReceiptPrint(order.id)
           .then(async (claimed) => {
+            // Order-number token slip first, then the full customer
+            // receipt - same order POSPage.tsx prints in for TakeAway
+            // orders rung up directly on this till.
+            try {
+              await ipcRenderer.invoke('print-order-token-data', claimed, settings.counterPrinter, printLogo, settings);
+            } catch (err) {
+              console.error(err);
+            }
             await ipcRenderer.invoke('print-cashier-receipt-data', claimed, settings.counterPrinter, printLogo, settings);
             toastRef.current.info(`Take Away order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)} - receipt printed.`);
           })

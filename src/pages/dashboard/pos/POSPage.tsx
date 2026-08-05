@@ -436,7 +436,15 @@ export default function POSPage() {
           if (savedOrder.orderType === 'TakeAway') {
             if (settings.counterPrinter) {
               claimReceiptPrint(savedOrder.id)
-                .then(() => {
+                .then(async () => {
+                  // Small order-number-only slip first, then the full
+                  // customer receipt - so the customer has something short
+                  // to hold up at the counter when their order is ready.
+                  try {
+                    await ipcRenderer.invoke('print-order-token-data', savedOrder, settings.counterPrinter, printLogo, settings);
+                  } catch (err) {
+                    console.error(err);
+                  }
                   ipcRenderer.invoke('print-cashier-receipt-data', savedOrder, settings.counterPrinter, printLogo, settings).catch(console.error);
                 })
                 .catch((err) => {

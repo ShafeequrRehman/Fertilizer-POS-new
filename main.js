@@ -466,6 +466,15 @@ if (!gotTheLock) {
   }
 
   function estimateReceiptHeightPt(orderData, type, hasLogo) {
+    // Order-number token slip - printed before the TakeAway customer
+    // receipt so the customer has a small tear-off with just their order
+    // number to hold up at the counter. Nothing else on it, so it gets a
+    // tiny fixed height instead of running through all the section math
+    // below (which assumes a full receipt: header, meta, items, footer).
+    if (type === "token") {
+      return 50 + 65; // paddingBottom/margin + order label & big number
+    }
+
     let h = 50; // paddingBottom + safety margin
 
     if (hasLogo) h += 115;
@@ -628,6 +637,21 @@ if (!gotTheLock) {
 
   function ReceiptPdf({ orderData, type, printLogo, settings }) {
     const orderNumber = getOrderNumber(orderData);
+
+    // Order-number token slip for TakeAway - printed first, before the
+    // customer's cashier receipt, so they have something short with just
+    // the number to hold up when their order is ready. Deliberately skips
+    // the logo/header/meta/items/footer that every other receipt type has.
+    if (type === "token") {
+      const pageHeight = estimateReceiptHeightPt(orderData, type, false);
+      return h(Document, null,
+        h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+          h(Text, { style: receiptStyles.orderLabel }, "ORDER NO."),
+          h(Text, { style: receiptStyles.orderNumber }, orderNumber)
+        )
+      );
+    }
+
     const items = orderData?.items || [];
     const total = getItemsTotal(orderData);
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
@@ -692,13 +716,12 @@ if (!gotTheLock) {
             const isKitchenTicket = type === "kitchen" || type === "kitchen-cancel" || type === "kitchen-remove";
             return h(View, { key: `${name}-${index}`, style: receiptStyles.item },
               h(View, { style: receiptStyles.row },
+                h(Text, { style: receiptStyles.rowLeft }, isKitchenTicket ? name : `${quantity}x ${name}`),
                 isKitchenTicket
-                  ? h(Text, { style: receiptStyles.rowLeft },
-                      h(Text, { style: receiptStyles.bold }, `${quantity}x `),
-                      name
-                    )
-                  : h(Text, { style: receiptStyles.rowLeft }, `${quantity}x ${name}`),
-                type === "cashier" ? h(Text, { style: receiptStyles.rowRight }, `Rs ${itemTotal.toFixed(2)}`) : null
+                  ? h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `${quantity}x`)
+                  : type === "cashier"
+                    ? h(Text, { style: receiptStyles.rowRight }, `Rs ${itemTotal.toFixed(2)}`)
+                    : null
               ),
               item.variation
                 ? h(Text, { style: isKitchenTicket ? [receiptStyles.variation, receiptStyles.bold] : receiptStyles.variation }, `- ${String(item.variation).toUpperCase()}`)
@@ -798,6 +821,23 @@ if (!gotTheLock) {
       return { success: true };
     } catch (error) {
       logRuntime(`ReactPDF kitchen remove-items receipt print failed: ${error}`);
+      return { success: false, error: error.toString() };
+    }
+  });
+
+  ipcMain.handle("print-order-token-data", async (_event, orderData, printerName, printLogo, settings) => {
+    if (!printerName) {
+      return { success: false, error: "No cashier printer configured" };
+    }
+
+    try {
+      const result = await createReceiptPdfFromOrderData(orderData, "token", "order_token", printLogo, settings);
+      await printReceiptPdfFile(result.pdfPath, printerName);
+      fs.unlink(result.pdfPath, () => {});
+      logRuntime(`ReactPDF order-number token printed on ${printerName}`);
+      return { success: true };
+    } catch (error) {
+      logRuntime(`ReactPDF order-number token print failed: ${error}`);
       return { success: false, error: error.toString() };
     }
   });
