@@ -685,12 +685,24 @@ if (!gotTheLock) {
             const quantity = Number(item.quantity || 1);
             const name = String(item.name || "").toUpperCase();
             const itemTotal = Number(item.price || 0) * quantity;
+            // Kitchen staff scan this ticket fast, so on kitchen-bound
+            // tickets (regular, cancel, and remove - never the customer's
+            // cashier receipt) the quantity prefix and the flavour/
+            // variation line are bolded to stand out at a glance.
+            const isKitchenTicket = type === "kitchen" || type === "kitchen-cancel" || type === "kitchen-remove";
             return h(View, { key: `${name}-${index}`, style: receiptStyles.item },
               h(View, { style: receiptStyles.row },
-                h(Text, { style: receiptStyles.rowLeft }, `${quantity}x ${name}`),
+                isKitchenTicket
+                  ? h(Text, { style: receiptStyles.rowLeft },
+                      h(Text, { style: receiptStyles.bold }, `${quantity}x `),
+                      name
+                    )
+                  : h(Text, { style: receiptStyles.rowLeft }, `${quantity}x ${name}`),
                 type === "cashier" ? h(Text, { style: receiptStyles.rowRight }, `Rs ${itemTotal.toFixed(2)}`) : null
               ),
-              item.variation ? h(Text, { style: receiptStyles.variation }, `- ${String(item.variation).toUpperCase()}`) : null
+              item.variation
+                ? h(Text, { style: isKitchenTicket ? [receiptStyles.variation, receiptStyles.bold] : receiptStyles.variation }, `- ${String(item.variation).toUpperCase()}`)
+                : null
             );
           })
         ),

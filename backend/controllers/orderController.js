@@ -190,6 +190,101 @@ exports.createOrder = async (req, res) => {
   }
 };
 
+// GET /api/orders/kitchen/unprinted
+// Feeds the till's background "print kitchen tickets for orders nobody has
+// printed yet" poll (see pos-web's DashboardShell.tsx) - this is what makes
+// an order placed on pos-mobile show up on the desktop's kitchen printer
+// without the phone needing its own Bluetooth printer. Cancelled orders are
+// excluded (nothing to cook); oldest first so tickets come out in the order
+// they were actually placed.
+exports.getUnprintedKitchenOrders = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      ...buildShopScope(req),
+      kitchenPrintedAt: null,
+      status: { $ne: "cancelled" },
+    }).sort({ createdAt: 1 });
+    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// PATCH /api/orders/:id/claim-kitchen-print
+// Atomically claims an order for printing - the `kitchenPrintedAt: null`
+// filter means only ONE caller can ever win this update for a given order,
+// even if two tills (or a till and a stale poll tick) race for the same
+// order at the same instant. The desktop app always claims BEFORE printing,
+// never after - if the claim fails (409, someone/something already got it),
+// it silently skips rather than printing a duplicate ticket.
+exports.claimKitchenPrint = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, kitchenPrintedAt: null, ...buildShopScope(req) },
+      { kitchenPrintedAt: new Date() },
+      { new: true }
+    );
+
+    if (!order) {
+      return res.status(409).json({ error: "Already claimed or printed by another till.", reason: "already_claimed" });
+    }
+
+    res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/orders/receipts/unprinted
+// Sibling to getUnprintedKitchenOrders above, for the customer-receipt side
+// of the same "TakeAway prints its receipt immediately" feature - only
+// TakeAway orders are ever candidates here (DineIn/Delivery keep the
+// original behaviour of printing at Complete Payment instead).
+exports.getUnprintedReceiptOrders = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      ...buildShopScope(req),
+      orderType: "TakeAway",
+      customerReceiptPrintedAt: null,
+      status: { $ne: "cancelled" },
+    }).sort({ createdAt: 1 });
+    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// PATCH /api/orders/:id/claim-receipt-print
+// Atomic claim, identical shape to claimKitchenPrint above - only one
+// caller ever wins this for a given order, so the till that created a
+// TakeAway order and the shop's background receipt-print watcher can never
+// both print the customer's receipt.
+exports.claimReceiptPrint = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, customerReceiptPrintedAt: null, ...buildShopScope(req) },
+      { customerReceiptPrintedAt: new Date() },
+      { new: true }
+    );
+
+    if (!order) {
+      return res.status(409).json({ error: "Already claimed or printed by another till.", reason: "already_claimed" });
+    }
+
+    res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 exports.checkPendingOrder = async (req, res) => {
   try {
     const exists = await Order.exists({ ...buildShopScope(req), "customer.phone": req.params.phone, status: "pending" });

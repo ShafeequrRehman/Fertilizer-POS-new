@@ -133,7 +133,7 @@ export function setAuthSession(payload: LoginSessionPayload) {
 
   storeBoth(AUTH_TOKEN_KEY, payload.accessToken);
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(payload.accessToken)}; path=/; Max-Age=43200; SameSite=Lax${secure}`;
+  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(payload.accessToken)}; path=/; Max-Age=72000; SameSite=Lax${secure}`;
 
   if (payload.refreshToken) {
     storeBoth(REFRESH_TOKEN_KEY, payload.refreshToken);
@@ -168,7 +168,7 @@ export function updateTokens(accessToken: string, refreshToken?: string) {
   if (typeof window === "undefined") return;
   storeBoth(AUTH_TOKEN_KEY, accessToken);
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(accessToken)}; path=/; Max-Age=43200; SameSite=Lax${secure}`;
+  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(accessToken)}; path=/; Max-Age=72000; SameSite=Lax${secure}`;
   if (refreshToken) {
     storeBoth(REFRESH_TOKEN_KEY, refreshToken);
   }

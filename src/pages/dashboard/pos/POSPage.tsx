@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { checkPendingOrder, createOrder, fetchCustomerSearch, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { ApiError, checkPendingOrder, claimKitchenPrint, claimReceiptPrint, createOrder, fetchCustomerSearch, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
 import { getProductImageUrl } from '@/lib/asset-path';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -405,9 +405,48 @@ export default function POSPage() {
           const printLogo = localStorage.getItem('preferred-print-logo');
 
           if (settings.kitchenPrinter) {
-            ipcRenderer.invoke('print-kitchen-receipt-data', savedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+            // Claim before printing, same rule the background poll follows
+            // (see DashboardShell.tsx) - guarantees this order can never
+            // get printed twice even if this till's own immediate-print
+            // path and the poll loop somehow race on the same order.
+            claimKitchenPrint(savedOrder.id)
+              .then(() => {
+                ipcRenderer.invoke('print-kitchen-receipt-data', savedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+              })
+              .catch((err) => {
+                // 409 just means something else already claimed it (the
+                // background poll almost certainly beat this to it by a
+                // few hundred ms) - not an error, nothing to do.
+                if (!(err instanceof ApiError) || err.status !== 409) {
+                  console.error('Kitchen print claim failed:', err);
+                }
+              });
           } else {
             console.warn("No kitchen printer configured in settings.");
+          }
+
+          // TakeAway customers pay and collect right away, so their
+          // receipt (with the order number) prints now instead of waiting
+          // for Complete Payment on the Sales page - same claim-before-
+          // print rule as the kitchen ticket above, and DashboardShell.tsx's
+          // ReceiptPrintWatcher covers this same claim for TakeAway orders
+          // placed from a phone via pos-mobile. SalesPage.tsx checks
+          // customerReceiptPrintedAt before its own completion-time print
+          // so this order never gets a second copy.
+          if (savedOrder.orderType === 'TakeAway') {
+            if (settings.counterPrinter) {
+              claimReceiptPrint(savedOrder.id)
+                .then(() => {
+                  ipcRenderer.invoke('print-cashier-receipt-data', savedOrder, settings.counterPrinter, printLogo, settings).catch(console.error);
+                })
+                .catch((err) => {
+                  if (!(err instanceof ApiError) || err.status !== 409) {
+                    console.error('Receipt print claim failed:', err);
+                  }
+                });
+            } else {
+              console.warn("No counter/customer printer configured in settings.");
+            }
           }
 
           void sendOrderPlacedMessage(savedOrder, settings);

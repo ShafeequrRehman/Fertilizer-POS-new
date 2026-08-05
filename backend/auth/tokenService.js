@@ -1,14 +1,20 @@
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
-// Access tokens are short-lived and carry everything a request needs to
-// know about the caller (id, role, shopId, employeeRoleId) so most routes
-// never need to hit the database just to find out who's asking. Refresh
-// tokens are long-lived, opaque, single-use-per-rotation, and only ever
-// stored on the server as a SHA-256 hash (see User.refreshTokenHash) -
-// exactly like a password, so a leaked database dump doesn't hand out
-// usable refresh tokens.
-const ACCESS_TOKEN_TTL = "2h";
+// Access tokens carry everything a request needs to know about the caller
+// (id, role, shopId, employeeRoleId) so most routes never need to hit the
+// database just to find out who's asking. Refresh tokens are long-lived,
+// opaque, single-use-per-rotation, and only ever stored on the server as a
+// SHA-256 hash (see User.refreshTokenHash) - exactly like a password, so a
+// leaked database dump doesn't hand out usable refresh tokens.
+//
+// 20h (not a short-lived token) on purpose - staff open the till/app once
+// at the start of the day and shouldn't have to log back in mid-shift.
+// Silent refresh-on-401 (see pos-web/src/lib/api.ts and pos-mobile/src/
+// api/client.ts) would technically paper over a short TTL anyway, but a
+// long-lived access token means fewer round-trips and one less thing that
+// can go wrong between shifts.
+const ACCESS_TOKEN_TTL = "20h";
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // `permissions` (only meaningful for role === "employee") is denormalized

@@ -179,8 +179,13 @@ export default function SalesPage() {
     setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
     setSelectedOrder(updated);
 
-    // Fire only the receipt that belongs to this workflow.
-    const targetPrintType = payload.status === 'completed'
+    // Fire only the receipt that belongs to this workflow. TakeAway orders
+    // already got their customer receipt printed the moment they were
+    // placed (see POSPage.tsx / DashboardShell.tsx's ReceiptPrintWatcher,
+    // which set customerReceiptPrintedAt) - printing it again here would
+    // hand the customer a second copy for no reason, so this only fires
+    // for orders that reach "completed" without ever having been claimed.
+    const targetPrintType = payload.status === 'completed' && !updated.customerReceiptPrintedAt
       ? 'cashier'
       : payload.action === 'addItems'
         ? 'kitchen'

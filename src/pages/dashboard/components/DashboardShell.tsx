@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, ShoppingCart, BarChart3, Calculator,
@@ -8,10 +8,12 @@ import {
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, hasPermission } from '@/lib/auth';
 import { logoutRequest } from '@/lib/api';
-import { closeShopSession, openShopSession } from '@/lib/pos-api';
+import { ApiError, claimKitchenPrint, claimReceiptPrint, closeShopSession, fetchUnprintedKitchenOrders, fetchUnprintedReceiptOrders, openShopSession } from '@/lib/pos-api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
 import { useToast } from '@/lib/toast';
+import { getStoreSettings } from '@/lib/pos-settings';
+import { getIpcRenderer } from '@/lib/electron-bridge';
 
 // Nav items carry an optional `permission` key - see lib/auth.ts
 // hasPermission(), which mirrors backend/middleware/requirePermission.js.
@@ -45,6 +47,8 @@ export default function DashboardShell() {
 
   return (
     <ShopSessionProvider>
+      <KitchenPrintWatcher />
+      <ReceiptPrintWatcher />
       <div className="flex min-h-screen bg-[#F2F4F7] font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
         <aside className="print:hidden flex w-56 flex-col gap-6 p-4">
           <div className="flex items-center gap-2 px-2">
@@ -100,6 +104,155 @@ export default function DashboardShell() {
       </div>
     </ShopSessionProvider>
   );
+}
+
+// Background "print any order nobody has printed a kitchen ticket for yet"
+// loop - this is what makes an order placed on pos-mobile show up on this
+// till's kitchen printer automatically, the same way a till-placed order
+// already prints itself immediately (see POSPage.tsx). Renders nothing;
+// it's mounted here (inside DashboardShell, which wraps every dashboard
+// page) so it keeps running no matter which page the cashier is looking
+// at, not just while POS or Kitchen happens to be open.
+//
+// Only ever does anything in Electron with a kitchen printer configured -
+// a plain browser tab has no printer to send jobs to, and letting it poll
+// anyway would mean it could claim orders (see claimKitchenPrint's atomic
+// "only one caller ever wins" guarantee) and then just silently fail to
+// print them, starving the real till of a ticket it should have gotten.
+const KITCHEN_POLL_INTERVAL_MS = 7000;
+
+function KitchenPrintWatcher() {
+  const { toast } = useToast();
+  const inFlightRef = useRef<Set<string>>(new Set());
+  // ToastProvider rebuilds its `toast` object every render (it's a plain
+  // object literal, not memoized), so depending on `toast` directly in the
+  // effect below would tear down and restart this poll loop constantly -
+  // any toast firing anywhere in the app would restart it. A ref sidesteps
+  // that: the effect reads the LATEST toast fns without needing them in
+  // its dependency array, so it mounts once and stays running.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+
+  useEffect(() => {
+    const ipcRenderer = getIpcRenderer();
+    if (!ipcRenderer) return undefined; // not Electron - nothing to print with
+
+    let cancelled = false;
+
+    async function poll() {
+      const settings = getStoreSettings();
+      if (!settings.kitchenPrinter) return; // nothing configured to print to
+
+      let orders;
+      try {
+        orders = await fetchUnprintedKitchenOrders();
+      } catch {
+        return; // network hiccup - next tick retries
+      }
+      if (!orders || cancelled) return;
+
+      const printLogo = typeof window !== 'undefined' ? localStorage.getItem('preferred-print-logo') : null;
+
+      for (const order of orders) {
+        if (cancelled) break;
+        if (inFlightRef.current.has(order.id)) continue; // already claiming/printing this one
+        inFlightRef.current.add(order.id);
+
+        claimKitchenPrint(order.id)
+          .then(async (claimed) => {
+            await ipcRenderer.invoke('print-kitchen-receipt-data', claimed, settings.kitchenPrinter, printLogo, settings);
+            toastRef.current.info(`New order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)} - printed to kitchen.`);
+          })
+          .catch((err) => {
+            // 409 = another till (or this same one, on a previous tick)
+            // already claimed it - not an error, just not ours to print.
+            if (!(err instanceof ApiError) || err.status !== 409) {
+              console.error('Kitchen auto-print failed:', err);
+            }
+          })
+          .finally(() => {
+            inFlightRef.current.delete(order.id);
+          });
+      }
+    }
+
+    void poll();
+    const intervalId = setInterval(() => void poll(), KITCHEN_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  return null;
+}
+
+// Sibling to KitchenPrintWatcher above, for the customer-receipt side of
+// TakeAway orders - catches TakeAway orders placed on a phone via
+// pos-mobile (which has no printer of its own) and prints their receipt
+// on this till's counter/customer printer immediately, the same way
+// POSPage.tsx already does for TakeAway orders rung up on this till
+// directly. DineIn/Delivery orders are never returned by
+// fetchUnprintedReceiptOrders - they keep printing their receipt at
+// Complete Payment on the Sales page, unchanged.
+const RECEIPT_POLL_INTERVAL_MS = 7000;
+
+function ReceiptPrintWatcher() {
+  const { toast } = useToast();
+  const inFlightRef = useRef<Set<string>>(new Set());
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+
+  useEffect(() => {
+    const ipcRenderer = getIpcRenderer();
+    if (!ipcRenderer) return undefined;
+
+    let cancelled = false;
+
+    async function poll() {
+      const settings = getStoreSettings();
+      if (!settings.counterPrinter) return; // nothing configured to print to
+
+      let orders;
+      try {
+        orders = await fetchUnprintedReceiptOrders();
+      } catch {
+        return; // network hiccup - next tick retries
+      }
+      if (!orders || cancelled) return;
+
+      const printLogo = typeof window !== 'undefined' ? localStorage.getItem('preferred-print-logo') : null;
+
+      for (const order of orders) {
+        if (cancelled) break;
+        if (inFlightRef.current.has(order.id)) continue;
+        inFlightRef.current.add(order.id);
+
+        claimReceiptPrint(order.id)
+          .then(async (claimed) => {
+            await ipcRenderer.invoke('print-cashier-receipt-data', claimed, settings.counterPrinter, printLogo, settings);
+            toastRef.current.info(`Take Away order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)} - receipt printed.`);
+          })
+          .catch((err) => {
+            if (!(err instanceof ApiError) || err.status !== 409) {
+              console.error('Receipt auto-print failed:', err);
+            }
+          })
+          .finally(() => {
+            inFlightRef.current.delete(order.id);
+          });
+      }
+    }
+
+    void poll();
+    const intervalId = setInterval(() => void poll(), RECEIPT_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  return null;
 }
 
 // The Open/Close Shop control. Any shop member can see the current status

@@ -236,6 +236,59 @@ export async function fetchOrders(params?: { date?: string }) {
   }
 }
 
+// Orders with no kitchen ticket printed yet, shop-wide - regardless of
+// which client (this till's own POS screen, or a cashier's phone via
+// pos-mobile) created them. Polled by DashboardShell.tsx's background
+// print loop.
+export async function fetchUnprintedKitchenOrders() {
+  try {
+    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders/kitchen/unprinted');
+    return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Atomically claims an order for kitchen printing - always called BEFORE
+// actually sending it to the printer, never after. Throws an ApiError with
+// status 409 if another till already claimed/printed it first - the poll
+// loop checks for exactly that status to skip silently instead of treating
+// it as a real failure (see handleApiError above, which preserves
+// error.response.status on the thrown ApiError).
+export async function claimKitchenPrint(orderId: string) {
+  try {
+    const response = await api.patch<SavedOrder & { _id?: string }>(`/orders/${orderId}/claim-kitchen-print`);
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// TakeAway orders with no customer receipt printed yet, shop-wide - the
+// receipt-printing sibling of fetchUnprintedKitchenOrders above. Only ever
+// returns TakeAway orders (see backend/controllers/orderController.js's
+// getUnprintedReceiptOrders) since DineIn/Delivery keep printing their
+// customer receipt at Complete Payment instead, unchanged.
+export async function fetchUnprintedReceiptOrders() {
+  try {
+    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders/receipts/unprinted');
+    return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Same claim-before-print contract as claimKitchenPrint - 409 means another
+// till already claimed/printed this order's customer receipt.
+export async function claimReceiptPrint(orderId: string) {
+  try {
+    const response = await api.patch<SavedOrder & { _id?: string }>(`/orders/${orderId}/claim-receipt-print`);
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 export async function fetchOrder(id: string) {
   try {
     const response = await api.get<SavedOrder & { _id?: string }>(`/orders/${id}`);

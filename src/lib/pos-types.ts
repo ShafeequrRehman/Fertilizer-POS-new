@@ -184,6 +184,13 @@ export interface SavedOrder extends OrderPayload {
   // config/seed.js's dropLegacyCustomerPhoneIndex for the historical cause.
   // Never blocks the order; only ever informational.
   customerSyncWarning?: string | null;
+  // Set the moment a TakeAway order's customer receipt is actually printed
+  // (by whichever till claims it first - see claimReceiptPrint in
+  // pos-api.ts). SalesPage.tsx checks this before auto-printing again at
+  // Complete Payment, so a TakeAway customer never gets two copies of the
+  // same receipt. Always null/undefined for DineIn and Delivery orders,
+  // which still only print their customer receipt at Complete Payment.
+  customerReceiptPrintedAt?: string | null;
 }
 
 export interface CancelOrderPayload {
