@@ -45,14 +45,15 @@ exports.listShops = async (req, res) => {
     const result = shops.map((shop) => {
       const license = licenseByShop.get(String(shop._id)) || null;
       const owner = ownerByShop.get(String(shop._id)) || null;
-      // Never send the hash itself to the client - only whether one has
-      // been set, so the Shops table can flag shops that still need a
-      // Cancel Order Key (staff can't cancel orders in the POS without
-      // one) without exposing anything secret.
-      const { cancelOrderKeyHash, ...shopWithoutKeyHash } = shop;
+      // Never send the hashes themselves to the client - only whether one
+      // has been set, so the Shops table can flag shops that still need a
+      // Cancel Order Key or a Page Visibility Key set up, without exposing
+      // anything secret.
+      const { cancelOrderKeyHash, pageVisibilityKeyHash, ...shopWithoutKeyHashes } = shop;
       return {
-        ...shopWithoutKeyHash,
+        ...shopWithoutKeyHashes,
         hasCancelOrderKey: Boolean(cancelOrderKeyHash),
+        hasPageVisibilityKey: Boolean(pageVisibilityKeyHash),
         license: license ? { ...license, isExpired: license.status === "suspended" || new Date(license.expiryDate).getTime() < Date.now() } : null,
         owner: owner ? safeUser(owner) : null,
       };
@@ -316,6 +317,31 @@ exports.resetCancelOrderKey = async (req, res) => {
     res.json({ message: "Cancel Order Key has been set", cancelOrderKey: newKey });
   } catch (error) {
     res.status(500).json({ message: "Failed to set Cancel Order Key", detail: error.message });
+  }
+};
+
+// PATCH /api/superadmin/shops/:id/page-visibility-key  body: { newKey }
+// Sets (or replaces) the shop's Page Visibility Key - the secret the Shop
+// Owner must enter, from their own Settings page, to change which sidebar
+// pages their dashboard shows (see shopOwnerController.exports.
+// updateEnabledPages). Only ever stored hashed; the plaintext is returned
+// once here so the Super Admin can hand it to the Shop Owner, then never
+// persisted or logged again.
+exports.resetPageVisibilityKey = async (req, res) => {
+  try {
+    const { newKey } = req.body;
+    if (!newKey || String(newKey).length < 4) {
+      return res.status(400).json({ message: "newKey must be at least 4 characters", reason: "validation_error" });
+    }
+    const shop = await Shop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ message: "Shop not found" });
+
+    shop.pageVisibilityKeyHash = await bcrypt.hash(String(newKey), 10);
+    await shop.save();
+
+    res.json({ message: "Page Visibility Key has been set", pageVisibilityKey: newKey });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to set Page Visibility Key", detail: error.message });
   }
 };
 

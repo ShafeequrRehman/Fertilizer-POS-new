@@ -30,6 +30,26 @@ const shopSchema = new mongoose.Schema(
     // backend/controllers/orderController.js exports.cancelOrder, which is
     // the only place it's ever compared against.
     cancelOrderKeyHash: { type: String, default: "" },
+    // Bcrypt hash of the shop's "Page Visibility Key" - same pattern as
+    // cancelOrderKeyHash above: set by the Super Admin (via "Set Page
+    // Visibility Key" on the Shops page) and given to the Shop Owner out
+    // of band. It is NOT the Shop Owner's login password - it's a separate
+    // secret that unlocks the ability to edit enabledPages below from
+    // their own Settings page (see shopOwnerController.exports.
+    // updateEnabledPages, the only place it's ever compared against).
+    pageVisibilityKeyHash: { type: String, default: "" },
+    // Which sidebar pages this shop's dashboard shows (see
+    // src/lib/dashboard-pages.ts for the full key list, and
+    // DashboardShell.tsx's isPageEnabled filter, which is where this
+    // actually gets enforced). The SHOP OWNER controls this from their own
+    // Settings page - not the Super Admin - gated behind
+    // pageVisibilityKeyHash above. null/undefined (the default, and every
+    // shop before this field existed) means "no restriction - show every
+    // page the user's own permissions already allow"; only once the Shop
+    // Owner has entered their key and saved a selection does this become a
+    // concrete array. This only hides pages from the sidebar; it is not a
+    // backend access-control boundary.
+    enabledPages: { type: [String], default: null },
   },
   { timestamps: true }
 );

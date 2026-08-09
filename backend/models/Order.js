@@ -19,6 +19,24 @@ const discountSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Queue of "the kitchen needs to prepare MORE of this" line items, built up
+// whenever an already-fired order's items change in a way that increases
+// what's being cooked (addItems, or a replaceItems quantity increase on an
+// existing line - see computeKitchenDelta/mergeKitchenDelta in
+// orderController.js). Distinct from kitchenPrintedAt (a one-shot flag for
+// the order's ORIGINAL ticket at creation) - this can be set, claimed, and
+// set again any number of times over an order's life, which is what makes
+// edits made from pos-mobile (no printer of its own) still reach the
+// kitchen: DashboardShell.tsx's KitchenUpdateWatcher polls for orders with
+// this non-null and prints just the queued items.
+const pendingKitchenUpdateSchema = new mongoose.Schema(
+  {
+    items: { type: [orderItemSchema], default: [] },
+    queuedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", required: true, index: true },
@@ -64,6 +82,7 @@ const orderSchema = new mongoose.Schema(
     // saveUpdate, which skips the completion-time auto-print once this is
     // already set so the customer never gets two copies.
     customerReceiptPrintedAt: { type: Date, default: null },
+    pendingKitchenUpdate: { type: pendingKitchenUpdateSchema, default: null },
   },
   { timestamps: true }
 );

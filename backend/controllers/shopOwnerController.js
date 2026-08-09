@@ -226,9 +226,20 @@ exports.listPermissionCatalog = async (req, res) => {
 // GET /api/shop/profile
 exports.getOwnShop = async (req, res) => {
   try {
-    const shop = await Shop.findById(req.user.shopId).populate("planId");
+    const shop = await Shop.findById(req.user.shopId).populate("planId").lean();
     if (!shop) return res.status(404).json({ message: "Shop not found" });
-    res.json(shop);
+
+    // Never send the key hashes themselves to the client - only whether
+    // one has been set, same convention as superAdminController's
+    // listShops. hasPageVisibilityKey is what SettingsPage.tsx's Sidebar
+    // Pages section checks before letting the Shop Owner even try to
+    // enter a key.
+    const { cancelOrderKeyHash, pageVisibilityKeyHash, ...shopWithoutKeyHashes } = shop;
+    res.json({
+      ...shopWithoutKeyHashes,
+      hasCancelOrderKey: Boolean(cancelOrderKeyHash),
+      hasPageVisibilityKey: Boolean(pageVisibilityKeyHash),
+    });
   } catch (error) {
     res.status(500).json({ message: "Failed to load shop profile", detail: error.message });
   }
@@ -251,5 +262,45 @@ exports.updateOwnShop = async (req, res) => {
     res.json(shop);
   } catch (error) {
     res.status(500).json({ message: "Failed to update shop profile", detail: error.message });
+  }
+};
+
+// PATCH /api/shop/pages  body: { enabledPages: string[], key }
+// Lets the Shop Owner control their OWN dashboard sidebar - which pages
+// show, which don't (see src/lib/dashboard-pages.ts for the key list,
+// enforced client-side by DashboardShell.tsx's isPageEnabled filter) - but
+// only with the Page Visibility Key the Super Admin assigned them (see
+// superAdminController.exports.resetPageVisibilityKey). Mirrors
+// orderController.exports.cancelOrder's key-check pattern exactly: key is
+// bcrypt-compared, never hardcoded, never accepted in plaintext form.
+exports.updateEnabledPages = async (req, res) => {
+  try {
+    const { enabledPages, key } = req.body;
+    if (!Array.isArray(enabledPages)) {
+      return res.status(400).json({ message: "enabledPages must be an array of page keys.", reason: "validation_error" });
+    }
+    if (!key) {
+      return res.status(400).json({ message: "The shop's Page Visibility Key is required.", reason: "validation_error" });
+    }
+
+    const shop = await Shop.findById(req.user.shopId);
+    if (!shop) return res.status(404).json({ message: "Shop not found" });
+    if (!shop.pageVisibilityKeyHash) {
+      return res.status(409).json({
+        message: "No Page Visibility Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one.",
+        reason: "key_not_configured",
+      });
+    }
+
+    const matches = await bcrypt.compare(String(key), shop.pageVisibilityKeyHash);
+    if (!matches) {
+      return res.status(401).json({ message: "Incorrect Page Visibility Key.", reason: "wrong_key" });
+    }
+
+    shop.enabledPages = enabledPages;
+    await shop.save();
+    res.json({ enabledPages: shop.enabledPages });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update page visibility", detail: error.message });
   }
 };

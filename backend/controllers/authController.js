@@ -190,7 +190,7 @@ exports.login = async (req, res) => {
       refreshToken,
       refreshTokenExpiresAt,
       user: safeUser(user),
-      shop: { id: shop._id, name: shop.name, status: shop.status },
+      shop: { id: shop._id, name: shop.name, status: shop.status, enabledPages: shop.enabledPages ?? null },
       license: { status: license.status, expiryDate: license.expiryDate },
       permissions,
       redirectTo: redirectPathFor(user.role),
@@ -278,7 +278,7 @@ exports.me = async (req, res) => {
 
     res.json({
       user: safeUser(user),
-      shop: shop ? { id: shop._id, name: shop.name, status: shop.status } : null,
+      shop: shop ? { id: shop._id, name: shop.name, status: shop.status, enabledPages: shop.enabledPages ?? null } : null,
       license: license ? { status: license.status, expiryDate: license.expiryDate, isExpired: license.isExpired() } : null,
     });
   } catch (error) {

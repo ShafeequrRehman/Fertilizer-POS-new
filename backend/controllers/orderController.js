@@ -46,6 +46,71 @@ function buildDiscountRecord(discount, discountAmount) {
   };
 }
 
+function kitchenItemKey(item) {
+  return `${item.name}::${item.variation || ""}`;
+}
+
+// Sums an item list's quantities per name+variation, since the same item
+// can legitimately appear as more than one line (e.g. added at different
+// times) - the kitchen ticket only cares about the net quantity per item.
+function sumQuantitiesByKey(items) {
+  const map = new Map();
+  (items || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    map.set(key, (map.get(key) || 0) + (Number(item.quantity) || 0));
+  });
+  return map;
+}
+
+// What "replaceItems" (the action EditOrderPage.tsx and pos-mobile's
+// quantity steppers both use) changed that the kitchen actually needs to
+// know about: only INCREASES, whether that's an existing line's quantity
+// going up or a brand new line being added via replaceItems (e.g. desktop's
+// Quick Add Product panel). Removed items / quantity decreases are
+// deliberately excluded - those go through the separate "kitchen-remove"
+// ticket (see EditOrderPage.tsx's printKitchenRemoveTicket), which says
+// "stop preparing" rather than "prepare more".
+function computeKitchenIncreaseDelta(oldItems, newItems) {
+  const oldQuantities = sumQuantitiesByKey(oldItems);
+  const newQuantities = sumQuantitiesByKey(newItems);
+  const meta = new Map();
+  (newItems || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    if (!meta.has(key)) meta.set(key, { name: item.name, price: item.price, variation: item.variation || "" });
+  });
+
+  const delta = [];
+  newQuantities.forEach((newQty, key) => {
+    const oldQty = oldQuantities.get(key) || 0;
+    const diff = newQty - oldQty;
+    if (diff > 0) {
+      delta.push({ ...meta.get(key), quantity: diff });
+    }
+  });
+  return delta;
+}
+
+// Folds a new delta into whatever's already queued and unprinted, summing
+// quantities per item - so a customer bumping the same item's quantity
+// twice before a till gets around to printing it doesn't lose the first
+// bump, and a till doesn't have to print twice for two quick edits.
+function mergeKitchenDelta(existingItems, delta) {
+  const map = new Map();
+  (existingItems || []).forEach((item) => {
+    map.set(kitchenItemKey(item), { name: item.name, price: item.price, variation: item.variation || "", quantity: Number(item.quantity) || 0 });
+  });
+  delta.forEach((item) => {
+    const key = kitchenItemKey(item);
+    const existing = map.get(key);
+    if (existing) {
+      existing.quantity += item.quantity;
+    } else {
+      map.set(key, { ...item });
+    }
+  });
+  return Array.from(map.values());
+}
+
 // Previously orders were scoped by `userId` (the logged-in account), which
 // worked fine with a single admin account but is wrong for a shop with
 // multiple staff: a Cashier ringing up a sale needs to see orders the
@@ -240,17 +305,24 @@ exports.claimKitchenPrint = async (req, res) => {
 };
 
 // GET /api/orders/receipts/unprinted
-// Sibling to getUnprintedKitchenOrders above, for the customer-receipt side
-// of the same "TakeAway prints its receipt immediately" feature - only
-// TakeAway orders are ever candidates here (DineIn/Delivery keep the
-// original behaviour of printing at Complete Payment instead).
+// Sibling to getUnprintedKitchenOrders above, for the customer-receipt side.
+// Two kinds of orders are candidates here: (1) TakeAway orders, printed the
+// moment they're placed (still pending) so the customer gets their receipt
+// right away, and (2) ANY order (DineIn/Delivery/TakeAway) that just
+// reached "completed" without a till already having claimed+printed it
+// locally - this is what makes completing an order from the mobile app
+// (which has no printer of its own) result in the same receipt printing on
+// this till that completing it here directly would. SalesPage.tsx's own
+// completion flow claims the receipt itself the instant it completes an
+// order on this till, so a normal desktop completion never lingers here
+// long enough to double-print.
 exports.getUnprintedReceiptOrders = async (req, res) => {
   try {
     const orders = await Order.find({
       ...buildShopScope(req),
-      orderType: "TakeAway",
       customerReceiptPrintedAt: null,
       status: { $ne: "cancelled" },
+      $or: [{ orderType: "TakeAway" }, { status: "completed" }],
     }).sort({ createdAt: 1 });
     res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
   } catch (error) {
@@ -285,6 +357,61 @@ exports.claimReceiptPrint = async (req, res) => {
   }
 };
 
+// GET /api/orders/kitchen-updates/unprinted
+// Sibling to getUnprintedKitchenOrders above, but for items added to (or
+// increased in quantity on) an order that was ALREADY kitchen-printed once
+// - kitchenPrintedAt is a one-shot flag for the order's original ticket, so
+// it can never fire again for a later edit. pendingKitchenUpdate is the
+// queue that makes those later edits reach the kitchen too, including ones
+// made from pos-mobile (no printer of its own) via SalesPage.tsx's own
+// edit flow (which claims+prints locally, see saveUpdate) or
+// DashboardShell.tsx's KitchenUpdateWatcher (which catches everything
+// else, same as ReceiptPrintWatcher does for customer receipts).
+exports.getUnprintedKitchenUpdateOrders = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      ...buildShopScope(req),
+      pendingKitchenUpdate: { $ne: null },
+      status: { $ne: "cancelled" },
+    }).sort({ "pendingKitchenUpdate.queuedAt": 1 });
+    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// PATCH /api/orders/:id/claim-kitchen-update-print
+// Same claim-before-print invariant as claimKitchenPrint/claimReceiptPrint,
+// but atomically CLEARS the queue instead of just stamping a timestamp
+// (pendingKitchenUpdate can be set again by a later edit, unlike the
+// one-shot kitchenPrintedAt) - `new: false` returns the document as it was
+// BEFORE this update, which is what hands the caller the exact items it
+// just claimed the right to print.
+exports.claimKitchenUpdatePrint = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, pendingKitchenUpdate: { $ne: null }, ...buildShopScope(req) },
+      { pendingKitchenUpdate: null },
+      { new: false }
+    );
+
+    if (!order) {
+      return res.status(409).json({ error: "Already claimed or printed by another till.", reason: "already_claimed" });
+    }
+
+    res.json({
+      order: { ...order.toObject(), id: String(order._id) },
+      items: order.pendingKitchenUpdate.items,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 exports.checkPendingOrder = async (req, res) => {
   try {
     const exists = await Order.exists({ ...buildShopScope(req), "customer.phone": req.params.phone, status: "pending" });
@@ -314,11 +441,23 @@ exports.updateOrder = async (req, res) => {
     let itemsOrDiscountChanged = false;
 
     if (patch.action === "addItems" && Array.isArray(patch.items)) {
+      // Every item in an addItems payload IS the delta by definition - the
+      // whole point of this action is appending brand new lines.
+      const delta = patch.items
+        .map((item) => ({ name: item.name, price: item.price, variation: item.variation || "", quantity: Number(item.quantity) || 0 }))
+        .filter((item) => item.quantity > 0);
+      if (delta.length > 0) {
+        order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
+      }
       order.items = [...order.items, ...patch.items];
       itemsOrDiscountChanged = true;
     }
 
     if (patch.action === "replaceItems" && Array.isArray(patch.items)) {
+      const delta = computeKitchenIncreaseDelta(order.items, patch.items);
+      if (delta.length > 0) {
+        order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
+      }
       order.items = patch.items;
       itemsOrDiscountChanged = true;
     }

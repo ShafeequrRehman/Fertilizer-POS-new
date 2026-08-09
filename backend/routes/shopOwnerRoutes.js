@@ -31,4 +31,8 @@ router.get("/permissions", ctrl.listPermissionCatalog);
 router.get("/profile", ctrl.getOwnShop);
 router.patch("/profile", ctrl.updateOwnShop);
 
+// Sidebar page visibility (gated by the Page Visibility Key the Super
+// Admin assigned - see shopOwnerController.exports.updateEnabledPages)
+router.patch("/pages", ctrl.updateEnabledPages);
+
 module.exports = router;
