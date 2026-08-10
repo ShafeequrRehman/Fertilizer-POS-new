@@ -26,12 +26,12 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
-  { key: 'payroll', label: 'Payroll', href: '/dashboard/payroll', permission: 'employees.manage' },
-  { key: 'reports', label: 'Reports', href: '/dashboard/reports', permission: 'reports.view' },
   // Role-gated (shop owner only) rather than permission-gated in
   // DashboardShell.tsx - kept here anyway so it still shows up as a
   // toggleable row in the Super Admin's page picker.
-  { key: 'employees', label: 'Employees', href: '/dashboard/employees' },
+  { key: 'payroll', label: 'Payroll', href: '/dashboard/payroll' },
+  { key: 'reports', label: 'Reports', href: '/dashboard/reports', permission: 'reports.view' },
+  { key: 'employees', label: 'Manage Staff', href: '/dashboard/employees' },
   { key: 'settings', label: 'Settings', href: '/dashboard/settings', permission: 'settings.manage' },
   { key: 'whatsapp', label: 'WhatsApp', href: '/dashboard/whatsapp', permission: 'whatsapp.manage' },
   { key: 'help', label: 'Help', href: '/dashboard/help' },

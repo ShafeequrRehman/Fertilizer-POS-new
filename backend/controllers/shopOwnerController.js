@@ -3,6 +3,7 @@ const User = require("../models/User");
 const Role = require("../models/Role");
 const Shop = require("../models/Shop");
 const Plan = require("../models/Plan");
+const StaffPayment = require("../models/StaffPayment");
 const { PERMISSIONS, PERMISSION_KEYS } = require("../config/permissions");
 
 function safeUser(user) {
@@ -35,7 +36,10 @@ exports.listEmployees = async (req, res) => {
 // POST /api/shop/employees
 exports.createEmployee = async (req, res) => {
   try {
-    const { name, username, password, email, phone, roleId } = req.body;
+    const {
+      name, username, password, email, phone, roleId,
+      designation, idCardNumber, address, reference, comment, monthlySalary,
+    } = req.body;
     if (!username || !password || !roleId) {
       return res.status(400).json({ message: "username, password, and roleId are required", reason: "validation_error" });
     }
@@ -72,6 +76,12 @@ exports.createEmployee = async (req, res) => {
       role: "employee",
       shopId: req.user.shopId,
       employeeRoleId: role._id,
+      designation: designation || "",
+      idCardNumber: idCardNumber || "",
+      address: address || "",
+      reference: reference || "",
+      comment: comment || "",
+      monthlySalary: Number(monthlySalary) || 0,
     });
 
     res.status(201).json({ ...safeUser(employee), roleName: role.name, permissions: role.permissions });
@@ -86,7 +96,10 @@ exports.updateEmployee = async (req, res) => {
     const employee = await User.findOne({ _id: req.params.id, shopId: req.user.shopId, role: "employee" });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
 
-    const { name, email, phone, roleId, isActive, username } = req.body;
+    const {
+      name, email, phone, roleId, isActive, username,
+      designation, idCardNumber, address, reference, comment, monthlySalary,
+    } = req.body;
 
     if (username && username !== employee.username) {
       const clash = await User.findOne({ username, _id: { $ne: employee._id } });
@@ -97,6 +110,12 @@ exports.updateEmployee = async (req, res) => {
     if (email !== undefined) employee.email = email;
     if (phone !== undefined) employee.phone = phone;
     if (isActive !== undefined) employee.isActive = isActive;
+    if (designation !== undefined) employee.designation = designation;
+    if (idCardNumber !== undefined) employee.idCardNumber = idCardNumber;
+    if (address !== undefined) employee.address = address;
+    if (reference !== undefined) employee.reference = reference;
+    if (comment !== undefined) employee.comment = comment;
+    if (monthlySalary !== undefined) employee.monthlySalary = Number(monthlySalary) || 0;
 
     if (roleId) {
       const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId });
@@ -142,6 +161,135 @@ exports.resetEmployeePassword = async (req, res) => {
     res.json({ message: "Employee password has been reset", username: employee.username });
   } catch (error) {
     res.status(500).json({ message: "Failed to reset password", detail: error.message });
+  }
+};
+
+// ---------------------------------------------------------------------
+// Payroll - built on top of User.monthlySalary plus a ledger of
+// StaffPayment rows (salary/advance/bonus/deduction). "Paid this month"
+// sums salary+advance+bonus and subtracts deduction, all within the
+// requested month; "remaining" is monthlySalary minus that sum, floored
+// at 0 for display purposes only (the raw number is still returned so
+// the UI can show an overpayment if it ever happens).
+// ---------------------------------------------------------------------
+
+function monthRange(monthParam) {
+  // monthParam is "YYYY-MM"; defaults to the current calendar month.
+  const now = new Date();
+  let year = now.getFullYear();
+  let month = now.getMonth(); // 0-indexed
+  if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
+    year = Number(monthParam.slice(0, 4));
+    month = Number(monthParam.slice(5, 7)) - 1;
+  }
+  const start = new Date(year, month, 1, 0, 0, 0, 0);
+  const end = new Date(year, month + 1, 1, 0, 0, 0, 0);
+  return { start, end, monthKey: `${year}-${String(month + 1).padStart(2, "0")}` };
+}
+
+// GET /api/shop/payroll?month=YYYY-MM
+exports.listPayroll = async (req, res) => {
+  try {
+    const { start, end, monthKey } = monthRange(req.query.month);
+    const employees = await User.find({ shopId: req.user.shopId, role: "employee" }).sort({ name: 1 });
+    const payments = await StaffPayment.find({
+      shopId: req.user.shopId,
+      date: { $gte: start, $lt: end },
+    });
+
+    const totalsByEmployee = new Map();
+    for (const payment of payments) {
+      const key = String(payment.employeeId);
+      const bucket = totalsByEmployee.get(key) || { paid: 0, bonus: 0, deduction: 0 };
+      if (payment.type === "deduction") bucket.deduction += payment.amount;
+      else if (payment.type === "bonus") bucket.bonus += payment.amount;
+      else bucket.paid += payment.amount; // salary + advance both count against the salary owed
+      totalsByEmployee.set(key, bucket);
+    }
+
+    const rows = employees.map((employee) => {
+      const bucket = totalsByEmployee.get(String(employee._id)) || { paid: 0, bonus: 0, deduction: 0 };
+      const paidThisMonth = bucket.paid - bucket.deduction;
+      const remaining = (employee.monthlySalary || 0) - paidThisMonth;
+      return {
+        employeeId: String(employee._id),
+        name: employee.name,
+        username: employee.username,
+        designation: employee.designation || "",
+        isActive: employee.isActive,
+        monthlySalary: employee.monthlySalary || 0,
+        paidThisMonth,
+        bonusThisMonth: bucket.bonus,
+        remaining,
+      };
+    });
+
+    const summary = rows.reduce(
+      (acc, row) => {
+        acc.totalMonthlySalary += row.monthlySalary;
+        acc.totalPaidThisMonth += row.paidThisMonth;
+        acc.totalRemaining += Math.max(row.remaining, 0);
+        return acc;
+      },
+      { totalMonthlySalary: 0, totalPaidThisMonth: 0, totalRemaining: 0 }
+    );
+
+    res.json({ month: monthKey, rows, summary });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load payroll", detail: error.message });
+  }
+};
+
+// GET /api/shop/payroll/payments?employeeId=&month=YYYY-MM
+exports.listPayments = async (req, res) => {
+  try {
+    const query = { shopId: req.user.shopId };
+    if (req.query.employeeId) query.employeeId = req.query.employeeId;
+    if (req.query.month) {
+      const { start, end } = monthRange(req.query.month);
+      query.date = { $gte: start, $lt: end };
+    }
+    const payments = await StaffPayment.find(query).populate("employeeId", "name username").sort({ date: -1 });
+    res.json(payments);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load payroll payments", detail: error.message });
+  }
+};
+
+// POST /api/shop/payroll/payments  body: { employeeId, amount, type, note, date }
+exports.recordPayment = async (req, res) => {
+  try {
+    const { employeeId, amount, type, note, date } = req.body;
+    if (!employeeId || !amount || Number(amount) <= 0) {
+      return res.status(400).json({ message: "employeeId and a positive amount are required", reason: "validation_error" });
+    }
+    const employee = await User.findOne({ _id: employeeId, shopId: req.user.shopId, role: "employee" });
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    const payment = await StaffPayment.create({
+      shopId: req.user.shopId,
+      employeeId,
+      amount: Number(amount),
+      type: ["salary", "advance", "bonus", "deduction"].includes(type) ? type : "salary",
+      note: note || "",
+      date: date ? new Date(date) : new Date(),
+      recordedBy: req.user.id || req.user._id,
+    });
+
+    res.status(201).json(await payment.populate("employeeId", "name username"));
+  } catch (error) {
+    res.status(500).json({ message: "Failed to record payment", detail: error.message });
+  }
+};
+
+// DELETE /api/shop/payroll/payments/:id
+exports.deletePayment = async (req, res) => {
+  try {
+    const result = await StaffPayment.deleteOne({ _id: req.params.id, shopId: req.user.shopId });
+    if (result.deletedCount === 0) return res.status(404).json({ message: "Payment record not found" });
+    res.json({ message: "Payment record removed" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete payment", detail: error.message });
   }
 };
 

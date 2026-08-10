@@ -1,12 +1,22 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw } from "lucide-react";
+import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil } from "lucide-react";
 import { shopApi, type EmployeeSummary, type RoleSummary, type PermissionDef } from "@/lib/shop-api";
+import { STAFF_DESIGNATIONS } from "@/lib/staff-designations";
 import { useToast } from "@/lib/toast";
 
-// Shop Owner-only page (see App.tsx route guard) for managing Employees
-// and their Roles - the frontend half of backend/routes/shopOwnerRoutes.js.
-// Employees are created only here, never self-registered (see
-// authController.register - self-service registration is disabled).
+// Shop Owner-only page (see App.tsx route guard) for managing staff -
+// login accounts (Employees tab) and the roles that control what they
+// can see and do (Roles tab). Renamed "Manage Staff" in the UI because it
+// now also holds each staff member's designation (Chief, Manager,
+// Cashier, Order Taker, Waiter, etc.) and directory details (ID card
+// number, address, phone, reference, comment) - the frontend half of
+// backend/routes/shopOwnerRoutes.js. Employees are created only here,
+// never self-registered (see authController.register - self-service
+// registration is disabled).
+//
+// The "Waiter" and "Order Taker" designations are what feed the POS
+// waiter dropdown (see waiterController.getWaiters) - there is no
+// separate waiter list to manage anymore (see SettingsPage.tsx).
 export default function EmployeesPage() {
   const { toast, confirm } = useToast();
   const [tab, setTab] = useState<"employees" | "roles">("employees");
@@ -15,6 +25,7 @@ export default function EmployeesPage() {
   const [permissions, setPermissions] = useState<PermissionDef[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateEmployee, setShowCreateEmployee] = useState(false);
+  const [editTarget, setEditTarget] = useState<EmployeeSummary | null>(null);
   const [showRoleEditor, setShowRoleEditor] = useState<RoleSummary | "new" | null>(null);
   const [resetTarget, setResetTarget] = useState<EmployeeSummary | null>(null);
 
@@ -38,7 +49,7 @@ export default function EmployeesPage() {
   };
 
   const removeEmployee = async (emp: EmployeeSummary) => {
-    const confirmed = await confirm(`Remove employee "${emp.name}"?`, { title: "Remove employee", confirmText: "Remove", tone: "danger" });
+    const confirmed = await confirm(`Remove staff member "${emp.name}"?`, { title: "Remove staff member", confirmText: "Remove", tone: "danger" });
     if (!confirmed) return;
     await shopApi.deleteEmployee(emp._id);
     load();
@@ -61,8 +72,8 @@ export default function EmployeesPage() {
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Employees</h1>
-          <p className="text-sm text-gray-500">Staff accounts and the roles that control what they can see and do.</p>
+          <h1 className="text-2xl font-bold">Manage Staff</h1>
+          <p className="text-sm text-gray-500">Staff accounts, designations, directory details, and the roles that control what they can see and do.</p>
         </div>
         <div className="flex items-center gap-3">
           <button type="button" onClick={load} disabled={loading} className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-50 disabled:opacity-60">
@@ -70,7 +81,7 @@ export default function EmployeesPage() {
           </button>
           {tab === "employees" ? (
             <button type="button" onClick={() => setShowCreateEmployee(true)} className="flex items-center gap-2 rounded-full bg-black px-4 py-2.5 text-sm font-bold text-white">
-              <Plus size={16} /> New Employee
+              <Plus size={16} /> New Staff Member
             </button>
           ) : (
             <button type="button" onClick={() => setShowRoleEditor("new")} className="flex items-center gap-2 rounded-full bg-black px-4 py-2.5 text-sm font-bold text-white">
@@ -81,7 +92,7 @@ export default function EmployeesPage() {
       </div>
 
       <div className="mb-6 flex gap-2">
-        <TabButton active={tab === "employees"} onClick={() => setTab("employees")}>Employees</TabButton>
+        <TabButton active={tab === "employees"} onClick={() => setTab("employees")}>Staff</TabButton>
         <TabButton active={tab === "roles"} onClick={() => setTab("roles")}>Roles &amp; Permissions</TabButton>
       </div>
 
@@ -91,7 +102,9 @@ export default function EmployeesPage() {
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Designation</th>
                 <th className="px-4 py-3">Username</th>
+                <th className="px-4 py-3">Phone</th>
                 <th className="px-4 py-3">Role</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3 text-right">Actions</th>
@@ -99,14 +112,22 @@ export default function EmployeesPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400">Loading...</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Loading...</td></tr>
               ) : employees.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400">No employees yet.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">No staff members yet.</td></tr>
               ) : (
                 employees.map((emp) => (
                   <tr key={emp._id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-semibold">{emp.name}</td>
+                    <td className="px-4 py-3">
+                      {emp.designation ? (
+                        <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700">{emp.designation}</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-gray-500">@{emp.username}</td>
+                    <td className="px-4 py-3 text-gray-500">{emp.phone || "—"}</td>
                     <td className="px-4 py-3">{roleName(emp)}</td>
                     <td className="px-4 py-3">
                       <button
@@ -119,6 +140,9 @@ export default function EmployeesPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
+                        <button type="button" title="Edit staff details" onClick={() => setEditTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
+                          <Pencil size={15} />
+                        </button>
                         <button type="button" title="Reset password" onClick={() => setResetTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
                           <KeyRound size={15} />
                         </button>
@@ -159,7 +183,10 @@ export default function EmployeesPage() {
       )}
 
       {showCreateEmployee ? (
-        <CreateEmployeeModal roles={roles} onClose={() => setShowCreateEmployee(false)} onCreated={load} />
+        <StaffFormModal roles={roles} onClose={() => setShowCreateEmployee(false)} onSaved={load} />
+      ) : null}
+      {editTarget ? (
+        <StaffFormModal roles={roles} employee={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
       ) : null}
       {showRoleEditor ? (
         <RoleEditorModal
@@ -200,53 +227,165 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
   );
 }
 
-function CreateEmployeeModal({ roles, onClose, onCreated }: { roles: RoleSummary[]; onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: "", username: "", password: "", email: "", phone: "", roleId: "" });
+// Handles both "New Staff Member" and "Edit Staff Member" - the same
+// fields either way, just pre-filled and PATCHed instead of POSTed when
+// `employee` is passed in.
+function StaffFormModal({
+  roles,
+  employee,
+  onClose,
+  onSaved,
+}: {
+  roles: RoleSummary[];
+  employee?: EmployeeSummary;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isEdit = Boolean(employee);
+  const initialRoleId = employee?.employeeRoleId
+    ? (typeof employee.employeeRoleId === "object" ? employee.employeeRoleId._id : employee.employeeRoleId)
+    : "";
+  const [form, setForm] = useState({
+    name: employee?.name || "",
+    username: employee?.username || "",
+    password: "",
+    email: employee?.email || "",
+    phone: employee?.phone || "",
+    roleId: initialRoleId || "",
+    designation: employee?.designation || "",
+    customDesignation: "",
+    idCardNumber: employee?.idCardNumber || "",
+    address: employee?.address || "",
+    reference: employee?.reference || "",
+    comment: employee?.comment || "",
+    monthlySalary: employee?.monthlySalary ? String(employee.monthlySalary) : "",
+  });
+  const [useCustomDesignation, setUseCustomDesignation] = useState(
+    Boolean(employee?.designation) && !STAFF_DESIGNATIONS.includes(employee?.designation as any)
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
   const submit = async () => {
     setSubmitting(true);
     setError("");
+    const designation = useCustomDesignation ? form.customDesignation.trim() : form.designation;
+    const payload: Record<string, unknown> = {
+      name: form.name,
+      email: form.email,
+      phone: form.phone,
+      roleId: form.roleId,
+      designation,
+      idCardNumber: form.idCardNumber,
+      address: form.address,
+      reference: form.reference,
+      comment: form.comment,
+      monthlySalary: form.monthlySalary ? Number(form.monthlySalary) : 0,
+    };
     try {
-      await shopApi.createEmployee(form);
-      onCreated();
+      if (isEdit && employee) {
+        if (form.username !== employee.username) payload.username = form.username;
+        await shopApi.updateEmployee(employee._id, payload);
+      } else {
+        payload.username = form.username;
+        payload.password = form.password;
+        await shopApi.createEmployee(payload);
+      }
+      onSaved();
       onClose();
     } catch (err: any) {
-      setError(err?.response?.data?.message || "Failed to create employee");
+      setError(err?.response?.data?.message || `Failed to ${isEdit ? "update" : "create"} staff member`);
     } finally {
       setSubmitting(false);
     }
   };
 
+  const canSubmit = isEdit
+    ? Boolean(form.username && form.roleId)
+    : Boolean(form.username && form.password && form.roleId);
+
   return (
-    <ModalShell title="New Employee" onClose={onClose}>
-      <div className="space-y-3 text-sm">
+    <ModalShell title={isEdit ? `Edit Staff — ${employee?.name || employee?.username}` : "New Staff Member"} onClose={onClose}>
+      <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1 text-sm">
         <TextField label="Full Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
         <div className="grid grid-cols-2 gap-3">
           <TextField label="Username" value={form.username} onChange={(v) => setForm({ ...form, username: v })} />
-          <TextField label="Password" type="password" value={form.password} onChange={(v) => setForm({ ...form, password: v })} />
+          {isEdit ? (
+            <div className="flex items-end pb-2 text-xs text-gray-400">Use "Reset password" to change the password.</div>
+          ) : (
+            <TextField label="Password" type="password" value={form.password} onChange={(v) => setForm({ ...form, password: v })} />
+          )}
         </div>
         <div className="grid grid-cols-2 gap-3">
           <TextField label="Email (optional)" value={form.email} onChange={(v) => setForm({ ...form, email: v })} />
-          <TextField label="Phone (optional)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
+          <TextField label="Phone Number" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
         </div>
+
         <div>
-          <label className="mb-1 block text-xs text-gray-500">Role</label>
+          <label className="mb-1 block text-xs text-gray-500">Role (permissions)</label>
           <select value={form.roleId} onChange={(e) => setForm({ ...form, roleId: e.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2">
             <option value="">Select a role</option>
             {roles.map((r) => <option key={r._id} value={r._id}>{r.name}</option>)}
           </select>
         </div>
+
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">
+            Designation (job title - Waiter/Order Taker show up in the POS waiter list)
+          </label>
+          {useCustomDesignation ? (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={form.customDesignation}
+                onChange={(e) => setForm({ ...form, customDesignation: e.target.value })}
+                placeholder="e.g. Barista"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/10"
+              />
+              <button type="button" onClick={() => setUseCustomDesignation(false)} className="whitespace-nowrap rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-50">
+                Choose from list
+              </button>
+            </div>
+          ) : (
+            <select
+              value={form.designation}
+              onChange={(e) => {
+                if (e.target.value === "__custom__") { setUseCustomDesignation(true); return; }
+                setForm({ ...form, designation: e.target.value });
+              }}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+            >
+              <option value="">Select a designation</option>
+              {STAFF_DESIGNATIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+              <option value="__custom__">Other (type custom)…</option>
+            </select>
+          )}
+        </div>
+
+        <TextField label="ID Card Number" value={form.idCardNumber} onChange={(v) => setForm({ ...form, idCardNumber: v })} />
+        <TextField label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} />
+        <div className="grid grid-cols-2 gap-3">
+          <TextField label="Reference" value={form.reference} onChange={(v) => setForm({ ...form, reference: v })} />
+          <TextField label="Monthly Salary" type="number" value={form.monthlySalary} onChange={(v) => setForm({ ...form, monthlySalary: v })} />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">Comment</label>
+          <textarea
+            value={form.comment}
+            onChange={(e) => setForm({ ...form, comment: e.target.value })}
+            rows={2}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/10"
+          />
+        </div>
       </div>
       {error ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{error}</div> : null}
       <button
         type="button"
-        disabled={submitting || !form.username || !form.password || !form.roleId}
+        disabled={submitting || !canSubmit}
         onClick={submit}
         className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white disabled:opacity-50"
       >
-        {submitting ? "Creating..." : "Create Employee"}
+        {submitting ? "Saving..." : isEdit ? "Save Changes" : "Create Staff Member"}
       </button>
     </ModalShell>
   );
@@ -274,7 +413,7 @@ function ResetEmployeePasswordModal({ employee, onClose }: { employee: EmployeeS
   if (done) {
     return (
       <ModalShell title="Password Reset" onClose={onClose}>
-        <p className="text-sm text-gray-600">The employee's password has been updated.</p>
+        <p className="text-sm text-gray-600">The staff member's password has been updated.</p>
         <button type="button" onClick={onClose} className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white">Done</button>
       </ModalShell>
     );

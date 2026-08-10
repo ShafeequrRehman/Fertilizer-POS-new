@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
-import { 
-  Users2, UserCircle2, Star, History, UserPlus, 
-  Search, UserCheck, Clock, Zap, 
-  ShieldCheck, MoreVertical, ChevronRight
+import React, { useEffect, useState } from 'react';
+import {
+  Users2, UserCircle2, Star, History, UserPlus,
+  Search, UserCheck, Clock, Zap,
+  ShieldCheck, MoreVertical, ChevronRight, UserRoundCheck, UserRoundX
 } from 'lucide-react';
-import { WaiterManagementSection } from '@/components/WaiterManagementSection';
+import { fetchWaiters } from '@/lib/pos-api';
+import { Waiter } from '@/lib/pos-types';
 
 // --- MOCK DATA ---
 const CUSTOMERS = [
@@ -190,11 +191,56 @@ function HRView() {
         </div>
       </div>
 
-      <WaiterManagementSection
-        title="Waiter & Floor Team"
-        description="Update the waiter roster used during order placement. Active names appear above table selection in the POS screen."
-        cardClassName="rounded-[40px] border border-slate-100 bg-white p-8 shadow-sm"
-      />
+      <WaiterRosterReadOnly />
+    </div>
+  );
+}
+
+// Read-only view of who currently qualifies as a waiter/order taker in the
+// POS dropdown (see backend/controllers/waiterController.js). Waiters are
+// now added and edited exclusively from Manage Staff - designation
+// "Waiter" or "Order Taker" - not here.
+function WaiterRosterReadOnly() {
+  const [waiters, setWaiters] = useState<Waiter[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    fetchWaiters()
+      .then(setWaiters)
+      .finally(() => setIsLoading(false));
+  }, []);
+
+  return (
+    <div className="rounded-[40px] border border-slate-100 bg-white p-8 shadow-sm">
+      <div className="flex items-center gap-2">
+        <Users2 size={18} className="text-indigo-600" />
+        <h3 className="text-lg font-black text-slate-900">Waiter & Floor Team</h3>
+      </div>
+      <p className="mt-2 max-w-2xl text-sm text-slate-500">
+        Waiters and order takers are added from <span className="font-bold text-slate-700">Manage Staff</span>.
+        Add a staff member there with designation <span className="font-bold text-slate-700">"Waiter"</span> or{' '}
+        <span className="font-bold text-slate-700">"Order Taker"</span> and they'll automatically show up here and in the POS waiter dropdown.
+      </p>
+
+      <div className="mt-6 space-y-2">
+        {isLoading ? (
+          <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-500">Loading...</div>
+        ) : waiters.length === 0 ? (
+          <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-500">No waiters or order takers yet.</div>
+        ) : (
+          waiters.map((waiter) => (
+            <div key={waiter.id} className="flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${waiter.isActive ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"}`}>
+                  {waiter.isActive ? <UserRoundCheck size={16} /> : <UserRoundX size={16} />}
+                </div>
+                <p className="text-sm font-bold text-slate-900">{waiter.name}</p>
+              </div>
+              <span className="text-xs font-bold uppercase text-slate-400">{waiter.isActive ? "Available in POS" : "Hidden"}</span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

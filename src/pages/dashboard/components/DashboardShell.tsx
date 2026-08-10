@@ -54,7 +54,10 @@ export default function DashboardShell() {
   const role = getAuthRole();
 
   const navItems = DASHBOARD_PAGES
-    .filter((item) => item.key !== 'employees' || role === 'shopowner')
+    // Payroll and Manage Staff both hit Shop Owner-only backend routes
+    // (requireShopOwner) - hide them from employees entirely rather than
+    // showing a link that always 403s.
+    .filter((item) => (item.key !== 'employees' && item.key !== 'payroll') || role === 'shopowner')
     .filter((item) => !item.permission || hasPermission(item.permission))
     .filter((item) => isPageEnabled(item.key))
     .map((item) => ({ ...item, icon: PAGE_ICONS[item.key] }));

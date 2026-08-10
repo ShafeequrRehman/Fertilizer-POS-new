@@ -18,6 +18,12 @@ router.patch("/employees/:id", ctrl.updateEmployee);
 router.delete("/employees/:id", ctrl.deleteEmployee);
 router.patch("/employees/:id/reset-password", ctrl.resetEmployeePassword);
 
+// Payroll
+router.get("/payroll", ctrl.listPayroll);
+router.get("/payroll/payments", ctrl.listPayments);
+router.post("/payroll/payments", ctrl.recordPayment);
+router.delete("/payroll/payments/:id", ctrl.deletePayment);
+
 // Roles
 router.get("/roles", ctrl.listRoles);
 router.post("/roles", ctrl.createRole);

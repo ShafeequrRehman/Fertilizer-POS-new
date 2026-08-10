@@ -3,10 +3,9 @@ import React, { ChangeEvent, useMemo, useRef, useState, useEffect } from 'react'
 import {
   Settings, Bell, Lock, Database,
   Store, Printer, Monitor, Save, Shield,
-  CreditCard, ImagePlus, Trash2, Package, Receipt, Eye
+  CreditCard, ImagePlus, Trash2, Package, Receipt, Eye, Users
 } from 'lucide-react';
 import { PRINT_LOGO_STORAGE_KEY, persistPrintLogoToDisk } from '@/lib/print-logo';
-import { WaiterManagementSection } from '@/components/WaiterManagementSection';
 import { ProductManagementSection } from '@/components/ProductManagementSection';
 import { ReceiptManagementSection } from '@/components/ReceiptManagementSection';
 import { SidebarPagesSection } from '@/components/SidebarPagesSection';
@@ -230,12 +229,18 @@ export default function SettingsPage() {
               />
             </div>
 
-            <WaiterManagementSection
-              title="Waiter Setup"
-              description="Manage waiter names here so the POS waiter dropdown stays synced for the restaurant."
-              cardClassName="rounded-[28px] border border-slate-200 bg-white p-6"
-            />
-            
+            <div className="rounded-[28px] border border-slate-200 bg-white p-6">
+              <div className="flex items-center gap-2">
+                <Users size={18} className="text-indigo-600" />
+                <h3 className="text-lg font-black text-slate-900">Waiter Setup Has Moved</h3>
+              </div>
+              <p className="mt-2 max-w-2xl text-sm text-slate-500">
+                Waiters and order takers are now added from <span className="font-bold text-slate-700">Manage Staff</span>.
+                Add a staff member there with designation <span className="font-bold text-slate-700">"Waiter"</span> or{' '}
+                <span className="font-bold text-slate-700">"Order Taker"</span> and they'll automatically show up in the POS waiter dropdown.
+              </p>
+            </div>
+
             {settings && (
             <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

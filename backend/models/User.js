@@ -51,6 +51,21 @@ const userSchema = new mongoose.Schema(
       ref: "Role",
       default: null,
     },
+    // Staff directory fields (Manage Staff page) - only meaningful for
+    // role: "employee". `designation` is the job title shown throughout
+    // the app (Chief, Manager, Cashier, Order Taker, Waiter, etc.) and is
+    // what POS order placement filters by when building the waiter/order
+    // taker dropdown (see waiterController.getWaiters) - free text so a
+    // shop can use whatever titles fit their team, not a fixed enum.
+    designation: { type: String, default: "" },
+    idCardNumber: { type: String, default: "" },
+    address: { type: String, default: "" },
+    reference: { type: String, default: "" },
+    comment: { type: String, default: "" },
+    // Agreed monthly salary, used by the Payroll page alongside
+    // StaffPayment records to compute how much of the month's pay has
+    // already been taken and how much remains.
+    monthlySalary: { type: Number, default: 0 },
     isActive: {
       type: Boolean,
       default: true,
