@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, hasPermission, isPageEnabled } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
+import { useOfflineSync } from '@/lib/offline-sync';
 import { logoutRequest } from '@/lib/api';
 import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, claimReceiptPrint, closeShopSession, fetchUnprintedKitchenOrders, fetchUnprintedKitchenUpdateOrders, fetchUnprintedReceiptOrders, openShopSession } from '@/lib/pos-api';
 import { useNetworkStatus } from '@/lib/network-status';
@@ -29,6 +30,7 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   ledger: <BookText size={18} />,
   record: <ClipboardList size={18} />,
   shifts: <Store size={18} />,
+  offline: <Wifi size={18} />,
   payroll: <DollarSign size={18} />,
   reports: <FileText size={18} />,
   employees: <UserCog size={18} />,
@@ -61,6 +63,11 @@ export default function DashboardShell() {
     .filter((item) => !item.permission || hasPermission(item.permission))
     .filter((item) => isPageEnabled(item.key))
     .map((item) => ({ ...item, icon: PAGE_ICONS[item.key] }));
+
+  // Runs the 5-minute offline sync timer (see lib/offline-sync.ts) for the
+  // lifetime of the dashboard session - a no-op outside the Electron app,
+  // and harmless to mount even for shops that never use offline mode.
+  useOfflineSync();
 
   return (
     <ShopSessionProvider>

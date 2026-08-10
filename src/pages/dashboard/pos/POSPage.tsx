@@ -6,8 +6,11 @@ import { getProductImageUrl } from '@/lib/asset-path';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
-import { hasPermission } from '@/lib/auth';
+import { hasPermission, getAuthUser } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
+import { useNetworkStatus } from '@/lib/network-status';
+import { isDesktopApp } from '@/lib/api';
+import { createLocalOrder } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -42,6 +45,7 @@ type ProductGroup = {
 export default function POSPage() {
   const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession } = useShopSession();
   const { toast: shopToast } = useToast();
+  const { isOnline } = useNetworkStatus();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
@@ -356,7 +360,17 @@ export default function POSPage() {
     setStatusMessage(null);
 
     try {
-      await updateExistingCustomerIfNeeded();
+      // Both of these are cloud lookups/writes - skipped entirely while
+      // offline (the till has no way to reach them, and neither is
+      // essential to actually ringing up the order) rather than letting a
+      // failed network call here block the whole offline order from
+      // saving to the Local Hub below.
+      if (isDesktopApp() && !isOnline) {
+        // no-op: see the branch below, which builds orderPayload and then
+        // queues it locally instead of touching the network at all.
+      } else {
+        await updateExistingCustomerIfNeeded();
+      }
 
       // A customer is allowed to place a new order even while an older one
       // of theirs is still pending - the old order stays exactly as-is
@@ -364,7 +378,7 @@ export default function POSPage() {
       // outstanding amount on it is folded into "Previous Dues" the next
       // time any of their bills is paid (see Sales page's Complete
       // Payment panel), instead of blocking checkout outright like before.
-      if (orderFormData.phone) {
+      if (orderFormData.phone && !(isDesktopApp() && !isOnline)) {
         try {
           const pendingOrder = await checkPendingOrder(orderFormData.phone);
           if (pendingOrder.exists) {
@@ -401,11 +415,31 @@ export default function POSPage() {
         version: 1,
       };
 
-      const savedOrder = await createOrder(orderPayload) as SavedOrder;
+      // Offline mode: only ever attempted inside the desktop app (the
+      // Local Hub - see lib/local-hub-api.ts - only exists there), and
+      // only when the till is actually offline right now. A paired
+      // phone's own offline fallback lives in CheckoutScreen.tsx on
+      // pos-mobile; this branch is specifically the till's own POS screen
+      // placing an order straight into its own Local Hub queue.
+      const isOfflineOrder = isDesktopApp() && !isOnline;
+      let savedOrder: SavedOrder;
+
+      if (isOfflineOrder) {
+        const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username });
+        savedOrder = {
+          ...orderPayload,
+          id: `local-${localRecord.id}`,
+          dailyOrderNumber: localRecord.localOrderNumber,
+        } as SavedOrder;
+      } else {
+        savedOrder = await createOrder(orderPayload) as SavedOrder;
+      }
 
       setCart([]);
       resetOrderForm();
-      if (savedOrder.customerSyncWarning) {
+      if (isOfflineOrder) {
+        showMessage('success', `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.`);
+      } else if (savedOrder.customerSyncWarning) {
         showMessage('error', `Order ${savedOrder.dailyOrderNumber || savedOrder.id} saved, but: ${savedOrder.customerSyncWarning}`);
       } else {
         showMessage('success', `Order ${savedOrder.dailyOrderNumber || savedOrder.id} saved! Printing kitchen receipt and notifying customer...`);
@@ -419,12 +453,19 @@ export default function POSPage() {
           const settings = getStoreSettings();
           const printLogo = localStorage.getItem('preferred-print-logo');
 
+          // An offline order has no cloud record yet (nothing to claim,
+          // and nothing else could possibly be racing to print it - no
+          // other till/process can even see it until it syncs), so this
+          // till just prints straight away instead of claiming first.
+          const claimKitchen = isOfflineOrder ? Promise.resolve() : claimKitchenPrint(savedOrder.id);
+          const claimReceipt = isOfflineOrder ? Promise.resolve() : claimReceiptPrint(savedOrder.id);
+
           if (settings.kitchenPrinter) {
             // Claim before printing, same rule the background poll follows
             // (see DashboardShell.tsx) - guarantees this order can never
             // get printed twice even if this till's own immediate-print
             // path and the poll loop somehow race on the same order.
-            claimKitchenPrint(savedOrder.id)
+            claimKitchen
               .then(() => {
                 ipcRenderer.invoke('print-kitchen-receipt-data', savedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
               })
@@ -450,7 +491,7 @@ export default function POSPage() {
           // so this order never gets a second copy.
           if (savedOrder.orderType === 'TakeAway') {
             if (settings.counterPrinter) {
-              claimReceiptPrint(savedOrder.id)
+              claimReceipt
                 .then(async () => {
                   // Small order-number-only slip first, then the full
                   // customer receipt - so the customer has something short
@@ -472,13 +513,21 @@ export default function POSPage() {
             }
           }
 
-          void sendOrderPlacedMessage(savedOrder, settings);
+          // WhatsApp needs the cloud (the session lives on the server) and
+          // a real order id to link to - skipped for offline orders; the
+          // customer gets notified once this order syncs and creates its
+          // real cloud record instead.
+          if (!isOfflineOrder) {
+            void sendOrderPlacedMessage(savedOrder, settings);
+          }
         } catch (err) {
           console.error("Electron print error:", err);
-          setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
-          void sendOrderPlacedMessage(savedOrder, getStoreSettings());
+          if (!isOfflineOrder) {
+            setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
+            void sendOrderPlacedMessage(savedOrder, getStoreSettings());
+          }
         }
-      } else {
+      } else if (!isOfflineOrder) {
         setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
         void sendOrderPlacedMessage(savedOrder, getStoreSettings());
       }

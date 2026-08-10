@@ -26,6 +26,7 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
+  { key: 'offline', label: 'Connect Devices', href: '/dashboard/offline' },
   // Role-gated (shop owner only) rather than permission-gated in
   // DashboardShell.tsx - kept here anyway so it still shows up as a
   // toggleable row in the Super Admin's page picker.

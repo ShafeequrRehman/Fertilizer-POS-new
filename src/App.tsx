@@ -18,6 +18,7 @@ import LedgerPage from '@/pages/dashboard/LedgerPage';
 import RecordPage from '@/pages/dashboard/RecordPage';
 import ShiftsPage from '@/pages/dashboard/ShiftsPage';
 import PayrollPage from '@/pages/dashboard/PayrollPage';
+import OfflineSyncPage from '@/pages/dashboard/OfflineSyncPage';
 import ReportsPage from '@/pages/dashboard/ReportsPage';
 import AdminPage from '@/pages/dashboard/AdminPage';
 import EmployeesPage from '@/pages/dashboard/EmployeesPage';
@@ -76,6 +77,7 @@ export default function App() {
             <Route path="ledger" element={<LedgerPage />} />
             <Route path="record" element={<RecordPage />} />
             <Route path="shifts" element={<ShiftsPage />} />
+            <Route path="offline" element={<OfflineSyncPage />} />
             <Route path="payroll" element={<PayrollPage />} />
             <Route path="reports" element={<ReportsPage />} />
             <Route path="admin" element={<AdminPage />} />

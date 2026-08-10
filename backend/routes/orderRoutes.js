@@ -15,6 +15,7 @@ const {
   claimReceiptPrint,
   getUnprintedKitchenUpdateOrders,
   claimKitchenUpdatePrint,
+  importOfflineOrders,
 } = require("../controllers/orderController");
 
 const router = express.Router();
@@ -23,6 +24,10 @@ router.use(authenticate, requireShopMember, requireLicenseValid);
 
 router.get("/", getOrders);
 router.post("/", createOrder);
+// Offline sync engine (see pos-web/src/lib/offline-sync.ts) - must come
+// before the generic "/:id" GET below, same reason as the kitchen/receipts
+// routes.
+router.post("/import-offline", importOfflineOrders);
 router.get("/pending/:phone", checkPendingOrder);
 // Must come before the generic "/:id" GET below, or Express would try to
 // treat "kitchen"/"receipts"/"kitchen-updates" as an order id.

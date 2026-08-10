@@ -255,6 +255,122 @@ exports.createOrder = async (req, res) => {
   }
 };
 
+// POST /api/orders/import-offline
+// Called by the desktop app's offline sync engine (see
+// pos-web/src/lib/offline-sync.ts) every 5 minutes (and on demand) once
+// the shop is back online, to push everything queued in the Local Hub
+// (backend/localHub/) while the internet was down. Deliberately a
+// separate endpoint rather than looping the client over POST /orders,
+// for two reasons: it needs to assign the real dailyOrderNumber to
+// several orders in the correct original order (oldest offline order
+// first) in one request, and it needs to be safely retryable - if the
+// sync engine's earlier attempt got a response but the Local Hub never
+// received the ack (crash, closed lid, whatever), retrying must not
+// create duplicates. clientSyncId is what makes that safe: each offline
+// order already carries the same clientSyncId it would have gotten from
+// a normal online submission, and any order that already exists with that
+// clientSyncId for this shop is treated as already-imported and skipped
+// rather than re-created.
+exports.importOfflineOrders = async (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body?.orders) ? req.body.orders : [];
+    if (incoming.length === 0) {
+      return res.json({ imported: [], skipped: [], failed: [] });
+    }
+
+    // Oldest-queued-first, so dailyOrderNumbers come out in the same
+    // relative order the till actually rang these up in, even though
+    // they're all being created in this one online burst.
+    const ordered = [...incoming].sort((a, b) => {
+      const aTime = new Date(a.offlineCreatedAt || 0).getTime();
+      const bTime = new Date(b.offlineCreatedAt || 0).getTime();
+      return aTime - bTime;
+    });
+
+    const imported = [];
+    const skipped = [];
+    const failed = [];
+
+    for (const entry of ordered) {
+      const payload = entry?.payload;
+      const clientSyncId = payload?.clientSyncId || payload?.orderId || "";
+
+      try {
+        if (clientSyncId) {
+          const existing = await Order.findOne({ clientSyncId, ...buildShopScope(req) });
+          if (existing) {
+            skipped.push({ localOrderId: entry.localOrderId, orderId: String(existing._id), dailyOrderNumber: existing.dailyOrderNumber });
+            continue;
+          }
+        }
+
+        // Same atomic-counter allocation createOrder uses - see its
+        // comment above for why this has to be a single $inc, not a
+        // separate read-then-write. The shop must still be "open" right
+        // now for these to import; if it's been closed since the offline
+        // orders were queued, importing stops and reports what's left as
+        // failed so a human can decide (re-open the shop, or handle these
+        // manually) rather than silently dropping them.
+        const openSession = await ShopSession.findOneAndUpdate(
+          { ...buildShopScope(req), status: "open" },
+          { $inc: { orderCounter: 1 } },
+          { new: true, sort: { openedAt: 1 } }
+        );
+        if (!openSession) {
+          failed.push({ localOrderId: entry.localOrderId, error: "Shop is closed - open the shop to import queued offline orders." });
+          continue;
+        }
+
+        const totals = recalculateTotals(payload.items || [], payload.discount);
+        const dailyOrderNumber = openSession.orderCounter;
+
+        const order = await Order.create({
+          ...payload,
+          ...buildShopScope(req),
+          userId: payload.userId || (req.user?.id ? String(req.user.id) : ""),
+          subtotal: totals.subtotal,
+          tax: totals.tax,
+          total: totals.total,
+          discount: buildDiscountRecord(payload.discount, totals.discountAmount),
+          dailyOrderNumber,
+          clientSyncId,
+          paidAmount: payload.paidAmount || 0,
+          remainingAmount: typeof payload.remainingAmount === "number" ? payload.remainingAmount : totals.total,
+          createdOffline: true,
+          offlineOrderNumber: entry.localOrderNumber || null,
+          offlineCreatedAt: entry.offlineCreatedAt ? new Date(entry.offlineCreatedAt) : null,
+        });
+
+        if (payload.customer?.phone && payload.customer.phone !== "03000000000") {
+          try {
+            await Customer.findOneAndUpdate(
+              { phone: payload.customer.phone, ...buildShopScope(req) },
+              {
+                name: payload.customer.name,
+                phone: payload.customer.phone,
+                address: payload.customer.address || payload.address || "",
+                shopId: req.user.shopId,
+              },
+              { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+          } catch (customerError) {
+            console.error("Non-fatal: customer contact-info sync failed during offline import", customerError);
+          }
+        }
+
+        imported.push({ localOrderId: entry.localOrderId, orderId: String(order._id), dailyOrderNumber });
+      } catch (entryError) {
+        console.error("Failed to import one offline order:", entryError);
+        failed.push({ localOrderId: entry.localOrderId, error: entryError.message });
+      }
+    }
+
+    res.json({ imported, skipped, failed });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // GET /api/orders/kitchen/unprinted
 // Feeds the till's background "print kitchen tickets for orders nobody has
 // printed yet" poll (see pos-web's DashboardShell.tsx) - this is what makes

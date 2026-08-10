@@ -160,10 +160,20 @@ if (!gotTheLock) {
   let backendPort = 5000;
   let mainWindow = null;
   let backendStarted = false;
+  let localHubStarted = false;
 
   if (!fs.existsSync(runtimeDataDir)) {
     fs.mkdirSync(runtimeDataDir, { recursive: true });
   }
+
+  // Local Hub (see backend/localHub/server.js) data lives under userData,
+  // same as everything else this app persists locally - separate from
+  // `runtimeDataDir` (just logs) and unrelated to the legacy embedded
+  // backend's MongoDB connection. Setting this env var before the module
+  // is ever required is what points its file-backed store here instead of
+  // a path relative to the (possibly read-only, inside an asar) install
+  // directory.
+  process.env.POS_LOCAL_HUB_DATA_DIR = path.join(app.getPath("userData"), "local-hub");
 
   function logRuntime(message, error) {
     const line = `[${new Date().toISOString()}] ${message}${error ? `\n${error.stack || error.message || String(error)}` : ""}\n`;
@@ -295,6 +305,62 @@ if (!gotTheLock) {
     }
   }
 
+  // Unlike startBackendServer (the legacy full API, gated on VITE_API_URL
+  // being unset because it needs MongoDB Atlas), the Local Hub starts
+  // ALWAYS - it's what lets this till take orders offline and lets a
+  // paired phone reach it over LAN, regardless of whether this till
+  // itself is also configured to talk to the cloud. See
+  // backend/localHub/server.js for the full design rationale.
+  async function startLocalHubServer() {
+    if (localHubStarted) return true;
+
+    try {
+      let backendDir = path.join(__dirname, "backend");
+      if (!fs.existsSync(backendDir) && process.resourcesPath) {
+        backendDir = path.join(process.resourcesPath, "backend");
+      }
+      const localHubPath = path.join(backendDir, "localHub", "server.js");
+
+      if (!fs.existsSync(localHubPath)) {
+        logRuntime(`Local Hub not found at ${localHubPath}`);
+        return false;
+      }
+
+      delete require.cache[require.resolve(localHubPath)];
+      const { startLocalHub } = require(localHubPath);
+      await startLocalHub();
+
+      localHubStarted = true;
+      logRuntime("Local Hub started successfully");
+      return true;
+    } catch (error) {
+      logRuntime("Failed to start Local Hub - offline mode will be unavailable this session", error);
+      // Never fatal - the till should still work normally against the
+      // cloud even if the Local Hub couldn't bind its port for some reason
+      // (e.g. another instance already running).
+      return false;
+    }
+  }
+
+  async function stopLocalHubServer() {
+    if (!localHubStarted) return;
+    try {
+      let backendDir = path.join(__dirname, "backend");
+      if (!fs.existsSync(backendDir) && process.resourcesPath) {
+        backendDir = path.join(process.resourcesPath, "backend");
+      }
+      const localHubPath = path.join(backendDir, "localHub", "server.js");
+      if (fs.existsSync(localHubPath)) {
+        const { stopLocalHub } = require(localHubPath);
+        await stopLocalHub();
+        logRuntime("Local Hub stopped");
+      }
+    } catch (error) {
+      logRuntime("Error stopping Local Hub", error);
+    }
+    localHubStarted = false;
+  }
+
   async function loadApp(explicitUrl) {
     if (!mainWindow) {
       createWindow();
@@ -357,6 +423,7 @@ if (!gotTheLock) {
       }
       backendStarted = false;
     }
+    await stopLocalHubServer();
   }
 
   app.on("second-instance", () => {
@@ -1064,6 +1131,7 @@ if (!gotTheLock) {
         // (localhost:5000) are already up externally, confirmed by wait-on
         // before this process was even spawned. Just attach to them.
         logRuntime(`Dev mode: attaching to external dev server at ${devServerUrl}`);
+        await startLocalHubServer();
         await loadApp(devServerUrl);
       } else {
         // `npm run electron` (standalone) and the packaged production app.
@@ -1076,11 +1144,15 @@ if (!gotTheLock) {
         // already prefers VITE_API_URL over localhost:5000 - see
         // DEFAULT_CLOUD_API_BASES there), so skip it entirely.
         if (process.env.VITE_API_URL) {
-          logRuntime(`VITE_API_URL is set (${process.env.VITE_API_URL}) - skipping local backend, this till talks to the remote server only.`);
+          logRuntime(`VITE_API_URL is set (${process.env.VITE_API_URL}) - skipping legacy local backend, this till talks to the remote server only.`);
         } else {
           logRuntime("Starting backend server...");
           await startBackendServer();
         }
+        // Local Hub starts regardless of the branch above - see
+        // startLocalHubServer's comment.
+        logRuntime("Starting Local Hub...");
+        await startLocalHubServer();
         await loadApp();
       }
     } catch (error) {

@@ -83,6 +83,15 @@ const orderSchema = new mongoose.Schema(
     // already set so the customer never gets two copies.
     customerReceiptPrintedAt: { type: Date, default: null },
     pendingKitchenUpdate: { type: pendingKitchenUpdateSchema, default: null },
+    // Set only for orders that were originally rung up while the shop had
+    // no internet (see backend/localHub/ + orderController.importOfflineOrders).
+    // dailyOrderNumber above is still the shop's real, permanent ticket
+    // number, assigned at import time same as any other order -
+    // offlineOrderNumber is just the temporary local ticket number staff
+    // saw at the moment the order was actually placed, kept for traceability.
+    createdOffline: { type: Boolean, default: false },
+    offlineOrderNumber: { type: Number, default: null },
+    offlineCreatedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
