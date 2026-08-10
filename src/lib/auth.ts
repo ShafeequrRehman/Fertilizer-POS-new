@@ -146,6 +146,17 @@ export function isPageEnabled(pageKey: string): boolean {
   return enabledPages.includes(pageKey);
 }
 
+// Called right after SidebarPagesSection.tsx successfully saves a new
+// selection, so the sidebar can reflect it immediately instead of only
+// after the next login. setAuthSession() only ever runs at login/refresh -
+// this is the one place the cached shop object is patched mid-session.
+export function updateCachedShopEnabledPages(enabledPages: string[]) {
+  if (typeof window === "undefined") return;
+  const current = getAuthShop();
+  if (!current) return;
+  storeBoth(AUTH_SHOP_KEY, JSON.stringify({ ...current, enabledPages }));
+}
+
 export function setAuthSession(payload: LoginSessionPayload) {
   if (typeof window === "undefined") return;
 

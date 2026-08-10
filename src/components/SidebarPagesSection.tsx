@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AlertCircle, Lock, XCircle } from 'lucide-react';
 import { fetchShopProfile, updateEnabledPages, type ShopProfile } from '@/lib/pos-api';
+import { updateCachedShopEnabledPages } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
 
 // Lets the Shop Owner control their OWN dashboard sidebar - check a page
@@ -47,7 +48,14 @@ export function SidebarPagesSection() {
     setSelectedPages(saved);
     setProfile((previous) => (previous ? { ...previous, enabledPages: saved } : previous));
     setShowKeyPrompt(false);
-    setSavedMessage('Saved. Reopen the app (or log back in) to see the sidebar update.');
+    setSavedMessage('Saved - reloading to update your sidebar...');
+    // DashboardShell.tsx computes its nav list from the cached shop object
+    // (see lib/auth.ts getAuthShop/isPageEnabled) on every render, but
+    // nothing tells it to re-render just because localStorage changed - a
+    // full reload is the simplest reliable way to pick up the new
+    // selection immediately instead of only at the next login.
+    updateCachedShopEnabledPages(saved);
+    window.setTimeout(() => window.location.reload(), 600);
   }
 
   if (loading) {
