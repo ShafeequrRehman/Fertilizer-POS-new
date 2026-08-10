@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Plus, Ban, CheckCircle2, KeyRound, CalendarPlus, Pencil, X, ShieldAlert } from "lucide-react";
+import { Plus, Ban, CheckCircle2, KeyRound, CalendarPlus, Pencil, X, ShieldAlert, Eye } from "lucide-react";
 import { superAdminApi, type ShopSummary, type PlanSummary } from "@/lib/superadmin-api";
 import { useToast } from "@/lib/toast";
 
@@ -14,6 +14,7 @@ export default function ShopsPage() {
   const [extendTarget, setExtendTarget] = useState<ShopSummary | null>(null);
   const [resetTarget, setResetTarget] = useState<ShopSummary | null>(null);
   const [resetKeyTarget, setResetKeyTarget] = useState<ShopSummary | null>(null);
+  const [resetPageKeyTarget, setResetPageKeyTarget] = useState<ShopSummary | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -122,6 +123,19 @@ export default function ShopsPage() {
                         <ShieldAlert size={14} />
                         {shop.hasCancelOrderKey ? "Cancel Key" : "Set Cancel Key"}
                       </button>
+                      <button
+                        type="button"
+                        title={shop.hasPageVisibilityKey ? "Change this shop's Page Visibility Key" : "This shop has no Page Visibility Key yet - set one so the Shop Owner can control their own sidebar pages"}
+                        onClick={() => setResetPageKeyTarget(shop)}
+                        className={`flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs font-semibold transition ${
+                          shop.hasPageVisibilityKey
+                            ? "border-white/10 text-gray-300 hover:bg-white/10"
+                            : "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                        }`}
+                      >
+                        <Eye size={14} />
+                        {shop.hasPageVisibilityKey ? "Page Key" : "Set Page Key"}
+                      </button>
                       <IconButton title="Edit shop" onClick={() => setEditTarget(shop)}><Pencil size={15} /></IconButton>
                       <IconButton title="Extend license" onClick={() => setExtendTarget(shop)}><CalendarPlus size={15} /></IconButton>
                       <IconButton title="Reset owner password" onClick={() => setResetTarget(shop)}><KeyRound size={15} /></IconButton>
@@ -146,6 +160,7 @@ export default function ShopsPage() {
       {extendTarget ? <ExtendLicenseModal shop={extendTarget} onClose={() => setExtendTarget(null)} onDone={load} /> : null}
       {resetTarget ? <ResetPasswordModal shop={resetTarget} onClose={() => setResetTarget(null)} /> : null}
       {resetKeyTarget ? <ResetCancelKeyModal shop={resetKeyTarget} onClose={() => setResetKeyTarget(null)} /> : null}
+      {resetPageKeyTarget ? <ResetPageVisibilityKeyModal shop={resetPageKeyTarget} onClose={() => setResetPageKeyTarget(null)} /> : null}
     </div>
   );
 }
@@ -548,6 +563,57 @@ function ResetCancelKeyModal({ shop, onClose }: { shop: ShopSummary; onClose: ()
       {error ? <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-2 text-sm text-red-200">{error}</div> : null}
       <button type="button" disabled={submitting || newKey.length < 4} onClick={submit} className="mt-4 w-full rounded-lg bg-[#E2F33C] py-2 font-bold text-black disabled:opacity-50">
         {submitting ? "Saving..." : "Set Cancel Order Key"}
+      </button>
+    </ModalShell>
+  );
+}
+
+// Same pattern as ResetCancelKeyModal above - a Super Admin never picks
+// which pages a shop's sidebar shows directly; they only issue this key,
+// and the Shop Owner decides the actual selection themselves from their
+// own Settings page (gated by this key - see shopOwnerController.exports.
+// updateEnabledPages).
+function ResetPageVisibilityKeyModal({ shop, onClose }: { shop: ShopSummary; onClose: () => void }) {
+  const [newKey, setNewKey] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError("");
+    try {
+      await superAdminApi.resetPageVisibilityKey(shop._id, newKey);
+      setDone(true);
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Failed to set Page Visibility Key");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <ModalShell title="Page Visibility Key Set" onClose={onClose}>
+        <p className="text-sm text-gray-300">
+          The Page Visibility Key for "{shop.name}" is now: <span className="font-mono text-white">{newKey}</span>
+        </p>
+        <p className="mt-2 text-xs text-gray-500">Share it with the Shop Owner securely. It won't be shown again after this screen.</p>
+        <button type="button" onClick={onClose} className="mt-4 w-full rounded-lg bg-[#E2F33C] py-2 font-bold text-black">Done</button>
+      </ModalShell>
+    );
+  }
+
+  return (
+    <ModalShell title={`Set Page Visibility Key — ${shop.name}`} onClose={onClose}>
+      <p className="mb-3 text-xs text-gray-500">
+        This is the secret the Shop Owner must enter, from their own Settings page, to check or uncheck which
+        sidebar pages their dashboard shows. Not their login password.
+      </p>
+      <Field label="New Page Visibility Key" value={newKey} onChange={setNewKey} type="password" />
+      {error ? <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-2 text-sm text-red-200">{error}</div> : null}
+      <button type="button" disabled={submitting || newKey.length < 4} onClick={submit} className="mt-4 w-full rounded-lg bg-[#E2F33C] py-2 font-bold text-black disabled:opacity-50">
+        {submitting ? "Saving..." : "Set Page Visibility Key"}
       </button>
     </ModalShell>
   );

@@ -1,14 +1,15 @@
 
 import React, { ChangeEvent, useMemo, useRef, useState, useEffect } from 'react';
-import { 
-  Settings, Bell, Lock, Database, 
-  Store, Printer, Monitor, Save, Shield, 
-  CreditCard, ImagePlus, Trash2, Package, Receipt
+import {
+  Settings, Bell, Lock, Database,
+  Store, Printer, Monitor, Save, Shield,
+  CreditCard, ImagePlus, Trash2, Package, Receipt, Eye
 } from 'lucide-react';
 import { PRINT_LOGO_STORAGE_KEY, persistPrintLogoToDisk } from '@/lib/print-logo';
 import { WaiterManagementSection } from '@/components/WaiterManagementSection';
 import { ProductManagementSection } from '@/components/ProductManagementSection';
 import { ReceiptManagementSection } from '@/components/ReceiptManagementSection';
+import { SidebarPagesSection } from '@/components/SidebarPagesSection';
 import { getStoreSettings, saveStoreSettings, StoreSettings, CURRENCIES, TIMEZONES } from '@/lib/pos-settings';
 import { fetchPrinters } from '@/lib/pos-api';
 
@@ -68,6 +69,7 @@ export default function SettingsPage() {
     { id: "Store Profile", icon: <Store size={18} /> },
     { id: "Manage Products", icon: <Package size={18} /> },
     { id: "Manage Receipt", icon: <Receipt size={18} /> },
+    { id: "Sidebar Pages", icon: <Eye size={18} /> },
     { id: "Payments & Tax", icon: <CreditCard size={18} /> },
     { id: "Hardware / POS", icon: <Printer size={18} /> },
     { id: "Security", icon: <Lock size={18} /> },
@@ -195,6 +197,8 @@ export default function SettingsPage() {
               <ReceiptManagementSection settings={settings} onChange={handleSettingChange} printLogo={printLogo} />
             ) : activeSection === "Manage Products" ? (
               <ProductManagementSection />
+            ) : activeSection === "Sidebar Pages" ? (
+              <SidebarPagesSection />
             ) : (
               <>
                 <div className="rounded-[28px] border border-indigo-100 bg-indigo-50/70 p-6">

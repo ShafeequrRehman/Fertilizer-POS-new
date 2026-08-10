@@ -72,6 +72,10 @@ export default function POSPage() {
   const [isManualEntry, setIsManualEntry] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [variationPickerGroup, setVariationPickerGroup] = useState<ProductGroup | null>(null);
+  // Product grid pagination - starts at 10, grows by 10 each "Load More"
+  // tap instead of rendering the entire catalog at once (a busy shop's full
+  // product list was a long scroll before this).
+  const [visibleProductCount, setVisibleProductCount] = useState(10);
 
   const suggestionRef = useRef<HTMLDivElement>(null);
   const phoneInputRef = useRef<HTMLInputElement>(null);
@@ -153,6 +157,17 @@ export default function POSPage() {
     const matchesSearch = group.name.toLowerCase().includes(productSearchQuery.toLowerCase());
     return matchesCategory && matchesSearch;
   });
+
+  // Changing category or search re-filters the whole list, so a stale
+  // "load more" position from the previous filter would otherwise leave
+  // the grid showing an arbitrary/inconsistent slice - always restart at
+  // 10 whenever the filters themselves change.
+  useEffect(() => {
+    setVisibleProductCount(10);
+  }, [activeCategory, productSearchQuery]);
+
+  const visibleGroups = filteredGroups.slice(0, visibleProductCount);
+  const hasMoreProducts = filteredGroups.length > visibleGroups.length;
 
   function handleGroupClick(group: ProductGroup) {
     // Deals and single-variation products (the vast majority - drinks,
@@ -562,7 +577,7 @@ export default function POSPage() {
           <div className={viewMode === 'grid' ? 'grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-2' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
-            {!isLoadingProducts && filteredGroups.length > 0 ? filteredGroups.map((group) => {
+            {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group) => {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
@@ -614,6 +629,18 @@ export default function POSPage() {
               );
             }) : null}
           </div>
+
+          {hasMoreProducts ? (
+            <div className="flex justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setVisibleProductCount((previous) => previous + 10)}
+                className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
+              >
+                Load More ({filteredGroups.length - visibleGroups.length} more)
+              </button>
+            </div>
+          ) : null}
         </section>
 
         <aside className="rounded-[24px] bg-white shadow-sm sticky top-6">

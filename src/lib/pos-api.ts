@@ -264,11 +264,12 @@ export async function claimKitchenPrint(orderId: string) {
   }
 }
 
-// TakeAway orders with no customer receipt printed yet, shop-wide - the
-// receipt-printing sibling of fetchUnprintedKitchenOrders above. Only ever
-// returns TakeAway orders (see backend/controllers/orderController.js's
-// getUnprintedReceiptOrders) since DineIn/Delivery keep printing their
-// customer receipt at Complete Payment instead, unchanged.
+// Orders with no customer receipt printed yet, shop-wide - the
+// receipt-printing sibling of fetchUnprintedKitchenOrders above. Returns
+// TakeAway orders (still pending, printed immediately at placement) and any
+// order of any type that just reached "completed" without a till already
+// claiming it locally - see backend/controllers/orderController.js's
+// getUnprintedReceiptOrders for the exact query.
 export async function fetchUnprintedReceiptOrders() {
   try {
     const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders/receipts/unprinted');
@@ -284,6 +285,35 @@ export async function claimReceiptPrint(orderId: string) {
   try {
     const response = await api.patch<SavedOrder & { _id?: string }>(`/orders/${orderId}/claim-receipt-print`);
     return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Orders with items queued to notify the kitchen about (addItems, or a
+// replaceItems quantity increase) since their original kitchen ticket
+// already printed - kitchenPrintedAt only ever fires once per order, so
+// this is what makes a LATER edit (including one made from pos-mobile,
+// which has no printer of its own) still reach the kitchen. See
+// backend/controllers/orderController.js's getUnprintedKitchenUpdateOrders.
+export async function fetchUnprintedKitchenUpdateOrders() {
+  try {
+    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders/kitchen-updates/unprinted');
+    return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Same claim-before-print contract as claimKitchenPrint, but this one can
+// fire again later for the same order (pendingKitchenUpdate gets queued and
+// cleared any number of times over an order's life, unlike the one-shot
+// kitchenPrintedAt) - returns both the updated order and just the item
+// delta that was claimed, ready to hand straight to the kitchen printer.
+export async function claimKitchenUpdatePrint(orderId: string) {
+  try {
+    const response = await api.patch<{ order: SavedOrder & { _id?: string }; items: SavedOrder['items'] }>(`/orders/${orderId}/claim-kitchen-update-print`);
+    return { order: normalizeOrder(response.data.order), items: response.data.items };
   } catch (error) {
     handleApiError(error);
   }
@@ -315,6 +345,41 @@ export async function cancelOrder(id: string, payload: CancelOrderPayload) {
   try {
     const response = await api.post<SavedOrder & { _id?: string }>(`/orders/${id}/cancel`, payload);
     return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// GET /shop/profile - includes enabledPages (this shop's current sidebar
+// page selection, null if never configured) and hasPageVisibilityKey
+// (whether the Super Admin has set up the key needed to change it). Never
+// includes the key hash itself - see backend/controllers/
+// shopOwnerController.js exports.getOwnShop.
+export interface ShopProfile {
+  _id?: string;
+  name?: string;
+  enabledPages?: string[] | null;
+  hasPageVisibilityKey?: boolean;
+  hasCancelOrderKey?: boolean;
+}
+
+export async function fetchShopProfile() {
+  try {
+    const response = await api.get<ShopProfile>('/shop/profile');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// The only way to actually change which sidebar pages this shop's
+// dashboard shows (see backend/controllers/shopOwnerController.js
+// exports.updateEnabledPages). `key` is the shop's Page Visibility Key,
+// set up per-shop by the Super Admin - never hardcoded here.
+export async function updateEnabledPages(enabledPages: string[], key: string) {
+  try {
+    const response = await api.patch<{ enabledPages: string[] }>('/shop/pages', { enabledPages, key });
+    return response.data;
   } catch (error) {
     handleApiError(error);
   }

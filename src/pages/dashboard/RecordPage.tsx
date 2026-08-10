@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Download, Eye, Lock, Printer, Search, X, XCircle } from 'lucide-react';
-import { fetchOrders, fetchShopSessionHistory } from '@/lib/pos-api';
+import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, filterOrdersInBusinessWindows, getSessionDateKey } from '@/lib/shop-session';
@@ -41,6 +41,18 @@ export default function RecordPage() {
   const [rangeTo, setRangeTo] = useState('');
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
   const [cancelOrderTarget, setCancelOrderTarget] = useState<SavedOrder | null>(null);
+  // name::variation -> category, used to roll the per-item breakdown up
+  // into per-category totals below it. Products rarely change mid-shift,
+  // so this is only refetched on mount/manual reload, not on the same
+  // 45s poll as orders.
+  const [categoryByItem, setCategoryByItem] = useState<Map<string, string>>(new Map());
+  // Each of the three tables below (Item Sales, Category Sales, Orders)
+  // paginates independently - show 10 rows, "Load More" grows that table's
+  // own count by 10. Kept as separate state so loading more of one table
+  // never affects the others.
+  const [visibleItemSalesCount, setVisibleItemSalesCount] = useState(10);
+  const [visibleCategorySalesCount, setVisibleCategorySalesCount] = useState(10);
+  const [visibleOrdersCount, setVisibleOrdersCount] = useState(10);
 
   useEffect(() => {
     async function load() {
@@ -60,6 +72,27 @@ export default function RecordPage() {
     return () => clearInterval(intervalId);
   }, []);
 
+  useEffect(() => {
+    async function loadCategories() {
+      try {
+        const result = await fetchProducts();
+        if (!result) return;
+        const map = new Map<string, string>();
+        result.products.forEach((product) => {
+          map.set(`${product.name}::${product.variation || ''}`, product.category || 'Uncategorized');
+          // Fallback key (name only) so an item still resolves a category
+          // even if its variation text drifted from the catalog after the
+          // order was placed (product edited/renamed since).
+          if (!map.has(product.name)) map.set(product.name, product.category || 'Uncategorized');
+        });
+        setCategoryByItem(map);
+      } catch (error) {
+        console.error('Record page product/category load error', error);
+      }
+    }
+    void loadCategories();
+  }, []);
+
   const sessionWindow = useMemo(() => getBusinessWindow(shopSession, new Date()), [shopSession]);
 
   // A picked date range is an explicit, deliberate request to browse PAST
@@ -75,6 +108,12 @@ export default function RecordPage() {
   // split a shift that ran past midnight (see getSessionDateKey in
   // shop-session.tsx for why "opened on" is the rule, not "stamped with").
   const isCustomRange = Boolean(rangeFrom && rangeTo);
+
+  // en-CA formats as YYYY-MM-DD in the browser's LOCAL time zone (unlike
+  // toISOString, which is UTC and can land on the wrong day close to
+  // midnight) - matches the `type="date"` input's own value format, so it
+  // can be used directly as `max` to block picking any day after today.
+  const todayKey = new Date().toLocaleDateString('en-CA');
 
   const customWindows = useMemo(() => {
     if (!isCustomRange) return [];
@@ -176,6 +215,64 @@ export default function RecordPage() {
     return dayOrders.filter((order) => order.status !== 'cancelled' && Number(order.discount?.amount || 0) > 0).length;
   }, [dayOrders]);
 
+  // Per-item breakdown for the same window RecordPage already scopes
+  // everything else to (the current/last shop shift, or the picked date
+  // range) - cancelled orders are excluded for the same reason they're
+  // excluded from totalDiscountToday/orderStats above: they were never
+  // actually charged. Grouped by name+variation so "Fries (Large)" and
+  // "Fries (Small)" are tallied separately, same composite key convention
+  // used by the backend's computeKitchenIncreaseDelta.
+  const itemSales = useMemo(() => {
+    const map = new Map<string, { name: string; variation: string; qty: number; revenue: number }>();
+    dayOrders
+      .filter((order) => order.status !== 'cancelled')
+      .forEach((order) => {
+        order.items.forEach((item) => {
+          const key = `${item.name}::${item.variation || ''}`;
+          const entry = map.get(key) || { name: item.name, variation: item.variation || '', qty: 0, revenue: 0 };
+          entry.qty += Number(item.quantity) || 0;
+          entry.revenue += (Number(item.price) || 0) * (Number(item.quantity) || 0);
+          map.set(key, entry);
+        });
+      });
+    return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue);
+  }, [dayOrders]);
+
+  // Rolls itemSales up one more level, by category (Ice Cream, Shwarma,
+  // Drinks, ...) - looked up per name+variation via categoryByItem, falling
+  // back to name-only, then finally an "Uncategorized" bucket for any item
+  // that no longer matches a product in the catalog at all (deleted since).
+  const categorySales = useMemo(() => {
+    const map = new Map<string, { category: string; qty: number; revenue: number }>();
+    itemSales.forEach((item) => {
+      const category =
+        categoryByItem.get(`${item.name}::${item.variation}`) ||
+        categoryByItem.get(item.name) ||
+        'Uncategorized';
+      const entry = map.get(category) || { category, qty: 0, revenue: 0 };
+      entry.qty += item.qty;
+      entry.revenue += item.revenue;
+      map.set(category, entry);
+    });
+    return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue);
+  }, [itemSales, categoryByItem]);
+
+  // Whenever the underlying window/filters change, each table's own "Load
+  // More" progress would otherwise be showing a stale/inconsistent slice of
+  // a now-different list - snap all three back to the first 10 rows.
+  useEffect(() => {
+    setVisibleItemSalesCount(10);
+    setVisibleCategorySalesCount(10);
+  }, [dayOrders, categoryByItem]);
+
+  useEffect(() => {
+    setVisibleOrdersCount(10);
+  }, [dayOrders, statusFilter, search, searchField]);
+
+  const visibleItemSales = itemSales.slice(0, visibleItemSalesCount);
+  const visibleCategorySales = categorySales.slice(0, visibleCategorySalesCount);
+  const visibleOrders = filteredOrders.slice(0, visibleOrdersCount);
+
   const canCancel = hasPermission('sales.delete');
 
   function handleOrderCancelled(updated: SavedOrder) {
@@ -254,12 +351,14 @@ export default function RecordPage() {
             <input
               type="date"
               value={rangeFrom}
+              max={todayKey}
               onChange={(event) => setRangeFrom(event.target.value)}
               className="w-full min-w-0 rounded-full border border-transparent bg-[#F6F7FB] px-2.5 py-2 text-xs font-semibold outline-none transition focus:border-[#D6E332]"
             />
             <input
               type="date"
               value={rangeTo}
+              max={todayKey}
               onChange={(event) => setRangeTo(event.target.value)}
               className="w-full min-w-0 rounded-full border border-transparent bg-[#F6F7FB] px-2.5 py-2 text-xs font-semibold outline-none transition focus:border-[#D6E332]"
             />
@@ -294,6 +393,92 @@ export default function RecordPage() {
         </div>
       </div>
 
+      <div className="overflow-hidden rounded-[20px] bg-white shadow-sm">
+        <div className="border-b border-gray-100 px-5 py-3">
+          <h2 className="text-sm font-black text-gray-900">Item Sales</h2>
+          <p className="text-[11px] font-semibold text-gray-400">
+            Quantity sold and revenue per item for {isCustomRange ? 'the selected range' : 'this shift'}.
+          </p>
+        </div>
+        {itemSales.length === 0 ? (
+          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
+        ) : (
+          <div className="max-h-[420px] overflow-y-auto">
+            <div className="hidden grid-cols-[1.5fr_0.8fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
+              <span>Item</span>
+              <span>Variation</span>
+              <span>Qty Sold</span>
+              <span>Revenue</span>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {visibleItemSales.map((item) => (
+                <div
+                  key={`${item.name}::${item.variation}`}
+                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.8fr_0.7fr_0.9fr] sm:items-center"
+                >
+                  <span className="font-bold text-gray-800">{item.name}</span>
+                  <span className="text-xs text-gray-400">{item.variation || '—'}</span>
+                  <span className="font-semibold text-gray-700">{item.qty}</span>
+                  <span className="font-black text-emerald-600">Rs {item.revenue}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {itemSales.length > visibleItemSales.length ? (
+          <div className="flex justify-center border-t border-gray-100 py-3">
+            <button
+              type="button"
+              onClick={() => setVisibleItemSalesCount((previous) => previous + 10)}
+              className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
+            >
+              Load More ({itemSales.length - visibleItemSales.length} more)
+            </button>
+          </div>
+        ) : null}
+
+        <div className="border-t border-gray-100 px-5 py-3">
+          <h2 className="text-sm font-black text-gray-900">Category Sales</h2>
+          <p className="text-[11px] font-semibold text-gray-400">
+            Total quantity and revenue per category for {isCustomRange ? 'the selected range' : 'this shift'}.
+          </p>
+        </div>
+        {categorySales.length === 0 ? (
+          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
+        ) : (
+          <div>
+            <div className="hidden grid-cols-[1.5fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
+              <span>Category</span>
+              <span>Qty Sold</span>
+              <span>Revenue</span>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {visibleCategorySales.map((entry) => (
+                <div
+                  key={entry.category}
+                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.7fr_0.9fr] sm:items-center"
+                >
+                  <span className="font-bold text-gray-800">{entry.category}</span>
+                  <span className="font-semibold text-gray-700">{entry.qty}</span>
+                  <span className="font-black text-emerald-600">Rs {entry.revenue}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {categorySales.length > visibleCategorySales.length ? (
+          <div className="flex justify-center border-t border-gray-100 py-3">
+            <button
+              type="button"
+              onClick={() => setVisibleCategorySalesCount((previous) => previous + 10)}
+              className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
+            >
+              Load More ({categorySales.length - visibleCategorySales.length} more)
+            </button>
+          </div>
+        ) : null}
+      </div>
+
       <div className="overflow-hidden rounded-[28px] bg-white shadow-sm">
         <div className="hidden grid-cols-[90px_1.3fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_100px] gap-2 border-b border-gray-100 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
           <span>Order</span>
@@ -312,11 +497,22 @@ export default function RecordPage() {
           <div className="p-10 text-center text-sm font-bold text-gray-400">No orders found in the selected range.</div>
         ) : (
           <div className="divide-y divide-gray-100">
-            {filteredOrders.map((order) => (
+            {visibleOrders.map((order) => (
               <RecordRow key={order.id} order={order} onView={() => setViewOrder(order)} />
             ))}
           </div>
         )}
+        {filteredOrders.length > visibleOrders.length ? (
+          <div className="flex justify-center border-t border-gray-100 py-3">
+            <button
+              type="button"
+              onClick={() => setVisibleOrdersCount((previous) => previous + 10)}
+              className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
+            >
+              Load More ({filteredOrders.length - visibleOrders.length} more)
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {viewOrder ? (

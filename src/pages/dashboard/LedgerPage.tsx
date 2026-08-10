@@ -26,6 +26,9 @@ export default function LedgerPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Show 10 customers, "Load More" grows it by 10 - same pattern as
+  // Record's tables.
+  const [visibleCount, setVisibleCount] = useState(10);
 
   useEffect(() => {
     void loadLedger();
@@ -62,6 +65,15 @@ export default function LedgerPage() {
       { billed: 0, paid: 0, due: 0 }
     );
   }, [customers]);
+
+  // A new search re-filters the whole list, so a stale "load more" position
+  // would otherwise leave the table showing an arbitrary/inconsistent slice
+  // - always restart at 10 when the search itself changes.
+  useEffect(() => {
+    setVisibleCount(10);
+  }, [search, customers]);
+
+  const visibleCustomers = filtered.slice(0, visibleCount);
 
   return (
     <div className="space-y-6">
@@ -126,7 +138,7 @@ export default function LedgerPage() {
             <span />
           </div>
           <div className="divide-y divide-gray-100">
-            {filtered.map((customer) => (
+            {visibleCustomers.map((customer) => (
               <LedgerRow
                 key={customer.id}
                 customer={customer}
@@ -135,6 +147,17 @@ export default function LedgerPage() {
               />
             ))}
           </div>
+          {filtered.length > visibleCustomers.length ? (
+            <div className="flex justify-center border-t border-gray-100 py-3">
+              <button
+                type="button"
+                onClick={() => setVisibleCount((previous) => previous + 10)}
+                className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
+              >
+                Load More ({filtered.length - visibleCustomers.length} more)
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </div>

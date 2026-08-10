@@ -14,6 +14,10 @@ export default function CustomerDuesPage() {
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '', previousDues: 0 });
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Each grid (Pending Dues, All Other Customers) paginates independently -
+  // 10 shown, "Load More" grows just that grid's own count by 10.
+  const [visiblePendingCount, setVisiblePendingCount] = useState(10);
+  const [visibleOtherCount, setVisibleOtherCount] = useState(10);
 
   useEffect(() => {
     loadCustomers();
@@ -112,6 +116,17 @@ export default function CustomerDuesPage() {
   const customersWithDues = customers.filter(c => (c.previousDues || 0) > 0);
   const customersWithoutDues = customers.filter(c => !(c.previousDues || 0));
 
+  // Restart both grids at 10 whenever the underlying customer list changes
+  // (add/update/refresh), so "Load More" never leaves a stale/inconsistent
+  // slice showing.
+  useEffect(() => {
+    setVisiblePendingCount(10);
+    setVisibleOtherCount(10);
+  }, [customers]);
+
+  const visiblePending = customersWithDues.slice(0, visiblePendingCount);
+  const visibleOther = customersWithoutDues.slice(0, visibleOtherCount);
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-8">
       <div className="flex justify-between items-center">
@@ -197,18 +212,29 @@ export default function CustomerDuesPage() {
               <AlertCircle size={20} className="text-amber-500" /> Pending Dues ({customersWithDues.length})
             </h2>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6">
-              {customersWithDues.map(c => (
-                <CustomerCard 
-                  key={c.id} 
-                  customer={c} 
-                  onUpdate={handleUpdateDues} 
-                  onRemind={() => handleSendReminder(c)} 
+              {visiblePending.map(c => (
+                <CustomerCard
+                  key={c.id}
+                  customer={c}
+                  onUpdate={handleUpdateDues}
+                  onRemind={() => handleSendReminder(c)}
                 />
               ))}
               {customersWithDues.length === 0 && (
                 <p className="text-slate-400 font-bold col-span-full">No customers have pending dues. Great!</p>
               )}
             </div>
+            {customersWithDues.length > visiblePending.length ? (
+              <div className="flex justify-center mt-4">
+                <button
+                  type="button"
+                  onClick={() => setVisiblePendingCount((previous) => previous + 10)}
+                  className="rounded-full bg-white border border-slate-200 px-5 py-2.5 text-xs font-black text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  Load More ({customersWithDues.length - visiblePending.length} more)
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div>
@@ -216,15 +242,26 @@ export default function CustomerDuesPage() {
               <User size={20} className="text-green-500" /> All Other Customers
             </h2>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6">
-              {customersWithoutDues.map(c => (
-                <CustomerCard 
-                  key={c.id} 
-                  customer={c} 
-                  onUpdate={handleUpdateDues} 
-                  onRemind={() => handleSendReminder(c)} 
+              {visibleOther.map(c => (
+                <CustomerCard
+                  key={c.id}
+                  customer={c}
+                  onUpdate={handleUpdateDues}
+                  onRemind={() => handleSendReminder(c)}
                 />
               ))}
             </div>
+            {customersWithoutDues.length > visibleOther.length ? (
+              <div className="flex justify-center mt-4">
+                <button
+                  type="button"
+                  onClick={() => setVisibleOtherCount((previous) => previous + 10)}
+                  className="rounded-full bg-white border border-slate-200 px-5 py-2.5 text-xs font-black text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  Load More ({customersWithoutDues.length - visibleOther.length} more)
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

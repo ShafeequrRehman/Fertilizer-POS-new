@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, PackagePlus, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
+import { ApiError, claimKitchenUpdatePrint, claimReceiptPrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
 import { Discount, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
@@ -54,6 +54,9 @@ export default function SalesPage() {
   const [customerDue, setCustomerDue] = useState(0);
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [isSendingWA, setIsSendingWA] = useState(false);
+  // Order list shows 10, "Load More" grows it by 10 - same pattern as
+  // Record/Ledger/Dues.
+  const [visibleOrderCount, setVisibleOrderCount] = useState(10);
 
   useEffect(() => {
     async function load() {
@@ -124,6 +127,15 @@ export default function SalesPage() {
     return byFilter && haystack.includes(search.toLowerCase());
   }), [filter, shiftOrders, search]);
 
+  // A new filter/search re-derives the whole list, so a stale "load more"
+  // position would otherwise leave the grid showing an arbitrary/
+  // inconsistent slice - always restart at 10 when they change.
+  useEffect(() => {
+    setVisibleOrderCount(10);
+  }, [filter, search, shiftOrders]);
+
+  const pagedOrders = visibleOrders.slice(0, visibleOrderCount);
+
   const orderSubtotal = selectedOrder?.subtotal ?? selectedOrder?.total ?? 0;
   const orderTax = selectedOrder?.tax ?? 0;
   const discountAmountValue = Number(discountAmountInput) || 0;
@@ -179,13 +191,8 @@ export default function SalesPage() {
     setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
     setSelectedOrder(updated);
 
-    // Fire only the receipt that belongs to this workflow. TakeAway orders
-    // already got their customer receipt printed the moment they were
-    // placed (see POSPage.tsx / DashboardShell.tsx's ReceiptPrintWatcher,
-    // which set customerReceiptPrintedAt) - printing it again here would
-    // hand the customer a second copy for no reason, so this only fires
-    // for orders that reach "completed" without ever having been claimed.
-    const targetPrintType = payload.status === 'completed' && !updated.customerReceiptPrintedAt
+    // Fire only the receipt that belongs to this workflow.
+    const targetPrintType = payload.status === 'completed'
       ? 'cashier'
       : payload.action === 'addItems'
         ? 'kitchen'
@@ -195,14 +202,55 @@ export default function SalesPage() {
       return updated;
     }
 
+    // Claim-before-print, same invariant used everywhere else a receipt or
+    // kitchen ticket gets auto-printed (see POSPage.tsx / DashboardShell.tsx's
+    // watchers). This is what makes completing an order - or adding items
+    // to one - from the mobile app work the same as doing it here: the
+    // phone has no printer of its own, so DashboardShell's watchers poll
+    // for completed/updated, unclaimed orders and print them on this till -
+    // and this claim is what stops BOTH a watcher and this same tick here
+    // from printing two copies when the till itself makes the edit. A
+    // TakeAway order that already printed its receipt at placement will
+    // simply fail the cashier claim (409) and print nothing a second time.
+    let receiptOrder = updated;
+    let kitchenUpdateItems: SavedOrder['items'] | null = null;
+
+    if (targetPrintType === 'cashier') {
+      try {
+        receiptOrder = await claimReceiptPrint(updated.id);
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 409) {
+          console.error('Receipt print claim failed:', err);
+        }
+        // Either already printed elsewhere, or the claim itself failed - in
+        // either case DashboardShell's ReceiptPrintWatcher will pick this
+        // order up and print it within a few seconds anyway, so there is
+        // no local fallback here (avoids risking a duplicate).
+        return updated;
+      }
+    } else {
+      try {
+        const claimed = await claimKitchenUpdatePrint(updated.id);
+        if (!claimed || claimed.items.length === 0) return updated;
+        kitchenUpdateItems = claimed.items;
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 409) {
+          console.error('Kitchen update claim failed:', err);
+        }
+        // Same reasoning as the cashier branch - DashboardShell's
+        // KitchenUpdateWatcher is the safety net, no local fallback here.
+        return updated;
+      }
+    }
+
     // Browser/no-printer fallback goes through PrintOrderPage.tsx, which
     // fetches the order fresh (full merged item list) - so for an
-    // addItems kitchen ticket, stash just the new items here for that
-    // page to pick up, same reasoning as kitchenReceiptData below.
+    // addItems kitchen ticket, stash just the claimed new items here for
+    // that page to pick up, same reasoning as kitchenReceiptData below.
     function printPageUrl(type: 'kitchen' | 'cashier') {
-      if (type === 'kitchen' && payload.action === 'addItems' && payload.items) {
+      if (type === 'kitchen' && kitchenUpdateItems) {
         try {
-          sessionStorage.setItem(`kitchen-add-items-${updated.id}`, JSON.stringify(payload.items));
+          sessionStorage.setItem(`kitchen-add-items-${updated.id}`, JSON.stringify(kitchenUpdateItems));
         } catch {
           // sessionStorage unavailable - the fallback page will just show
           // the full item list instead, which is an acceptable degradation.
@@ -223,16 +271,11 @@ export default function SalesPage() {
         // Complete Payment panel for this order - carried onto the printed
         // receipt so the customer sees the same combined total they were
         // actually charged.
-        // Adding items to an already-fired order should only send the
-        // NEW items to the kitchen - reprinting the whole order's items
-        // would have the kitchen re-cook stuff they already started (or
-        // finished) on the original ticket. `payload.items` is exactly
-        // what the user just added (see addItems() below); `updated.items`
-        // is the full merged list and must never go to the kitchen here.
-        const kitchenReceiptData = payload.action === 'addItems' && payload.items
-          ? { ...updated, items: payload.items }
-          : updated;
-        const receiptData = targetPrintType === 'cashier' ? { ...updated, previousDues: customerDue } : kitchenReceiptData;
+        // Only the claimed delta ever goes to the kitchen - reprinting the
+        // whole order's items would have the kitchen re-cook stuff they
+        // already started (or finished) on the original ticket.
+        const kitchenReceiptData = { ...updated, items: kitchenUpdateItems || [] };
+        const receiptData = targetPrintType === 'cashier' ? { ...receiptOrder, previousDues: customerDue } : kitchenReceiptData;
 
         if (targetPrintType === 'cashier' && settings.counterPrinter) {
           ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings).catch(console.error);
@@ -400,7 +443,7 @@ export default function SalesPage() {
             // varies since the detail panel is always pinned to the right)
             // instead of ever needing a horizontal scrollbar.
             <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-2.5 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
-              {visibleOrders.map((order) => (
+              {pagedOrders.map((order) => (
                 <button key={order.id} type="button" onClick={() => setSelectedOrder(order)} className={`min-w-0 overflow-hidden rounded-[18px] border p-2.5 text-left shadow-sm transition hover:-translate-y-0.5 ${selectedOrder?.id === order.id ? 'border-[#D6E332] bg-[#FBFDEB]' : 'border-transparent bg-white'}`}>
                   {/* The order # is the single most important thing on this
                       card - it shares its own full-width line instead of
@@ -422,6 +465,17 @@ export default function SalesPage() {
                   <div className="mt-2 truncate rounded-[12px] bg-[#F8F9FB] px-2.5 py-1.5 text-xs font-black text-gray-900">Rs {order.total}</div>
                 </button>
               ))}
+            </div>
+          ) : null}
+          {!loading && visibleOrders.length > pagedOrders.length ? (
+            <div className="flex justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setVisibleOrderCount((previous) => previous + 10)}
+                className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
+              >
+                Load More ({visibleOrders.length - pagedOrders.length} more)
+              </button>
             </div>
           ) : null}
         </section>

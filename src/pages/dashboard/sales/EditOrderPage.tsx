@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
-import { fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
+import { ApiError, claimKitchenUpdatePrint, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
 import { Product, SavedOrder } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
 
@@ -39,6 +39,34 @@ function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[]) 
     }
   } catch (err) {
     console.error('Electron print error (kitchen remove-items ticket):', err);
+  }
+}
+
+// Fires a normal kitchen ticket for just the items the kitchen needs to
+// prepare MORE of - a brand new item added via Quick Add, or an existing
+// line's quantity bumped up with the +/- stepper. `items` here is already
+// the exact claimed delta from claimKitchenUpdatePrint (see saveOrder
+// below), never the whole order's item list, so the kitchen is never told
+// to re-make something they already started or finished.
+function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items']) {
+  if (items.length === 0) return;
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter) {
+      ipcRenderer.invoke('print-kitchen-receipt-data', { ...order, items }, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+    } else {
+      console.warn('No kitchen printer configured in settings - kitchen update ticket not printed.');
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen update ticket):', err);
   }
 }
 
@@ -99,6 +127,25 @@ export default function EditOrderPage() {
     });
     printKitchenRemoveTicket(updated, removedItems);
     setRemovedItems([]);
+
+    // Claim-before-print, same invariant as everywhere else a kitchen
+    // ticket auto-prints - if a quantity went up or a new item was added
+    // via Quick Add just now, this claims that delta before this same edit
+    // could otherwise be double-printed by DashboardShell's
+    // KitchenUpdateWatcher a few seconds later. A 409 here just means
+    // there was nothing to claim (e.g. only quantities went DOWN, or items
+    // were only removed) - not an error.
+    try {
+      const claimed = await claimKitchenUpdatePrint(updated.id);
+      if (claimed && claimed.items.length > 0) {
+        printKitchenUpdateTicket(claimed.order, claimed.items);
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 409) {
+        console.error('Kitchen update claim failed:', err);
+      }
+    }
+
     setStatus(`Order ${updated.id} saved successfully.`);
     setOrder(updated);
   }
@@ -144,12 +191,37 @@ export default function EditOrderPage() {
           <h2 className="mb-4 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Order Items</h2>
           <div className="space-y-3">
             {items.map((item, index) => (
-              <div key={`${item.name}-${index}`} className="rounded-[24px] bg-[#F8F9FB] p-4">
-                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px_90px_90px_50px]">
+              // Keyed by index, not name - the name field is editable, and
+              // keying by its current value meant every keystroke there
+              // changed the key, which made React remount the whole row
+              // (losing input focus) instead of just updating it in place.
+              <div key={index} className="rounded-[24px] bg-[#F8F9FB] p-4">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px_90px_140px_50px]">
                   <input value={item.name} onChange={(event) => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, name: event.target.value } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={item.variation} onChange={(event) => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, variation: event.target.value } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={String(item.price)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: Number(event.target.value || 0) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-                  <input value={String(item.quantity)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Number(event.target.value || 1) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
+                  <div className="flex items-center justify-between gap-1 rounded-2xl border border-gray-200 bg-white px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Math.max(1, (Number(entry.quantity) || 1) - 1) } : entry))}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F8F9FB] text-lg font-black text-gray-700"
+                    >
+                      −
+                    </button>
+                    <input
+                      value={String(item.quantity)}
+                      onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: event.target.value === '' ? ('' as unknown as number) : Number(event.target.value) } : entry))}
+                      onBlur={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Math.max(1, Number(entry.quantity) || 1) } : entry))}
+                      className="w-10 border-0 bg-transparent text-center text-sm font-black text-gray-900 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: (Number(entry.quantity) || 0) + 1 } : entry))}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F8F9FB] text-lg font-black text-gray-700"
+                    >
+                      +
+                    </button>
+                  </div>
                   <button type="button" onClick={() => { setRemovedItems((previous) => [...previous, items[index]]); setItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index)); }} className="rounded-2xl bg-rose-50 text-rose-600">
                     <Trash2 size={16} className="mx-auto" />
                   </button>

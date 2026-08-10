@@ -28,6 +28,12 @@ export interface ShopSummary {
   // it) instead of that only being discoverable by trial and error in the
   // POS.
   hasCancelOrderKey?: boolean;
+  // Whether this shop's Page Visibility Key has been set - lets the Shop
+  // Owner toggle their own sidebar pages (see lib/dashboard-pages.ts) from
+  // their Settings page once they have it. The key itself is never sent to
+  // the client, only whether one exists (same convention as
+  // hasCancelOrderKey above).
+  hasPageVisibilityKey?: boolean;
 }
 
 export interface PlanSummary {
@@ -76,6 +82,8 @@ export const superAdminApi = {
     api.patch(`/superadmin/shops/${id}/owner/reset-password`, { newPassword }).then((r) => r.data),
   resetCancelOrderKey: (id: string, newKey: string) =>
     api.patch(`/superadmin/shops/${id}/cancel-order-key`, { newKey }).then((r) => r.data),
+  resetPageVisibilityKey: (id: string, newKey: string) =>
+    api.patch(`/superadmin/shops/${id}/page-visibility-key`, { newKey }).then((r) => r.data),
   updateOwner: (id: string, payload: Record<string, unknown>) =>
     api.patch(`/superadmin/shops/${id}/owner`, payload).then((r) => r.data),
   extendLicense: (id: string, months: number, note?: string) =>

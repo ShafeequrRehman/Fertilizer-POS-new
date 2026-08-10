@@ -28,6 +28,12 @@ export interface SessionShop {
   id?: string;
   name?: string;
   status?: "active" | "suspended";
+  // Super Admin-controlled sidebar page visibility (see
+  // lib/dashboard-pages.ts) - null/undefined means no restriction is
+  // configured, so every page the user's own permissions allow stays
+  // visible. Only set once a Super Admin has explicitly saved a selection
+  // for this shop from the Shops page.
+  enabledPages?: string[] | null;
 }
 
 export interface SessionLicense {
@@ -126,6 +132,18 @@ export function hasPermission(key: string): boolean {
   const role = getAuthRole();
   if (role === "superadmin" || role === "shopowner") return true;
   return getPermissions().includes(key);
+}
+
+// Unlike hasPermission, this is NOT role-gated - a Shop Owner is only
+// exempt from their own shop's role/permission rules, not from a Super
+// Admin's platform-level page toggle (see Shop.enabledPages). A null/
+// undefined list (never configured, or the Super Admin explicitly cleared
+// it) means unrestricted - every page passes. This only controls sidebar
+// visibility in DashboardShell.tsx; it is not a backend access boundary.
+export function isPageEnabled(pageKey: string): boolean {
+  const enabledPages = getAuthShop()?.enabledPages;
+  if (!enabledPages) return true;
+  return enabledPages.includes(pageKey);
 }
 
 export function setAuthSession(payload: LoginSessionPayload) {
