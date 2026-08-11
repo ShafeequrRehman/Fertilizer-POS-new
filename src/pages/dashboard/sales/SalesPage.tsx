@@ -8,8 +8,8 @@ import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
-import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
-import { localOrderToSavedOrder, saveOrderEditOffline } from '@/lib/offline-order-helpers';
+import { getLocalHubStartDiagnostics, getReferenceData, pushOrdersCache } from '@/lib/local-hub-api';
+import { loadOrdersFromLocalHub, saveOrderEditOffline } from '@/lib/offline-order-helpers';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 
@@ -69,31 +69,26 @@ export default function SalesPage() {
   // "Open since ..." badge (which reads from the same cache).
   const { session: cachedShopSession } = useShopSession();
 
-  // Cloud order history can't be reached offline - shows whatever's been
-  // queued on this till instead (see backend/localHub/localOrders.js),
-  // which is the only real proof, while offline, that orders taken here
-  // are actually being recorded. Falls back to the shared cached shop
-  // session too, instead of the misleading "No shift recorded yet" that
-  // shopSession being null would otherwise produce.
-  async function loadOffline() {
-    if (cachedShopSession) setShopSession(cachedShopSession);
+  // Always the FIRST (and, offline, only) thing this page shows - see
+  // offline-order-helpers.ts's loadOrdersFromLocalHub/mergeOrdersForDisplay
+  // for how the Local Hub's cached cloud snapshot gets combined with
+  // whatever this till still has queued locally (new orders, edits).
+  // Never a live cloud call, so this is instant every time regardless of
+  // connectivity - what makes it safe to always run first, online or not,
+  // instead of the old approach of gating on the isOnline flag (which
+  // only re-checks every 5s - see network-status.ts - and was letting a
+  // stale "online" reading send this page into an 8-second cloud timeout
+  // even with the internet genuinely off). Cloud sync exists purely to
+  // keep this cache fresh in the background and let other devices/views
+  // see this till's orders too - never something this page's own render
+  // waits on.
+  async function loadFromCache() {
+    if (cachedShopSession) setShopSession((current) => current ?? cachedShopSession);
     try {
-      const pending = await getPendingLocalOrders();
-      const offlineOrders = pending.map(localOrderToSavedOrder);
-      setOrders((current) => {
-        const existingIds = new Set(current.map((order) => order.id));
-        const merged = [...current];
-        for (const order of offlineOrders) {
-          if (!existingIds.has(order.id)) merged.push(order);
-        }
-        return merged;
-      });
-      setSelectedOrder((current) => current ?? offlineOrders[0] ?? null);
-      setStatus(
-        offlineOrders.length > 0
-          ? { tone: 'info', text: `Offline - showing ${offlineOrders.length} order${offlineOrders.length === 1 ? '' : 's'} queued on this till (plus anything loaded before going offline). They'll sync once back online.` }
-          : { tone: 'info', text: 'Offline - no orders queued on this till yet.' },
-      );
+      const merged = await loadOrdersFromLocalHub();
+      setOrders(merged);
+      const scoped = filterOrdersInBusinessWindow(merged, getBusinessWindow(cachedShopSession, new Date()));
+      setSelectedOrder((current) => (current ? merged.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null));
       try {
         const snapshot = await getReferenceData();
         if (snapshot.products?.length) setProducts(snapshot.products as Product[]);
@@ -101,13 +96,20 @@ export default function SalesPage() {
         // Best-effort - only used by the Add Items modal, never blocks the order list above.
       }
     } catch {
-      setStatus({ tone: 'error', text: "Offline, and the Local Hub isn't reachable either - restart the app to enable offline mode." });
+      const diagnostics = await getLocalHubStartDiagnostics();
+      const reason = diagnostics && !diagnostics.started ? ` (${diagnostics.error || 'failed to start'})` : '';
+      setStatus({ tone: 'error', text: `Couldn't reach this till's own Local Hub${reason} - restart the app to enable offline order history.` });
     }
   }
 
   async function loadAny() {
-    if (isDesktopApp() && !isOnline) {
-      await loadOffline();
+    if (isDesktopApp()) {
+      await loadFromCache();
+      // Best-effort, not awaited - refresh() below updates state (and the
+      // Local Hub's cache) with the real cloud data if/when it lands, but
+      // the cache-first paint above already gave the cashier something to
+      // work with immediately either way.
+      if (isOnline) void refresh();
     } else {
       await refresh();
     }
@@ -119,24 +121,7 @@ export default function SalesPage() {
       try {
         const storeSettings = getStoreSettings();
         setSettings(storeSettings);
-
-        // We use refresh to populate orders and set state seamlessly
         await loadAny();
-        if (!isDesktopApp() || isOnline) {
-          const productData = await fetchProducts();
-          if (productData) {
-            setProducts(productData.products);
-          }
-        }
-      } catch (error) {
-        if (isDesktopApp() && !isOnline) {
-          // A stale isOnline moment (see network-status.ts) let the cloud
-          // branch above run and fail - fall back the same way loadAny's
-          // own offline branch would, rather than a raw error banner.
-          await loadOffline();
-        } else {
-          setStatus({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load sales data.' });
-        }
       } finally {
         setLoading(false);
       }
@@ -237,6 +222,21 @@ export default function SalesPage() {
         const scoped = filterOrdersInBusinessWindow(data, getBusinessWindow(latestSession, new Date()));
 
         setSelectedOrder((current) => current ? data.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null);
+
+        // Keeps the Local Hub's order cache fresh the moment this till has
+        // real data, instead of only ever updating it on the 5-minute
+        // background tick (see lib/offline-sync.ts) - same reasoning as
+        // POSPage.tsx's product reference-data push.
+        if (isDesktopApp()) {
+          void pushOrdersCache(data).catch(() => {});
+        }
+      }
+
+      try {
+        const productData = await fetchProducts();
+        if (productData) setProducts(productData.products);
+      } catch {
+        // Best-effort - the cache-first paint already has a product list.
       }
     } catch (err) {
       console.error('Failed to load orders', err);

@@ -75,6 +75,23 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
   const [isCached, setIsCached] = useState(false);
 
   const refresh = useCallback(async () => {
+    // Paint instantly from whatever this till last knew, before ever
+    // waiting on the network - the live fetch below still runs and
+    // corrects this a moment later, but nothing should ever sit on a
+    // blank/loading screen for up to AXIOS_REQUEST_TIMEOUT_MS (8s) just to
+    // show what it already knew. Only meaningful inside the desktop app -
+    // see the catch branch below for why a plain browser tab doesn't get
+    // this treatment.
+    if (isDesktopApp()) {
+      const cached = readCache();
+      if (cached) {
+        setIsOpen(cached.isOpen || hasPendingLocalShopOpen());
+        setSession(cached.session);
+        setIsCached(true);
+        setLoading(false);
+      }
+    }
+
     try {
       const result = await fetchShopSessionStatus();
       if (result) {

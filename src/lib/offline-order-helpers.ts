@@ -1,5 +1,13 @@
 import type { Discount, OrderPayload, OrderUpdatePayload, SavedOrder } from '@/lib/pos-types';
-import { queueOrderEdit, updateQueuedLocalOrder, type LocalOrderRecord } from '@/lib/local-hub-api';
+import {
+  getOrdersCache,
+  getPendingLocalOrders,
+  getPendingOrderEdits,
+  queueOrderEdit,
+  updateQueuedLocalOrder,
+  type LocalOrderEditRecord,
+  type LocalOrderRecord,
+} from '@/lib/local-hub-api';
 
 // Shared by SalesPage.tsx and EditOrderPage.tsx - the two places an
 // existing order gets edited (as opposed to POSPage.tsx, which only ever
@@ -106,4 +114,68 @@ export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdate
   }
   await queueOrderEdit(order.id, patch);
   return applyPatchOptimistically(order, patch);
+}
+
+// Combines the Local Hub's cached cloud snapshot with whatever this till
+// still has queued locally, into the one order list Dashboard/Sales/
+// Kitchen actually render - see mergeOrdersForDisplay below for why this
+// never needs a live cloud call to produce a correct-looking list.
+function applyPendingEdits(cachedOrders: SavedOrder[], pendingEdits: LocalOrderEditRecord[]): Map<string, SavedOrder> {
+  const byId = new Map(cachedOrders.map((order) => [order.id, order]));
+  for (const edit of pendingEdits) {
+    const target = byId.get(edit.orderId);
+    if (target) {
+      byId.set(edit.orderId, applyPatchOptimistically(target, edit.payload as OrderUpdatePayload));
+    }
+    // If the target isn't in the cache (e.g. this till hasn't refreshed
+    // its cloud snapshot since the edit was queued), there's nothing to
+    // apply it to for display yet - it's still safely queued for sync
+    // either way, this is purely a display-completeness concern.
+  }
+  return byId;
+}
+
+// The single place Dashboard.tsx/SalesPage.tsx/KitchenPage.tsx build the
+// order list they show - always from the Local Hub, NEVER a direct live
+// cloud call (see offline-sync.ts's pushCurrentOrdersCache for how the
+// cache snapshot stays fresh in the background). `cachedOrders` is
+// whatever this till last successfully pulled from the cloud;
+// `pendingNewRecords`/`pendingEdits` are this till's own not-yet-synced
+// queue (see getPendingLocalOrders/getPendingOrderEdits) - overlaid on
+// top so an order punched or edited seconds ago shows up immediately,
+// with no dependence on connectivity at all.
+export function mergeOrdersForDisplay(
+  cachedOrders: SavedOrder[],
+  pendingNewRecords: LocalOrderRecord[],
+  pendingEdits: LocalOrderEditRecord[],
+): SavedOrder[] {
+  const byId = applyPendingEdits(cachedOrders, pendingEdits);
+  const knownClientSyncIds = new Set(cachedOrders.map((order) => order.clientSyncId).filter(Boolean));
+
+  for (const record of pendingNewRecords) {
+    const clientSyncId = (record.payload as { clientSyncId?: string } | undefined)?.clientSyncId;
+    // Already present in the cloud snapshot under its real _id - this
+    // till just hasn't acked the local queue entry yet (or is mid-sync).
+    // Showing both would be a confusing "the same order twice" duplicate,
+    // and worse, would look exactly like the ticket-number-reuse bug this
+    // whole cache exists to avoid.
+    if (clientSyncId && knownClientSyncIds.has(clientSyncId)) continue;
+    const order = localOrderToSavedOrder(record);
+    byId.set(order.id, order);
+  }
+
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
+}
+
+// Fetches and merges all three sources in one call - what the load
+// effects in Dashboard/Sales/Kitchen actually call.
+export async function loadOrdersFromLocalHub(): Promise<SavedOrder[]> {
+  const [cache, pendingNew, pendingEdits] = await Promise.all([
+    getOrdersCache(),
+    getPendingLocalOrders(),
+    getPendingOrderEdits(),
+  ]);
+  return mergeOrdersForDisplay(cache.orders as SavedOrder[], pendingNew, pendingEdits);
 }

@@ -9,10 +9,11 @@ import {
   getPendingOrderEdits,
   getSyncStatus,
   isLocalHubReachable,
+  pushOrdersCache,
   pushReferenceData,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession } from '@/lib/pos-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
 // The offline sync engine: every SYNC_INTERVAL_MS, if this till is online,
@@ -172,6 +173,27 @@ export async function pushCurrentReferenceData(): Promise<void> {
   }
 }
 
+// The order-list counterpart to pushCurrentReferenceData above - see
+// orderCache.js / offline-order-helpers.ts's mergeOrdersForDisplay.
+// Bounded to the last 14 days for the same reason getOrders' `since`
+// param exists at all (see orderController.js) - this is a background
+// push, not something a cashier is ever waiting on, but there's still no
+// reason to pull (and store locally) a shop's entire lifetime history
+// just to answer "what does today's/last shift's order list look like".
+export async function pushCurrentOrdersCache(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const orders = await fetchOrders({ since });
+    await pushOrdersCache(orders || []);
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
 // Mounted once near the app root (see DashboardShell.tsx) so the 5-minute
 // timer runs for the lifetime of the dashboard session, independent of
 // which page is currently open. Also exposes a manual trigger + live
@@ -203,6 +225,7 @@ export function useOfflineSync() {
       setLastResult(result);
       setLastSyncAt(new Date());
       await pushCurrentReferenceData();
+      await pushCurrentOrdersCache();
       await refreshStatus();
       return result;
     } finally {

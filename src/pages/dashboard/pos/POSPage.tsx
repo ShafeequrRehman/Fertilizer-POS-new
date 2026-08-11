@@ -500,21 +500,49 @@ export default function POSPage() {
       };
 
       // Offline mode: only ever attempted inside the desktop app (the
-      // Local Hub - see lib/local-hub-api.ts - only exists there), and
-      // only when the till is actually offline right now. A paired
-      // phone's own offline fallback lives in CheckoutScreen.tsx on
+      // Local Hub - see lib/local-hub-api.ts - only exists there). A
+      // paired phone's own offline fallback lives in CheckoutScreen.tsx on
       // pos-mobile; this branch is specifically the till's own POS screen
       // placing an order straight into its own Local Hub queue.
-      const isOfflineOrder = isDesktopApp() && !isOnline;
+      let isOfflineOrder = isDesktopApp() && !isOnline;
       let savedOrder: SavedOrder;
 
-      if (isOfflineOrder) {
+      async function queueLocally() {
         const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username });
-        savedOrder = {
+        return {
           ...orderPayload,
           id: `local-${localRecord.id}`,
           dailyOrderNumber: localRecord.localOrderNumber,
         } as SavedOrder;
+      }
+
+      if (isOfflineOrder) {
+        savedOrder = await queueLocally();
+      } else if (isDesktopApp()) {
+        // isOnline only re-checks every 5s (see network-status.ts) and can
+        // still read stale-true for a moment right after this till
+        // actually loses its connection - racing a short timeout here
+        // means a genuinely offline till still gets its order queued
+        // (with a real ticket number) within a few seconds, instead of the
+        // cashier standing at the till waiting out the full 8-second
+        // default request timeout first. When actually online (the
+        // overwhelming majority of the time) this resolves in well under a
+        // second and nothing changes. Safe even if the abandoned cloud
+        // request eventually completes in the background anyway -
+        // createOrder is idempotent on clientSyncId (see
+        // orderController.js), so whichever of the two paths lands first
+        // wins and the other is a no-op, never a duplicate order.
+        try {
+          savedOrder = await Promise.race([
+            createOrder(orderPayload) as Promise<SavedOrder>,
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('Cloud order create timed out')), 4000);
+            }),
+          ]);
+        } catch {
+          savedOrder = await queueLocally();
+          isOfflineOrder = true;
+        }
       } else {
         savedOrder = await createOrder(orderPayload) as SavedOrder;
       }

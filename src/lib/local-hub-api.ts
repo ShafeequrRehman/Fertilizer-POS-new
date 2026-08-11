@@ -115,6 +115,30 @@ export async function pushReferenceData(data: {
   await hub.post('/reference-data', data);
 }
 
+// --- Orders cache (see backend/localHub/orderCache.js) -------------------
+// The order-list counterpart to reference data above - a snapshot of this
+// shop's recent cloud orders, read by Dashboard/Sales/Kitchen ALWAYS
+// (never a direct live cloud call from those pages - see
+// offline-order-helpers.ts's mergeOrdersForDisplay for how this gets
+// combined with whatever's still only queued locally), refreshed in the
+// background by offline-sync.ts's pushCurrentOrdersCache whenever online.
+
+export interface OrdersCacheSnapshot {
+  updatedAt: string | null;
+  orders: unknown[];
+}
+
+export async function pushOrdersCache(orders: unknown[]) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/orders-cache', { orders });
+}
+
+export async function getOrdersCache(): Promise<OrdersCacheSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<OrdersCacheSnapshot>('/orders-cache');
+  return response.data;
+}
+
 // Read back whatever was last pushed - what POSPage.tsx falls back to for
 // its product grid (and waiter dropdown) when this till itself is
 // offline, since fetchProducts()/fetchWaiters() (the normal cloud calls)

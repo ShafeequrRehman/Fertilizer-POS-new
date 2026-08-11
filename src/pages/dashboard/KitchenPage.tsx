@@ -3,6 +3,10 @@ import { useEffect, useState } from 'react';
 import { ChefHat, Clock, Printer, RefreshCcw, Settings, XCircle } from 'lucide-react';
 import { fetchOrders } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { pushOrdersCache } from '@/lib/local-hub-api';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 
 export default function KitchenPage() {
   const [orders, setOrders] = useState<SavedOrder[]>([]);
@@ -12,6 +16,7 @@ export default function KitchenPage() {
 
   const [kitchenPrinter, setKitchenPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-kitchen-printer') ?? ''));
   const [cashierPrinter, setCashierPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-cashier-printer') ?? ''));
+  const { isOnline } = useNetworkStatus();
 
   useEffect(() => {
     window.localStorage.setItem('preferred-kitchen-printer', kitchenPrinter);
@@ -21,8 +26,25 @@ export default function KitchenPage() {
     window.localStorage.setItem('preferred-cashier-printer', cashierPrinter);
   }, [cashierPrinter]);
 
-  // Polling for live orders every 10 seconds (in a real app this would be WebSockets)
+  // Polling for live orders every 10 seconds (in a real app this would be
+  // WebSockets). Always reads the Local Hub's cache first (instant, never
+  // a live cloud call up front - see offline-order-helpers.ts's
+  // loadOrdersFromLocalHub) so this never depends on connectivity or a
+  // possibly-stale isOnline reading; the real cloud fetch below still runs
+  // whenever online, in the background, to stay current and refresh that
+  // cache for next time.
   async function loadOrders() {
+    if (isDesktopApp()) {
+      try {
+        setOrders(await loadOrdersFromLocalHub());
+      } catch {
+        // Local Hub itself unreachable - leave whatever was last shown.
+      } finally {
+        setLoading(false);
+      }
+      if (!isOnline) return;
+    }
+
     try {
       // Only ever displays currently-pending tickets - bounding the fetch
       // to the last 2 days (generous margin for anything genuinely stuck
@@ -32,6 +54,7 @@ export default function KitchenPage() {
       const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
       const data = await fetchOrders({ since });
       setOrders(data || []);
+      if (isDesktopApp() && data) void pushOrdersCache(data).catch(() => {});
     } catch (e) {
       // Suppress polling errors
     } finally {
@@ -43,7 +66,8 @@ export default function KitchenPage() {
     loadOrders();
     const interval = setInterval(loadOrders, 10000);
     return () => clearInterval(interval);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline]);
 
   const pendingOrders = orders.filter(o => o.status === 'pending');
 

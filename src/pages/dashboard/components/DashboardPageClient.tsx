@@ -10,7 +10,11 @@ import {
 } from 'lucide-react';
 import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
 import { Product, SavedOrder, ShopSession } from '@/lib/pos-types';
-import { getBusinessWindow, filterOrdersInBusinessWindow, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
+import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { pushOrdersCache } from '@/lib/local-hub-api';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 
 type EmployeeStat = { name: string; sales: number; count: number };
 type InventoryItem = { id: string | number; name: string; stock: number };
@@ -36,6 +40,12 @@ export default function DashboardPageClient() {
   const [chartsReady, setChartsReady] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
+  const { isOnline } = useNetworkStatus();
+  // The shared, cached shop-open state (see shop-session.tsx) - gives this
+  // page something correct to show instantly, before its own (more
+  // complete, but cloud-only) session-history fetch below has a chance to
+  // land.
+  const { session: cachedShopSession } = useShopSession();
 
   useEffect(() => {
     setChartsReady(true);
@@ -53,6 +63,8 @@ export default function DashboardPageClient() {
   // ticks live; once closed, it freezes at [openedAt, closedAt) so the
   // final count for that shift stays visible until the next shift opens.
   useEffect(() => {
+    if (cachedShopSession) setShopSession((current) => current ?? cachedShopSession);
+
     async function loadSession() {
       try {
         const history = await fetchShopSessionHistory();
@@ -65,7 +77,7 @@ export default function DashboardPageClient() {
     void loadSession();
     const intervalId = setInterval(() => void loadSession(), 45000);
     return () => clearInterval(intervalId);
-  }, []);
+  }, [cachedShopSession]);
 
   // Fetch products once on mount for the low-stock widget; only orders
   // (which genuinely need to feel "live" for today's sales numbers) get
@@ -79,7 +91,23 @@ export default function DashboardPageClient() {
   }, []);
 
   useEffect(() => {
+    // Always paints instantly from the Local Hub's cache first (see
+    // offline-order-helpers.ts's loadOrdersFromLocalHub) - never a live
+    // cloud call up front, so this never depends on connectivity or the
+    // (laggy - see network-status.ts) isOnline flag being accurate at this
+    // exact moment. The real cloud fetch below still runs whenever online,
+    // in the background, refining this with up-to-date numbers and
+    // refreshing the cache for next time.
     async function loadOrders() {
+      if (isDesktopApp()) {
+        try {
+          setOrders(await loadOrdersFromLocalHub());
+        } catch (error) {
+          console.error('Dashboard orders cache read error', error);
+        }
+        if (!isOnline) return;
+      }
+
       try {
         // This page only ever shows "today's" (current/last shift) numbers
         // via the business-window filtering below - bounding the fetch to
@@ -89,7 +117,10 @@ export default function DashboardPageClient() {
         // getOrders' `since` handling in orderController.js.
         const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
         const ordersData = await fetchOrders({ since });
-        if (ordersData) setOrders(ordersData);
+        if (ordersData) {
+          setOrders(ordersData);
+          if (isDesktopApp()) void pushOrdersCache(ordersData).catch(() => {});
+        }
       } catch (error) {
         console.error('Dashboard orders fetch error', error);
       }
@@ -102,7 +133,7 @@ export default function DashboardPageClient() {
     }, 45000);
 
     return () => clearInterval(intervalId);
-  }, []);
+  }, [isOnline]);
 
   const businessWindow = useMemo<BusinessWindow>(() => buildDashboardWindow(shopSession, currentTime), [shopSession, currentTime]);
   const businessOrders = useMemo(
