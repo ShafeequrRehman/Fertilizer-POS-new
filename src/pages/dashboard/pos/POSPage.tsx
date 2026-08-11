@@ -6,11 +6,11 @@ import { getProductImageUrl } from '@/lib/asset-path';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
-import { hasPermission, getAuthUser } from '@/lib/auth';
+import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -86,8 +86,47 @@ export default function POSPage() {
   const nameInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Loads the product grid + waiter dropdown from the local hub's cached
+  // reference data instead of the cloud - what makes the POS screen itself
+  // usable while this till has no internet. That cache is only ever as
+  // fresh as the last successful online load (see the push at the bottom
+  // of loadProducts below, plus the 5-minute background push in
+  // lib/offline-sync.ts) - if this till has genuinely never been online
+  // since install, there's nothing to fall back to yet.
+  async function loadProductsFromLocalHub() {
+    const reachable = await isLocalHubReachable();
+    if (!reachable) {
+      setCategories(['All']);
+      setProducts([]);
+      setStatusMessage({ tone: 'error', text: "Offline, and the Local Hub isn't reachable either - restart the app to enable offline mode." });
+      return;
+    }
+    const snapshot = await getReferenceData();
+    const offlineProducts = (snapshot.products || []) as Product[];
+    const offlineWaiters = (snapshot.staff || []) as Waiter[];
+    const derivedCategories = Array.from(new Set(offlineProducts.map((p) => p.category).filter(Boolean)));
+    setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
+    setProducts(offlineProducts);
+    setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+    if (offlineProducts.length === 0) {
+      setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
+    } else {
+      setStatusMessage({ tone: 'info', text: `Offline - showing the product list as of the last sync${snapshot.updatedAt ? ` (${new Date(snapshot.updatedAt).toLocaleTimeString()})` : ''}.` });
+    }
+  }
+
   useEffect(() => {
     async function loadProducts() {
+      if (isDesktopApp() && !isOnline) {
+        setIsLoadingProducts(true);
+        try {
+          await loadProductsFromLocalHub();
+        } finally {
+          setIsLoadingProducts(false);
+        }
+        return;
+      }
+
       try {
         const [productResponse, waiterResponse] = await Promise.all([
           fetchProducts(),
@@ -96,16 +135,38 @@ export default function POSPage() {
         setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
         setProducts(productResponse?.products ?? []);
         setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
+
+        // Best-effort - keeps the Local Hub's offline copy fresh the
+        // moment this till has real data, instead of only ever updating
+        // it on the 5-minute background tick (see lib/offline-sync.ts).
+        // Never allowed to affect the online product grid above.
+        if (isDesktopApp()) {
+          void pushReferenceData({
+            shopName: getAuthShop()?.name || '',
+            products: productResponse?.products || [],
+            customers: [],
+            staff: waiterResponse,
+          }).catch(() => {});
+        }
       } catch (error) {
-        setCategories(['All']);
-        setProducts([]);
-        setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load products from database.' });
+        if (isDesktopApp()) {
+          // The cloud call itself failed (e.g. connectivity dropped
+          // between the online check above and this request actually
+          // going out) - fall back the same way the isOnline branch does,
+          // rather than showing a dead product grid.
+          await loadProductsFromLocalHub();
+        } else {
+          setCategories(['All']);
+          setProducts([]);
+          setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load products from database.' });
+        }
       } finally {
         setIsLoadingProducts(false);
       }
     }
     void loadProducts();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {

@@ -76,6 +76,14 @@ export async function isLocalHubReachable(): Promise<boolean> {
   }
 }
 
+export interface ReferenceDataSnapshot {
+  updatedAt: string | null;
+  shopName: string;
+  products: unknown[];
+  customers: unknown[];
+  staff: unknown[];
+}
+
 export async function pushReferenceData(data: {
   shopName: string;
   products: unknown[];
@@ -86,6 +94,16 @@ export async function pushReferenceData(data: {
   // session - harmless if already cached (getPairingInfo is idempotent).
   if (!getCachedPairingKey()) await getPairingInfo();
   await hub.post('/reference-data', data);
+}
+
+// Read back whatever was last pushed - what POSPage.tsx falls back to for
+// its product grid (and waiter dropdown) when this till itself is
+// offline, since fetchProducts()/fetchWaiters() (the normal cloud calls)
+// have nothing to reach at that point.
+export async function getReferenceData(): Promise<ReferenceDataSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<ReferenceDataSnapshot>('/reference-data');
+  return response.data;
 }
 
 export async function createLocalOrder(payload: object, actor?: { name?: string; deviceLabel?: string }) {
