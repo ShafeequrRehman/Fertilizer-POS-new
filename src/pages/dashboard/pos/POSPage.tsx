@@ -93,11 +93,15 @@ export default function POSPage() {
   // of loadProducts below, plus the 5-minute background push in
   // lib/offline-sync.ts) - if this till has genuinely never been online
   // since install, there's nothing to fall back to yet.
-  async function loadProductsFromLocalHub() {
+  // `silent` is used for the cache-first warm-paint below (isOnline case) -
+  // no point telling the cashier "Offline" for the split second before the
+  // real cloud refresh lands right after.
+  async function loadProductsFromLocalHub(silent = false) {
     const reachable = await isLocalHubReachable();
     if (!reachable) {
       setCategories(['All']);
       setProducts([]);
+      if (silent) return;
       const diagnostics = await getLocalHubStartDiagnostics();
       const reason = diagnostics && !diagnostics.started
         ? ` (${diagnostics.error || 'failed to start'})`
@@ -112,6 +116,7 @@ export default function POSPage() {
     setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
     setProducts(offlineProducts);
     setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+    if (silent) return;
     if (offlineProducts.length === 0) {
       setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
     } else {
@@ -120,66 +125,64 @@ export default function POSPage() {
   }
 
   useEffect(() => {
+    // The real source of truth whenever this till can reach it - fetched
+    // in the background on desktop (see loadProducts below) so a cloud
+    // round trip never blocks the cashier from seeing products at all, and
+    // is the only path at all for a plain browser tab (no Local Hub cache
+    // to have shown a moment ago there).
+    async function refreshFromCloud() {
+      const [productResponse, waiterResponse] = await Promise.all([fetchProducts(), fetchWaiters()]);
+      setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
+      setProducts(productResponse?.products ?? []);
+      setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
+      setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
+
+      // Best-effort - keeps the Local Hub's offline copy fresh the moment
+      // this till has real data, instead of only ever updating it on the
+      // 5-minute background tick (see lib/offline-sync.ts).
+      if (isDesktopApp()) {
+        void pushReferenceData({
+          shopName: getAuthShop()?.name || '',
+          products: productResponse?.products || [],
+          customers: [],
+          staff: waiterResponse,
+        }).catch(() => {});
+      }
+    }
+
     async function loadProducts() {
-      if (isDesktopApp() && !isOnline) {
+      if (isDesktopApp()) {
+        // Cache-first, always - paint instantly from whatever this till
+        // already has locally (see lib/local-hub-api.ts) instead of ever
+        // making the cashier wait on a cloud round trip just to see the
+        // product grid. If we're online, a real refresh then happens
+        // quietly in the background and swaps in the moment it lands; if
+        // that refresh fails (e.g. isOnline read stale-true for a moment),
+        // the cache already on screen simply stays put - no spinner, no
+        // visible failure, nothing slowing the cashier down.
         setIsLoadingProducts(true);
         try {
-          await loadProductsFromLocalHub();
+          await loadProductsFromLocalHub(isOnline);
         } finally {
           setIsLoadingProducts(false);
+        }
+        if (isOnline) {
+          refreshFromCloud().catch(() => {
+            // Best-effort - the cache already on screen is still valid,
+            // and the next isOnline flip or 5-minute sync tick will retry.
+          });
         }
         return;
       }
 
+      // Plain browser tab - no Local Hub, no offline story at all.
+      setIsLoadingProducts(true);
       try {
-        const cloudLoad = Promise.all([fetchProducts(), fetchWaiters()]);
-        // useNetworkStatus only re-checks every 5s (see network-status.ts),
-        // so isOnline can still read stale-true for a moment right after
-        // this till actually loses its connection - without a bound here,
-        // that moment would show a "Loading products..." spinner for the
-        // full 8s cloud-request timeout (see AXIOS_REQUEST_TIMEOUT_MS in
-        // lib/api.ts) before falling back to the offline cache. Racing a
-        // shorter timeout here keeps that worst case to ~4s instead, at
-        // the cost of occasionally falling back to a slightly-stale cache
-        // on a genuinely online but very slow connection - an acceptable
-        // trade given the till re-runs this effect (with fresh data) the
-        // moment isOnline itself catches up.
-        const [productResponse, waiterResponse] = isDesktopApp()
-          ? await Promise.race([
-              cloudLoad,
-              new Promise<never>((_, reject) => {
-                setTimeout(() => reject(new Error('Cloud product load timed out')), 4000);
-              }),
-            ])
-          : await cloudLoad;
-        setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
-        setProducts(productResponse?.products ?? []);
-        setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
-
-        // Best-effort - keeps the Local Hub's offline copy fresh the
-        // moment this till has real data, instead of only ever updating
-        // it on the 5-minute background tick (see lib/offline-sync.ts).
-        // Never allowed to affect the online product grid above.
-        if (isDesktopApp()) {
-          void pushReferenceData({
-            shopName: getAuthShop()?.name || '',
-            products: productResponse?.products || [],
-            customers: [],
-            staff: waiterResponse,
-          }).catch(() => {});
-        }
+        await refreshFromCloud();
       } catch (error) {
-        if (isDesktopApp()) {
-          // The cloud call itself failed (e.g. connectivity dropped
-          // between the online check above and this request actually
-          // going out) - fall back the same way the isOnline branch does,
-          // rather than showing a dead product grid.
-          await loadProductsFromLocalHub();
-        } else {
-          setCategories(['All']);
-          setProducts([]);
-          setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load products from database.' });
-        }
+        setCategories(['All']);
+        setProducts([]);
+        setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load products from database.' });
       } finally {
         setIsLoadingProducts(false);
       }
