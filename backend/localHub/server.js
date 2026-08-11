@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require("cors");
 const os = require("os");
 const pairing = require("./pairing");
 const localOrders = require("./localOrders");
@@ -29,6 +30,18 @@ const referenceData = require("./referenceData");
 const LOCAL_HUB_PORT = Number(process.env.POS_LOCAL_HUB_PORT) || 5057;
 
 const app = express();
+// Without this, every call from the renderer (whether Vite's
+// localhost:5173 in dev, or the packaged app's file:// origin) is a
+// cross-origin request as far as Chromium is concerned - and gets
+// blocked by the browser before it even leaves the process, regardless
+// of whether the Local Hub is actually listening. That's indistinguishable
+// from "unreachable" to axios (no response, just a network error), which
+// is exactly the false negative isLocalHubReachable() was hitting even
+// with the server confirmed up via `netstat`. allow-all mirrors the
+// legacy backend (backend/index.js's own app.use(cors())) - this is a
+// LAN-only, pairing-key-gated server, not a public one, so there's no
+// meaningful origin to restrict to.
+app.use(cors());
 app.use(express.json());
 
 function isLoopback(req) {
