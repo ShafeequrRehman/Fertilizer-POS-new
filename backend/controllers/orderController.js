@@ -197,6 +197,25 @@ exports.createOrder = async (req, res) => {
     }
 
     const payload = req.body;
+
+    // Idempotency guard: the desktop till races this call against a short
+    // timeout and falls back to queuing the order in its offline Local Hub
+    // if it doesn't hear back in time (see POSPage.tsx's handleSaveOrder) -
+    // meaning this exact request can still be sitting here, about to
+    // finish, at the same moment the Local Hub's own copy of the same
+    // order (same clientSyncId) gets synced up separately via
+    // importOfflineOrders below. Whichever one actually lands first wins;
+    // this makes the other one a no-op instead of a duplicate order - the
+    // orderCounter increment above is a small, accepted gap in that case,
+    // the same trade-off already made for a plain dropped request.
+    const requestClientSyncId = payload.clientSyncId || payload.orderId || "";
+    if (requestClientSyncId) {
+      const existing = await Order.findOne({ clientSyncId: requestClientSyncId, ...buildShopScope(req) });
+      if (existing) {
+        return res.json({ ...existing.toObject(), id: String(existing._id) });
+      }
+    }
+
     const totals = recalculateTotals(payload.items || [], payload.discount);
     const dailyOrderNumber = openSession.orderCounter;
 

@@ -30,9 +30,18 @@ function writeOrders(orders) {
 
 function nextLocalOrderNumber() {
   const counter = store.load(COUNTER_KEY, { value: 0 });
-  counter.value += 1;
-  store.save(COUNTER_KEY, counter);
-  return counter.value;
+  // Defensive floor: never hand out a number at or below one already used
+  // by an order sitting in the queue right now. counter.json and
+  // orders.json are two separate files updated in two separate writes
+  // (see queueOrder below) - if anything ever left them out of step (a
+  // half-written file from a crash mid-save, a manually restored backup,
+  // etc.), this guarantees numbering still only ever goes forward instead
+  // of quietly reusing a number that's already on a real, possibly
+  // already-completed order.
+  const highestQueued = readOrders().reduce((max, order) => Math.max(max, order.localOrderNumber || 0), 0);
+  const next = Math.max(counter.value, highestQueued) + 1;
+  store.save(COUNTER_KEY, { value: next });
+  return next;
 }
 
 function resetCounter() {

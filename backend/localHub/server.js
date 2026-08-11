@@ -4,6 +4,7 @@ const os = require("os");
 const pairing = require("./pairing");
 const localOrders = require("./localOrders");
 const referenceData = require("./referenceData");
+const orderCache = require("./orderCache");
 
 // The Local Hub: a small, self-contained Express server that runs inside
 // the desktop (Electron) app ALWAYS, independent of whether this till
@@ -124,6 +125,20 @@ app.post("/reference-data", requireLoopback, (req, res) => {
 
 app.get("/reference-data", requirePairingKey, (req, res) => {
   res.json(referenceData.get());
+});
+
+// Cloud orders snapshot - see orderCache.js. Pushed down (loopback only)
+// by the till whenever it successfully loads orders from the cloud;
+// merged with the pending order/edit queues below by whoever reads it
+// (see offline-order-helpers.ts's mergeOrdersForDisplay), never here -
+// keeps the "what does an order look like" logic in exactly one place.
+app.post("/orders-cache", requireLoopback, (req, res) => {
+  const snapshot = orderCache.set(req.body?.orders || []);
+  res.json(snapshot);
+});
+
+app.get("/orders-cache", requirePairingKey, (req, res) => {
+  res.json(orderCache.get());
 });
 
 // Queue an order locally - called by a paired phone's Checkout screen, or
