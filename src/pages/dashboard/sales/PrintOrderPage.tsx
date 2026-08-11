@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft, Printer } from 'lucide-react';
 import { fetchOrder, fetchCustomerOutstanding } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
-import ThermalReceipt from '@/pages/dashboard/components/ThermalReceipt';
+import ReceiptRenderer from '@/pages/dashboard/components/ReceiptRenderer';
 import { PRINT_LOGO_STORAGE_KEY } from '@/lib/print-logo';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -18,12 +18,17 @@ async function waitForReceiptLayout() {
   const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const nextFrame = () => new Promise((resolve) => window.requestAnimationFrame(() => resolve(undefined)));
 
+  // Not tied to any one template's specific wording (e.g. "DATE:"/"Items:")
+  // any more - different shops can pick different receipt layouts (see
+  // ReceiptRenderer.tsx), so this just waits for the print area to actually
+  // have real content in it rather than checking for text that might not
+  // exist in every template.
   const waitForElement = async () => {
     const startedAt = Date.now();
     while (Date.now() - startedAt < 5000) {
       const element = document.getElementById('receipt-print-area');
       const text = element?.textContent ?? '';
-      if (element && text.includes('DATE:') && text.includes('Items:')) return element;
+      if (element && text.trim().length > 20) return element;
       await wait(100);
     }
     return document.getElementById('receipt-print-area');
@@ -190,7 +195,7 @@ export default function PrintOrderPage() {
         `}} />
         <div id="silent-wrapper">
           <div id="receipt-print-area" className="w-[72mm] m-0 p-0 overflow-visible">
-            <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+            <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </div>
       </div>
@@ -276,14 +281,14 @@ export default function PrintOrderPage() {
         <section className="rounded-[32px] bg-white p-8 shadow-sm flex items-start justify-center">
           {/* Visible in UI */}
           <div className="border shadow-lg p-4">
-             <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+             <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </section>
       </div>
 
       {/* This is the only thing visible during actual printing natively */}
       <div className="hidden print:block" id="receipt-print-area">
-        <ThermalReceipt order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+        <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
       </div>
 
     </div>

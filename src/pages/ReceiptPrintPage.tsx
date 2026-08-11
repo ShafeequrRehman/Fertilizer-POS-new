@@ -2,7 +2,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { fetchOrder, fetchCustomerOutstanding } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
-import ThermalReceipt from '@/pages/dashboard/components/ThermalReceipt';
+import ReceiptRenderer from '@/pages/dashboard/components/ReceiptRenderer';
 import { PRINT_LOGO_STORAGE_KEY } from '@/lib/print-logo';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -54,9 +54,12 @@ async function waitForReceiptLayout() {
     }
   };
 
+  // Not tied to any one template's specific wording any more - different
+  // shops can pick different receipt layouts (see ReceiptRenderer.tsx), so
+  // this just waits for the print area to actually have real content.
   const startedAt = Date.now();
   let receiptElement = document.getElementById('receipt-print-area');
-  while ((!receiptElement || !receiptElement.textContent?.includes('DATE:') || !receiptElement.textContent?.includes('Items:')) && Date.now() - startedAt < 5000) {
+  while ((!receiptElement || (receiptElement.textContent?.trim().length ?? 0) <= 20) && Date.now() - startedAt < 5000) {
     await wait(100);
     receiptElement = document.getElementById('receipt-print-area');
   }
@@ -249,7 +252,7 @@ export default function StandaloneReceiptPrintPage() {
         }
       ` }} />
       <div id="receipt-print-area">
-        <ThermalReceipt order={order} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+        <ReceiptRenderer order={order} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
       </div>
       {isReady && (
         <div style={{ height: 0, overflow: 'hidden', visibility: 'hidden' }}>

@@ -19,6 +19,16 @@ export type StoreSettings = {
   receiptContact?: string;
   receiptPaymentInfo?: string;
   receiptFooterMessage?: string;
+  // Which printed layout to use for each receipt type - see
+  // src/pages/dashboard/components/ReceiptRenderer.tsx for how these pick
+  // between ThermalReceipt.tsx ("classic", the original template) and the
+  // two newer ones modeled on real till printouts the shop provided
+  // (ItemizedBillReceipt.tsx / KitchenKotReceipt.tsx).
+  cashierReceiptTemplate?: 'classic' | 'itemizedBill';
+  kitchenReceiptTemplate?: 'classic' | 'kot';
+  // Only used by the "itemizedBill" cashier template's SC (Service Charge)
+  // line - left at 0 (hidden) unless the shop sets one.
+  serviceChargePercent?: number;
 };
 
 export const defaultSettings: StoreSettings = {
@@ -44,6 +54,9 @@ export const defaultSettings: StoreSettings = {
   receiptContact: "0300-0310275",
   receiptPaymentInfo: "0307 - 4798089 Jazzcash/EasyPaisa",
   receiptFooterMessage: "Thank You for your Order!",
+  cashierReceiptTemplate: "classic",
+  kitchenReceiptTemplate: "classic",
+  serviceChargePercent: 0,
 };
 
 // Chromium's localStorage for this app's packaged, file://-loaded
