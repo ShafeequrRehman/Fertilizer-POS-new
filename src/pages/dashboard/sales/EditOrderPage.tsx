@@ -4,6 +4,10 @@ import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
 import { Product, SavedOrder } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
+import { localOrderToSavedOrder, saveOrderEditOffline } from '@/lib/offline-order-helpers';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
@@ -84,10 +88,51 @@ export default function EditOrderPage() {
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  // Only set when this page couldn't load an order at all because it's
+  // offline and the order isn't one this till can reconstruct locally
+  // (see the load effect below) - distinct from "Order not found" so the
+  // person sees an actionable reason instead of thinking the order itself
+  // is gone.
+  const [offlineUnavailable, setOfflineUnavailable] = useState(false);
+  const { isOnline } = useNetworkStatus();
 
   useEffect(() => {
     async function load() {
+      setOfflineUnavailable(false);
       try {
+        if (isDesktopApp() && !isOnline) {
+          // Offline: a still-local (not yet synced) order can be fully
+          // reconstructed from the Local Hub's own queue - anything else
+          // (an order that already existed in the cloud before this
+          // offline stretch) can't be, since this till has no cached copy
+          // of past orders' full detail to fall back to. Use the order
+          // card's Add Items / Complete Payment for those instead (see
+          // SalesPage.tsx's saveUpdate, which handles both cases).
+          if (params.id?.startsWith('local-')) {
+            const localId = params.id.slice('local-'.length);
+            const pending = await getPendingLocalOrders();
+            const record = pending.find((entry) => entry.id === localId);
+            if (record) {
+              const orderData = localOrderToSavedOrder(record);
+              setOrder(orderData);
+              setItems(orderData.items);
+              setRemovedItems([]);
+            } else {
+              setOrder(null);
+            }
+          } else {
+            setOrder(null);
+            setOfflineUnavailable(true);
+          }
+          try {
+            const snapshot = await getReferenceData();
+            setProducts((snapshot.products || []) as Product[]);
+          } catch {
+            setProducts([]);
+          }
+          return;
+        }
+
         const [orderData, productData] = await Promise.all([fetchOrder(params.id), fetchProducts()]);
         setOrder(orderData);
         setItems(orderData.items);
@@ -99,7 +144,7 @@ export default function EditOrderPage() {
     }
 
     void load();
-  }, [params.id]);
+  }, [params.id, isOnline]);
 
   async function saveOrder() {
     if (!order) return;
@@ -111,8 +156,8 @@ export default function EditOrderPage() {
       ? 0
       : Math.max(subtotal - nextPaidAmount, 0);
 
-    const updated = await updateOrder(order.id, {
-      action: 'replaceItems',
+    const patch = {
+      action: 'replaceItems' as const,
       items,
       status: order.status,
       note: order.note,
@@ -124,7 +169,25 @@ export default function EditOrderPage() {
       paidAmount: nextPaidAmount,
       remainingAmount: nextRemainingAmount,
       discount: order.discount ?? null,
-    });
+    };
+
+    if (isDesktopApp() && !isOnline) {
+      // No kitchen-print claim here - that coordinates printing across
+      // devices via the cloud, same reasoning as SalesPage.tsx's
+      // saveUpdate offline branch. The removed/added items themselves are
+      // still fully recorded in what gets synced.
+      try {
+        const updated = await saveOrderEditOffline(order, patch);
+        setRemovedItems([]);
+        setStatus(`Order ${updated.id} saved offline - will sync once back online.`);
+        setOrder(updated);
+      } catch (err) {
+        setStatus(err instanceof Error ? err.message : 'Could not save this change offline.');
+      }
+      return;
+    }
+
+    const updated = await updateOrder(order.id, patch);
     printKitchenRemoveTicket(updated, removedItems);
     setRemovedItems([]);
 
@@ -160,7 +223,13 @@ export default function EditOrderPage() {
   }
 
   if (!order) {
-    return <div className="rounded-[32px] bg-white p-8 text-sm text-rose-500 shadow-sm">Order not found.</div>;
+    return (
+      <div className="rounded-[32px] bg-white p-8 text-sm text-rose-500 shadow-sm">
+        {offlineUnavailable
+          ? "This detailed editor needs an internet connection to load an order that already existed before this till went offline. Use the order card's Add Items / Complete Payment instead, or try again once back online."
+          : 'Order not found.'}
+      </div>
+    );
   }
 
   return (

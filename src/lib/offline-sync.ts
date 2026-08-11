@@ -4,7 +4,9 @@ import { getAuthShop } from '@/lib/auth';
 import { useNetworkStatus } from '@/lib/network-status';
 import {
   ackLocalOrders,
+  ackOrderEdits,
   getPendingLocalOrders,
+  getPendingOrderEdits,
   getSyncStatus,
   isLocalHubReachable,
   pushReferenceData,
@@ -27,7 +29,50 @@ export interface OfflineSyncResult {
   imported: number;
   skipped: number;
   failed: number;
+  editsApplied?: number;
+  editsFailed?: number;
   error?: string;
+}
+
+// Second phase of a sync tick - pushes order-card edits (add items,
+// complete payment, etc.) queued while offline against orders that
+// already had a real cloud _id (see local-hub-api.ts's queueOrderEdit /
+// backend/localHub/localOrders.js). Orders both created AND edited
+// entirely offline never go through here - their final state was already
+// baked into the create queue directly (updateQueuedOrder), so
+// runSyncNow's order-import phase above is all they ever need. Never
+// throws - a failed edit is reported back but doesn't block the rest of
+// the sync tick (reference-data push, etc.).
+async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
+  const pendingEdits = await getPendingOrderEdits();
+  if (pendingEdits.length === 0) return { applied: 0, failed: 0 };
+
+  try {
+    const response = await api.post('/orders/import-offline-updates', {
+      updates: pendingEdits.map((edit) => ({
+        localEditId: edit.id,
+        orderId: edit.orderId,
+        offlineUpdatedAt: edit.queuedAt,
+        payload: edit.payload,
+      })),
+    });
+
+    const { applied = [], skipped = [] } = response.data as {
+      applied: Array<{ localEditId: string }>;
+      skipped: Array<{ localEditId: string }>;
+      failed: Array<{ localEditId: string; error: string }>;
+    };
+
+    // A skipped edit (e.g. the order it targeted somehow no longer
+    // exists) is still acked - retrying it forever would never succeed,
+    // and it'd just sit there confusing the pending-edit count.
+    const confirmedIds = [...applied, ...skipped].map((entry) => entry.localEditId);
+    await ackOrderEdits(confirmedIds);
+
+    return { applied: applied.length, failed: pendingEdits.length - confirmedIds.length };
+  } catch {
+    return { applied: 0, failed: pendingEdits.length };
+  }
 }
 
 export async function runSyncNow(): Promise<OfflineSyncResult> {
@@ -62,36 +107,45 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
   }
 
   const pending = await getPendingLocalOrders();
-  if (pending.length === 0) return { imported: 0, skipped: 0, failed: 0 };
+  let result: OfflineSyncResult = { imported: 0, skipped: 0, failed: 0 };
 
-  try {
-    const response = await api.post('/orders/import-offline', {
-      orders: pending.map((order) => ({
-        localOrderId: order.id,
-        localOrderNumber: order.localOrderNumber,
-        offlineCreatedAt: order.queuedAt,
-        payload: order.payload,
-      })),
-    });
+  if (pending.length > 0) {
+    try {
+      const response = await api.post('/orders/import-offline', {
+        orders: pending.map((order) => ({
+          localOrderId: order.id,
+          localOrderNumber: order.localOrderNumber,
+          offlineCreatedAt: order.queuedAt,
+          payload: order.payload,
+        })),
+      });
 
-    const { imported = [], skipped = [] } = response.data as {
-      imported: Array<{ localOrderId: string }>;
-      skipped: Array<{ localOrderId: string }>;
-      failed: Array<{ localOrderId: string; error: string }>;
-    };
+      const { imported = [], skipped = [] } = response.data as {
+        imported: Array<{ localOrderId: string }>;
+        skipped: Array<{ localOrderId: string }>;
+        failed: Array<{ localOrderId: string; error: string }>;
+      };
 
-    const confirmedIds = [...imported, ...skipped].map((entry) => entry.localOrderId);
-    await ackLocalOrders(confirmedIds);
+      const confirmedIds = [...imported, ...skipped].map((entry) => entry.localOrderId);
+      await ackLocalOrders(confirmedIds);
 
-    return { imported: imported.length, skipped: skipped.length, failed: pending.length - confirmedIds.length };
-  } catch (error) {
-    return {
-      imported: 0,
-      skipped: 0,
-      failed: pending.length,
-      error: error instanceof Error ? error.message : 'Sync failed - will retry automatically.',
-    };
+      result = { imported: imported.length, skipped: skipped.length, failed: pending.length - confirmedIds.length };
+    } catch (error) {
+      result = {
+        imported: 0,
+        skipped: 0,
+        failed: pending.length,
+        error: error instanceof Error ? error.message : 'Sync failed - will retry automatically.',
+      };
+    }
   }
+
+  // Edits run regardless of whether there were any new orders to create -
+  // an order created earlier (before this offline stretch, or synced
+  // earlier in this same tick above) can still have edits queued against
+  // it with nothing new needing to be created.
+  const editsResult = await syncOrderEdits();
+  return { ...result, editsApplied: editsResult.applied, editsFailed: editsResult.failed };
 }
 
 export async function pushCurrentReferenceData(): Promise<void> {

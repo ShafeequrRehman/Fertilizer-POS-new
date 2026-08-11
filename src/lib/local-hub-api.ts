@@ -51,6 +51,8 @@ export interface SyncStatus {
   pendingCount: number;
   failedCount: number;
   totalQueued: number;
+  pendingEditCount?: number;
+  failedEditCount?: number;
 }
 
 // Loopback-only calls (the till talking to its own hub) - fetches and
@@ -148,4 +150,55 @@ export async function getSyncStatus(): Promise<SyncStatus> {
   if (!getCachedPairingKey()) await getPairingInfo();
   const response = await hub.get<SyncStatus>('/sync/status');
   return response.data;
+}
+
+// --- Editing an order while offline -------------------------------------
+// See backend/localHub/localOrders.js's "Editing an order while offline"
+// section for the full split between these two cases (still-local order
+// vs. one that already has a real cloud _id) - SalesPage.tsx's saveUpdate()
+// picks between the two functions below based on whether the order's id
+// starts with "local-".
+
+export interface LocalOrderEditRecord {
+  id: string;
+  orderId: string;
+  payload: Record<string, unknown>;
+  actor: { name?: string; deviceLabel?: string } | null;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+// Mutates a still-unsynced local order's own queued payload directly -
+// localId is the order's Local Hub id with the "local-" prefix already
+// stripped off (see SalesPage.tsx's localOrderToSavedOrder).
+export async function updateQueuedLocalOrder(localId: string, payload: object): Promise<LocalOrderRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.patch<LocalOrderRecord>(`/orders/local/${localId}`, { payload });
+  return response.data;
+}
+
+// Queues an edit against an order that already has a real cloud _id, to be
+// replayed by the sync engine (offline-sync.ts) via the cloud's
+// POST /orders/import-offline-updates once back online.
+export async function queueOrderEdit(orderId: string, payload: object, actor?: { name?: string; deviceLabel?: string }): Promise<LocalOrderEditRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor });
+  return response.data;
+}
+
+export async function getPendingOrderEdits(): Promise<LocalOrderEditRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalOrderEditRecord[]>('/orders/edits/pending');
+  return response.data;
+}
+
+export async function ackOrderEdits(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/orders/edits/ack', { ids });
+}
+
+export async function markOrderEditFailed(id: string, error: string) {
+  await hub.post(`/orders/edits/${id}/fail`, { error });
 }

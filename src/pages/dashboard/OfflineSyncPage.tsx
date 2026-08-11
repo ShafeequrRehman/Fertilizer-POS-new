@@ -195,13 +195,14 @@ export default function OfflineSyncPage() {
           </button>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <StatBox label="Pending" value={status?.pendingCount ?? 0} tone="amber" />
-          <StatBox label="Failed" value={status?.failedCount ?? 0} tone="rose" />
+        <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <StatBox label="Pending Orders" value={status?.pendingCount ?? 0} tone="amber" />
+          <StatBox label="Pending Edits" value={status?.pendingEditCount ?? 0} tone="amber" />
+          <StatBox label="Failed" value={(status?.failedCount ?? 0) + (status?.failedEditCount ?? 0)} tone="rose" />
           <StatBox label="Total Queued" value={status?.totalQueued ?? 0} tone="slate" />
         </div>
 
-        {!isOnline && (status?.pendingCount ?? 0) > 0 ? (
+        {!isOnline && (status?.pendingCount ?? 0) + (status?.pendingEditCount ?? 0) > 0 ? (
           <div className="mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700">
             <WifiOff size={14} /> Waiting for the internet to come back before these can sync.
           </div>

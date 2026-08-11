@@ -2,42 +2,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, PackagePlus, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, claimReceiptPrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
-import { Discount, OrderPayload, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { Discount, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
-import { getPendingLocalOrders, getReferenceData, type LocalOrderRecord } from '@/lib/local-hub-api';
+import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
+import { localOrderToSavedOrder, saveOrderEditOffline } from '@/lib/offline-order-helpers';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
-
-// Turns a locally-queued (not-yet-synced) order into the same shape the
-// rest of this page already knows how to render - lets orders taken while
-// offline show up here immediately, instead of the cashier having no way
-// to confirm they were actually recorded until the next sync. See
-// backend/localHub/localOrders.js for what actually produces these.
-function localOrderToSavedOrder(record: LocalOrderRecord): SavedOrder {
-  const payload = (record.payload || {}) as Partial<OrderPayload>;
-  return {
-    ...payload,
-    id: `local-${record.id}`,
-    dailyOrderNumber: payload.dailyOrderNumber ?? record.localOrderNumber,
-    items: payload.items ?? [],
-    total: payload.total ?? 0,
-    subtotal: payload.subtotal ?? payload.total ?? 0,
-    tax: payload.tax ?? 0,
-    orderType: payload.orderType ?? 'DineIn',
-    customer: payload.customer ?? { name: '', phone: '', address: '' },
-    address: payload.address ?? '',
-    note: payload.note ?? '',
-    waiter: payload.waiter ?? '',
-    table: payload.table ?? '',
-    status: payload.status ?? 'pending',
-    paymentMethod: payload.paymentMethod ?? 'Cash',
-    createdAt: payload.createdAt ?? record.queuedAt,
-  } as SavedOrder;
-}
 
 const filters = ['All', 'Dine In', 'Take Away', 'Delivery', 'Fariha', 'Ahsan Raza', 'Rehman', 'Rehan'];
 
@@ -277,6 +251,28 @@ export default function SalesPage() {
 
   async function saveUpdate(payload: Parameters<typeof updateOrder>[1]) {
     if (!selectedOrder) return null;
+
+    if (isDesktopApp() && !isOnline) {
+      // Editing an order while offline - see offline-order-helpers.ts's
+      // saveOrderEditOffline for the split between the two cases (still-
+      // local order vs. one that already has a real cloud _id). No
+      // claim-before-print or WhatsApp here at all, same as order
+      // creation offline (POSPage.tsx) - both are online-only by design
+      // (claims coordinate printing across devices; WhatsApp was
+      // explicitly scoped online-only from the start). Everything queued
+      // here is replayed for real - dues cascade included - once synced.
+      try {
+        const updated = await saveOrderEditOffline(selectedOrder, payload);
+        setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
+        setSelectedOrder(updated);
+        setStatus({ tone: 'info', text: 'Saved offline - will sync to the cloud once back online.' });
+        return updated;
+      } catch (err) {
+        setStatus({ tone: 'error', text: err instanceof Error ? err.message : 'Could not save this change offline.' });
+        return null;
+      }
+    }
+
     const updated = await updateOrder(selectedOrder.id, payload);
     setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
     setSelectedOrder(updated);
@@ -401,10 +397,18 @@ export default function SalesPage() {
     setPaymentAmount('');
     setDiscountAmountInput('');
     setDiscountPercentInput('');
-    setStatus({ tone: 'success', text: `Order ${updated.id} completed successfully.` });
+    setStatus(
+      isDesktopApp() && !isOnline
+        ? { tone: 'info', text: `Order ${updated.id} marked completed offline - will sync (and settle any other outstanding dues) once back online.` }
+        : { tone: 'success', text: `Order ${updated.id} completed successfully.` },
+    );
   }
 
   async function sendCompletedReceiptOnWhatsApp(order: SavedOrder) {
+    // WhatsApp is online-only by design (same as order placement in
+    // POSPage.tsx) - skip both the local PDF creation and the send
+    // outright rather than let it fail after a timeout.
+    if (isDesktopApp() && !isOnline) return;
     if (!hasCustomerPhone(order)) return;
 
     const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
@@ -451,10 +455,17 @@ export default function SalesPage() {
     const updated = await saveUpdate({ action: 'addItems', items });
     if (!updated) return;
     setShowAddItems(false);
-    setStatus({ tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}.` });
+    setStatus(
+      isDesktopApp() && !isOnline
+        ? { tone: 'info', text: `Added ${items.length} item(s) to ${updated.id} offline - will sync once back online.` }
+        : { tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}.` },
+    );
   }
 
   async function handleSendWhatsAppReciept(order: SavedOrder) {
+    if (isDesktopApp() && !isOnline) {
+      return setStatus({ tone: 'error', text: 'WhatsApp needs an internet connection - try again once back online.' });
+    }
     if (!order.customer.phone || order.customer.phone === '03000000000') {
       return setStatus({ tone: 'error', text: 'No valid phone number for this customer.' });
     }
@@ -652,7 +663,15 @@ export default function SalesPage() {
                   <div className="grid gap-2">
                     <button type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setShowPayment(true); }} className="rounded-[24px] bg-[#E2F33C] px-5 py-4 text-lg font-black text-black">Complete Order</button>
                     {hasPermission('sales.delete') ? (
-                      <button type="button" onClick={() => setShowCancel(true)} className="rounded-[24px] bg-rose-600 px-5 py-4 text-sm font-black text-white"><Lock size={16} className="mr-2 inline" />Cancel Order</button>
+                      <button
+                        type="button"
+                        onClick={() => setShowCancel(true)}
+                        disabled={isDesktopApp() && !isOnline}
+                        title={isDesktopApp() && !isOnline ? "Cancelling requires the shop's Cancel Order Key to be checked online - try again once back online." : undefined}
+                        className="rounded-[24px] bg-rose-600 px-5 py-4 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Lock size={16} className="mr-2 inline" />Cancel Order
+                      </button>
                     ) : null}
                   </div>
                 ) : selectedOrder.status === 'cancelled' ? (
