@@ -10,7 +10,7 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -98,7 +98,11 @@ export default function POSPage() {
     if (!reachable) {
       setCategories(['All']);
       setProducts([]);
-      setStatusMessage({ tone: 'error', text: "Offline, and the Local Hub isn't reachable either - restart the app to enable offline mode." });
+      const diagnostics = await getLocalHubStartDiagnostics();
+      const reason = diagnostics && !diagnostics.started
+        ? ` (${diagnostics.error || 'failed to start'})`
+        : '';
+      setStatusMessage({ tone: 'error', text: `Offline, and the Local Hub isn't reachable either${reason} - restart the app to enable offline mode.` });
       return;
     }
     const snapshot = await getReferenceData();

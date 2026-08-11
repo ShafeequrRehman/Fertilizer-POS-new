@@ -161,6 +161,12 @@ if (!gotTheLock) {
   let mainWindow = null;
   let backendStarted = false;
   let localHubStarted = false;
+  // Set whenever startLocalHubServer's try/catch below actually catches
+  // something (most commonly EADDRINUSE - a previous run's process still
+  // holding port 5057). Exposed to the renderer via get-local-hub-status
+  // so a genuinely failed start shows a real reason in the UI instead of
+  // a generic "not reachable" that looks identical to "hasn't started yet".
+  let localHubStartError = null;
 
   if (!fs.existsSync(runtimeDataDir)) {
     fs.mkdirSync(runtimeDataDir, { recursive: true });
@@ -331,9 +337,11 @@ if (!gotTheLock) {
       await startLocalHub();
 
       localHubStarted = true;
+      localHubStartError = null;
       logRuntime("Local Hub started successfully");
       return true;
     } catch (error) {
+      localHubStartError = error?.code ? `${error.code}: ${error.message}` : (error?.message || String(error));
       logRuntime("Failed to start Local Hub - offline mode will be unavailable this session", error);
       // Never fatal - the till should still work normally against the
       // cloud even if the Local Hub couldn't bind its port for some reason
@@ -432,6 +440,16 @@ if (!gotTheLock) {
       mainWindow.focus();
     }
   });
+
+  // Lets the renderer tell "Local Hub never started at all (with a real
+  // reason)" apart from "started fine but this particular /health request
+  // failed" - see src/lib/local-hub-api.ts's isLocalHubReachable, used to
+  // put an actionable message on POSPage/OfflineSyncPage instead of a
+  // generic "not reachable".
+  ipcMain.handle("get-local-hub-status", () => ({
+    started: localHubStarted,
+    error: localHubStartError,
+  }));
 
   // Printing Handlers
   ipcMain.handle("get-printers", async () => {

@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getIpcRenderer } from '@/lib/electron-bridge';
 
 // Talks to THIS till's own Local Hub (backend/localHub/server.js), always
 // on localhost since it's embedded in this same Electron app - never the
@@ -73,6 +74,22 @@ export async function isLocalHubReachable(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+// Only meaningful right after isLocalHubReachable() returns false - asks
+// Electron's main process (which actually owns the Local Hub's lifecycle,
+// see main.js's startLocalHubServer) whether it ever managed to start at
+// all, and why not. Lets the UI say "port 5057 is already in use" instead
+// of a generic "not reachable" that looks identical to "just hasn't
+// started yet" or "genuinely offline with no hub".
+export async function getLocalHubStartDiagnostics(): Promise<{ started: boolean; error: string | null } | null> {
+  const ipcRenderer = getIpcRenderer();
+  if (!ipcRenderer) return null;
+  try {
+    return (await ipcRenderer.invoke('get-local-hub-status')) as { started: boolean; error: string | null };
+  } catch {
+    return null;
   }
 }
 
