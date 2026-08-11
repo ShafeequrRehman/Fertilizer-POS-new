@@ -537,19 +537,17 @@ exports.checkPendingOrder = async (req, res) => {
   }
 };
 
-exports.updateOrder = async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const patch = req.body;
-
+// Shared by the online PATCH /orders/:id handler below and the offline
+// bulk replay path (exports.importOfflineOrderUpdates) - an edit queued
+// while a till was offline (see pos-web/src/lib/offline-sync.ts) gets
+// applied with EXACTLY this same logic once synced - the item/total
+// recalculation, the completeAndSettle dues cascade, all of it - instead
+// of a second copy of this logic that could quietly drift out of sync.
+// Throws an Error with a `.status` (and optional `.reason`) attached for
+// anything that should reject with a specific non-500 response (e.g.
+// attempting to cancel through here); callers should catch that and use
+// those fields instead of always falling back to a generic 500.
+async function applyOrderPatch(order, patch, req) {
     // Items changing (addItems/replaceItems) or the discount itself
     // changing both require the subtotal/tax/total/remainingAmount to be
     // recomputed from scratch, rather than trusting whatever the client
@@ -659,16 +657,22 @@ exports.updateOrder = async (req, res) => {
       if (typeof patch.note === "string") order.note = patch.note;
       order.version = Number(order.version || 0) + 1;
       await order.save();
-      return res.json({ ...order.toObject(), id: String(order._id) });
+      return order;
     }
 
     // "cancelled" is deliberately excluded here - cancelling an order is
     // only ever allowed through exports.cancelOrder below, which requires
     // the shop's Cancel Order Key. Without this check, this generic PATCH
     // would let anyone with a login cancel any order for free, which
-    // defeats the whole point of gating cancellation behind the key.
+    // defeats the whole point of gating cancellation behind the key. This
+    // is also why offline Cancel was never implemented - the key is never
+    // shipped to the till in the first place, so there's nothing for an
+    // offline path to check it against.
     if (patch.status === "cancelled") {
-      return res.status(400).json({ error: "Cancelling an order requires the shop's Cancel Order Key. Use the Cancel Order action instead.", reason: "cancel_requires_key" });
+      throw Object.assign(
+        new Error("Cancelling an order requires the shop's Cancel Order Key. Use the Cancel Order action instead."),
+        { status: 400, reason: "cancel_requires_key" }
+      );
     }
 
     ["note", "waiter", "table", "address", "status", "paymentMethod"].forEach((field) => {
@@ -686,7 +690,83 @@ exports.updateOrder = async (req, res) => {
     order.version = Number(order.version || 0) + 1;
 
     await order.save();
-    res.json({ ...order.toObject(), id: String(order._id) });
+    return order;
+}
+
+exports.updateOrder = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const updated = await applyOrderPatch(order, req.body, req);
+    res.json({ ...updated.toObject(), id: String(updated._id) });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message, reason: error.reason });
+    }
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// POST /api/orders/import-offline-updates
+// body: { updates: [{ localEditId, orderId, payload }] }
+// The edit-side counterpart to importOfflineOrders above - replays edits
+// a till queued while offline (see backend/localHub/localOrders.js's edit
+// queue + src/lib/offline-sync.ts) against already-synced cloud orders,
+// through the exact same applyOrderPatch the online PATCH handler uses
+// above, so a completeAndSettle made offline still gets the real dues
+// cascade, item totals, etc. - no separate, easier-to-drift copy of that
+// logic. Orders that were BOTH created and edited entirely offline never
+// reach here: they have no real _id yet to target, so the till instead
+// mutates its own not-yet-synced create record directly (see
+// localOrders.js's updateQueuedOrder) and this only ever sees their
+// already-final state, once, via importOfflineOrders.
+exports.importOfflineOrderUpdates = async (req, res) => {
+  try {
+    const shopScopeQuery = buildShopScope(req);
+    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
+
+    // Oldest-queued-first - if the same order was edited more than once
+    // offline before syncing (e.g. items added, then paid), replaying them
+    // out of order could apply a later edit's totals before an earlier
+    // one's item changes, silently producing the wrong final state.
+    const ordered = [...updates].sort((a, b) => {
+      const aTime = new Date(a?.offlineUpdatedAt || 0).getTime();
+      const bTime = new Date(b?.offlineUpdatedAt || 0).getTime();
+      return aTime - bTime;
+    });
+
+    const applied = [];
+    const skipped = [];
+    const failed = [];
+
+    for (const entry of ordered) {
+      const { localEditId, orderId, payload } = entry || {};
+      try {
+        if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+          skipped.push({ localEditId, reason: "invalid_order_id" });
+          continue;
+        }
+        const order = await Order.findOne({ _id: orderId, ...shopScopeQuery });
+        if (!order) {
+          skipped.push({ localEditId, orderId, reason: "order_not_found" });
+          continue;
+        }
+        await applyOrderPatch(order, payload || {}, req);
+        applied.push({ localEditId, orderId });
+      } catch (entryError) {
+        console.error("Failed to import one offline order edit:", entryError);
+        failed.push({ localEditId, orderId, error: entryError.message });
+      }
+    }
+
+    res.json({ applied, skipped, failed });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

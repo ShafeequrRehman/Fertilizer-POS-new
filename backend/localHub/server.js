@@ -159,14 +159,55 @@ app.post("/orders/:id/fail", requirePairingKey, (req, res) => {
   res.json({ ok: changed });
 });
 
+// Editing an order while offline - see localOrders.js's "Editing an order
+// while offline" section for the full split between these two cases.
+// Called by SalesPage.tsx's saveUpdate() when isDesktopApp() && !isOnline.
+
+// Case 1: the order being edited is itself still only local (its frontend
+// id looks like "local-<uuid>" - see SalesPage.tsx's localOrderToSavedOrder).
+// :localId here is that uuid with the "local-" prefix already stripped by
+// the caller.
+app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
+  const updated = localOrders.updateQueuedOrder(req.params.localId, req.body?.payload || {});
+  if (!updated) {
+    return res.status(404).json({ message: "No such queued order (it may have already synced)." });
+  }
+  res.json(updated);
+});
+
+// Case 2: the order already has a real cloud _id - queue the edit for the
+// sync engine to replay against the real document.
+app.post("/orders/:orderId/edits", requirePairingKey, (req, res) => {
+  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null);
+  res.status(201).json(record);
+});
+
+app.get("/orders/edits/pending", requirePairingKey, (req, res) => {
+  res.json(localOrders.listPendingEdits());
+});
+
+app.post("/orders/edits/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localOrders.markEditsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/orders/edits/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localOrders.markEditFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
 app.get("/sync/status", requirePairingKey, (req, res) => {
   const all = localOrders.listAll();
   const pending = all.filter((order) => order.status === "pending");
   const failed = all.filter((order) => order.status === "failed");
+  const pendingEdits = localOrders.listPendingEdits();
   res.json({
     pendingCount: pending.length,
     failedCount: failed.length,
     totalQueued: all.length,
+    pendingEditCount: pendingEdits.filter((edit) => edit.status === "pending").length,
+    failedEditCount: pendingEdits.filter((edit) => edit.status === "failed").length,
   });
 });
 
