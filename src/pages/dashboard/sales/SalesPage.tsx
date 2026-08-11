@@ -2,12 +2,42 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, PackagePlus, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, claimReceiptPrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
-import { Discount, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { Discount, OrderPayload, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
-import { getBusinessWindow, filterOrdersInBusinessWindow } from '@/lib/shop-session';
+import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { getPendingLocalOrders, getReferenceData, type LocalOrderRecord } from '@/lib/local-hub-api';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
+
+// Turns a locally-queued (not-yet-synced) order into the same shape the
+// rest of this page already knows how to render - lets orders taken while
+// offline show up here immediately, instead of the cashier having no way
+// to confirm they were actually recorded until the next sync. See
+// backend/localHub/localOrders.js for what actually produces these.
+function localOrderToSavedOrder(record: LocalOrderRecord): SavedOrder {
+  const payload = (record.payload || {}) as Partial<OrderPayload>;
+  return {
+    ...payload,
+    id: `local-${record.id}`,
+    dailyOrderNumber: payload.dailyOrderNumber ?? record.localOrderNumber,
+    items: payload.items ?? [],
+    total: payload.total ?? 0,
+    subtotal: payload.subtotal ?? payload.total ?? 0,
+    tax: payload.tax ?? 0,
+    orderType: payload.orderType ?? 'DineIn',
+    customer: payload.customer ?? { name: '', phone: '', address: '' },
+    address: payload.address ?? '',
+    note: payload.note ?? '',
+    waiter: payload.waiter ?? '',
+    table: payload.table ?? '',
+    status: payload.status ?? 'pending',
+    paymentMethod: payload.paymentMethod ?? 'Cash',
+    createdAt: payload.createdAt ?? record.queuedAt,
+  } as SavedOrder;
+}
 
 const filters = ['All', 'Dine In', 'Take Away', 'Delivery', 'Fariha', 'Ahsan Raza', 'Rehman', 'Rehan'];
 
@@ -58,6 +88,57 @@ export default function SalesPage() {
   // Record/Ledger/Dues.
   const [visibleOrderCount, setVisibleOrderCount] = useState(10);
 
+  const { isOnline } = useNetworkStatus();
+  // The shared, cached shop-open state (see shop-session.tsx) - used as a
+  // fallback below when this page's own cloud-only shopSession fetch can't
+  // be reached, so this page never wrongly contradicts the topbar's own
+  // "Open since ..." badge (which reads from the same cache).
+  const { session: cachedShopSession } = useShopSession();
+
+  // Cloud order history can't be reached offline - shows whatever's been
+  // queued on this till instead (see backend/localHub/localOrders.js),
+  // which is the only real proof, while offline, that orders taken here
+  // are actually being recorded. Falls back to the shared cached shop
+  // session too, instead of the misleading "No shift recorded yet" that
+  // shopSession being null would otherwise produce.
+  async function loadOffline() {
+    if (cachedShopSession) setShopSession(cachedShopSession);
+    try {
+      const pending = await getPendingLocalOrders();
+      const offlineOrders = pending.map(localOrderToSavedOrder);
+      setOrders((current) => {
+        const existingIds = new Set(current.map((order) => order.id));
+        const merged = [...current];
+        for (const order of offlineOrders) {
+          if (!existingIds.has(order.id)) merged.push(order);
+        }
+        return merged;
+      });
+      setSelectedOrder((current) => current ?? offlineOrders[0] ?? null);
+      setStatus(
+        offlineOrders.length > 0
+          ? { tone: 'info', text: `Offline - showing ${offlineOrders.length} order${offlineOrders.length === 1 ? '' : 's'} queued on this till (plus anything loaded before going offline). They'll sync once back online.` }
+          : { tone: 'info', text: 'Offline - no orders queued on this till yet.' },
+      );
+      try {
+        const snapshot = await getReferenceData();
+        if (snapshot.products?.length) setProducts(snapshot.products as Product[]);
+      } catch {
+        // Best-effort - only used by the Add Items modal, never blocks the order list above.
+      }
+    } catch {
+      setStatus({ tone: 'error', text: "Offline, and the Local Hub isn't reachable either - restart the app to enable offline mode." });
+    }
+  }
+
+  async function loadAny() {
+    if (isDesktopApp() && !isOnline) {
+      await loadOffline();
+    } else {
+      await refresh();
+    }
+  }
+
   useEffect(() => {
     async function load() {
       setLoading(true);
@@ -66,13 +147,22 @@ export default function SalesPage() {
         setSettings(storeSettings);
 
         // We use refresh to populate orders and set state seamlessly
-        await refresh();
-        const productData = await fetchProducts();
-        if (productData) {
-          setProducts(productData.products);
+        await loadAny();
+        if (!isDesktopApp() || isOnline) {
+          const productData = await fetchProducts();
+          if (productData) {
+            setProducts(productData.products);
+          }
         }
       } catch (error) {
-        setStatus({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load sales data.' });
+        if (isDesktopApp() && !isOnline) {
+          // A stale isOnline moment (see network-status.ts) let the cloud
+          // branch above run and fail - fall back the same way loadAny's
+          // own offline branch would, rather than a raw error banner.
+          await loadOffline();
+        } else {
+          setStatus({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load sales data.' });
+        }
       } finally {
         setLoading(false);
       }
@@ -82,10 +172,10 @@ export default function SalesPage() {
     // Shop status can change (someone closes the shop) while this page is
     // sitting open, so the shift window is kept in sync the same way
     // RecordPage.tsx and the Dashboard do.
-    const intervalId = setInterval(() => void refresh(), 45000);
+    const intervalId = setInterval(() => void loadAny(), 45000);
     return () => clearInterval(intervalId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isOnline]);
 
   // A customer can have more than one order open at once now, so "Previous
   // Dues" here means the customer's TRUE outstanding balance - every other
@@ -427,7 +517,7 @@ export default function SalesPage() {
                     ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - not split by calendar date.`
                     : 'No shift recorded yet. Open the shop to start taking orders.'}
                 </p>
-                <button type="button" onClick={() => void refresh()} className="shrink-0 rounded-2xl bg-black px-3 py-2 text-xs font-black text-white"><RefreshCcw size={13} className="mr-1.5 inline" />Refresh</button>
+                <button type="button" onClick={() => void loadAny()} className="shrink-0 rounded-2xl bg-black px-3 py-2 text-xs font-black text-white"><RefreshCcw size={13} className="mr-1.5 inline" />Refresh</button>
               </div>
             </div>
             <div className="mt-2.5 flex flex-wrap gap-1.5">
