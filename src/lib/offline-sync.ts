@@ -245,5 +245,25 @@ export function useOfflineSync() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sync the moment connectivity comes back, instead of waiting for the
+  // next scheduled tick (up to 5 minutes away). This matters for more than
+  // speed: until a backlog of offline orders syncs, the cloud's own ticket
+  // counter hasn't advanced past wherever it was before this till went
+  // offline - POSPage.tsx already refuses to hand out a cloud number to a
+  // brand new order while any backlog is still pending (see its
+  // hasLocalBacklog check), specifically to avoid a repeated/colliding
+  // order number - but shrinking this window still means real cloud
+  // numbers come back for new orders sooner rather than staying queued
+  // locally for however long is left on the 5-minute clock.
+  const wasOnline = useRef(isOnline);
+  useEffect(() => {
+    if (!isDesktopApp()) return;
+    if (isOnline && !wasOnline.current) {
+      void syncNow();
+    }
+    wasOnline.current = isOnline;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline]);
+
   return { status, lastSyncAt, lastResult, isSyncing, syncNow, refreshStatus };
 }

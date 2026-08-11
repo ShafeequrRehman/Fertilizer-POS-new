@@ -10,7 +10,7 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -516,8 +516,34 @@ export default function POSPage() {
         } as SavedOrder;
       }
 
+      // If this till already has offline orders queued and not yet synced,
+      // a brand new order MUST also queue locally - never go straight to
+      // the cloud - even if we're clearly online right now. Otherwise the
+      // cloud's own ticket counter (still sitting wherever it was before
+      // this till went offline, since the backlog hasn't synced yet) would
+      // hand out a number that collides with one already given to a
+      // customer offline (e.g. 20 orders queued offline as #1-20, then a
+      // new "online" order also getting #1 because the cloud counter never
+      // advanced past 0). Queuing this one locally too keeps every order
+      // in ONE unbroken sequence - it becomes #21, and gets its real cloud
+      // number in the correct order once the whole backlog syncs together
+      // (see orderController.importOfflineOrders' oldest-first ordering).
+      let hasLocalBacklog = false;
+      if (isDesktopApp() && !isOfflineOrder) {
+        try {
+          const status = await getSyncStatus();
+          hasLocalBacklog = status.pendingCount > 0;
+        } catch {
+          // Local Hub unreachable is its own problem, handled below by the
+          // normal cloud-vs-local race - not a reason to block here.
+        }
+      }
+
       if (isOfflineOrder) {
         savedOrder = await queueLocally();
+      } else if (isDesktopApp() && hasLocalBacklog) {
+        savedOrder = await queueLocally();
+        isOfflineOrder = true;
       } else if (isDesktopApp()) {
         // isOnline only re-checks every 5s (see network-status.ts) and can
         // still read stale-true for a moment right after this till
