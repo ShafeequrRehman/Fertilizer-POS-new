@@ -28,8 +28,10 @@ function writeOrders(orders) {
   store.save(ORDERS_KEY, orders);
 }
 
+const DEFAULT_COUNTER = { sessionId: null, value: 0, resetAt: null };
+
 function nextLocalOrderNumber() {
-  const counter = store.load(COUNTER_KEY, { sessionId: null, value: 0 });
+  const counter = store.load(COUNTER_KEY, DEFAULT_COUNTER);
   // Defensive floor: never hand out a number at or below one already used
   // by an order STILL SITTING UNSYNCED in the queue right now. counter.json
   // and orders.json are two separate files updated in two separate writes
@@ -39,19 +41,31 @@ function nextLocalOrderNumber() {
   // of quietly reusing a number that's already on a real order from the
   // SAME still-open shift.
   //
-  // Deliberately excludes already-synced orders - orders.json keeps every
-  // offline order ever placed, forever, across every past shift, purely as
-  // a local audit trail (see queueOrder/markSynced below - nothing ever
-  // deletes from it). Counting THOSE toward this floor would permanently
-  // block order numbering from ever resetting to 1 on a new shop-open (see
-  // resetCounter below) - a closed shift's numbers are already
-  // permanently recorded in the cloud and have nothing left to protect
-  // against colliding with.
+  // Two things are deliberately excluded from this floor:
+  //   - Already-synced orders - orders.json keeps every offline order ever
+  //     placed, forever, across every past shift, purely as a local audit
+  //     trail (see queueOrder/markSynced below - nothing ever deletes from
+  //     it). A closed shift's already-synced numbers are permanently
+  //     recorded in the cloud and have nothing left to protect against
+  //     colliding with.
+  //   - Anything queued BEFORE this shift started (queuedAt earlier than
+  //     counter.resetAt, set by resetCounter below whenever Open Shop
+  //     happens). Without this, an old order that got stuck as "pending"
+  //     and never actually synced (an abandoned/orphaned record from a
+  //     previous shift - even from something as mundane as earlier
+  //     testing) would sit in orders.json forever and permanently drag
+  //     every future shift's numbering up to whatever high number it
+  //     happened to reach, defeating the reset-to-1 this file exists to
+  //     guarantee. A stuck order like that still safely finds its way to
+  //     the cloud eventually via importOfflineOrders' own collision check
+  //     (backend/controllers/orderController.js) - it just no longer gets
+  //     to hold this till's CURRENT numbering hostage while it waits.
   const highestQueued = readOrders()
     .filter((order) => order.status !== "synced")
+    .filter((order) => !counter.resetAt || new Date(order.queuedAt) >= new Date(counter.resetAt))
     .reduce((max, order) => Math.max(max, order.localOrderNumber || 0), 0);
   const next = Math.max(counter.value, highestQueued) + 1;
-  store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: next });
+  store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: next, resetAt: counter.resetAt });
   return next;
 }
 
@@ -63,11 +77,12 @@ function nextLocalOrderNumber() {
 // new session" from - nothing else would otherwise reset this file until
 // the till reconnects, so the first few offline orders of a brand new
 // shift would wrongly continue the previous shift's numbers instead of
-// starting at 1. Safe to call any time - resets the floor a fresh shift
-// starts counting from, nothing else.
+// starting at 1. Safe to call any time - resets both the counter itself
+// AND (via resetAt) the floor above, so old leftover queue entries from
+// before this moment can never drag the new shift's numbering back up.
 function resetCounter() {
-  const counter = store.load(COUNTER_KEY, { sessionId: null, value: 0 });
-  store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: 0 });
+  const counter = store.load(COUNTER_KEY, DEFAULT_COUNTER);
+  store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: 0, resetAt: new Date().toISOString() });
 }
 
 // --- Keeping the local counter and the cloud's ShopSession.orderCounter
@@ -106,8 +121,13 @@ function resetCounter() {
 // the cloud's value here directly can never cause a collision or lose
 // progress, only ever correct a wrong one.
 function syncOrderCounter(sessionId, cloudCounter) {
+  // Preserves resetAt (see resetCounter/nextLocalOrderNumber above) -
+  // this function only ever moves the raw counter VALUE, it must never be
+  // the thing that decides whether old queue entries still count toward
+  // the floor.
+  const counter = store.load(COUNTER_KEY, DEFAULT_COUNTER);
   const cloudValue = Number(cloudCounter) || 0;
-  store.save(COUNTER_KEY, { sessionId: sessionId || null, value: cloudValue });
+  store.save(COUNTER_KEY, { sessionId: sessionId || null, value: cloudValue, resetAt: counter.resetAt });
   return { sessionId: sessionId || null, value: cloudValue };
 }
 
@@ -327,6 +347,13 @@ module.exports = {
   markFailed,
   resetCounter,
   syncOrderCounter,
+  // Reserves the next ticket number WITHOUT queuing an order record - used
+  // when the till is placing an order straight online (see server.js's
+  // POST /orders/reserve-number and POSPage.tsx). This is what makes order
+  // numbering the same single, connectivity-independent sequence whether
+  // the order ends up going through the cloud immediately or the local
+  // queue - both paths pull from this exact same counter.
+  reserveNextNumber: nextLocalOrderNumber,
   STALE_AFTER_MS,
   updateQueuedOrder,
   queueOrderEdit,

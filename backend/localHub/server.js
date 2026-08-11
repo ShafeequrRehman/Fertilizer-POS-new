@@ -156,6 +156,15 @@ app.get("/orders/pending", requirePairingKey, (req, res) => {
   res.json(localOrders.listPending());
 });
 
+// Reserves the next ticket number WITHOUT queuing an order record - called
+// by POSPage.tsx right before placing an order straight online, so this
+// till's order numbering is always decided here first, never by the
+// cloud's own counter, whether the order ends up going through the cloud
+// immediately or the offline queue. See localOrders.js's reserveNextNumber.
+app.post("/orders/reserve-number", requirePairingKey, (req, res) => {
+  res.json({ number: localOrders.reserveNextNumber() });
+});
+
 app.get("/orders/all", requirePairingKey, (req, res) => {
   res.json(localOrders.listAll());
 });

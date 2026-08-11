@@ -10,7 +10,7 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -545,6 +545,22 @@ export default function POSPage() {
         savedOrder = await queueLocally();
         isOfflineOrder = true;
       } else if (isDesktopApp()) {
+        // Order numbering must never depend on whether this particular
+        // order happens to go through the cloud or not - see
+        // orderController.js's createOrder for the backend half of this.
+        // Reserve the ticket number from THIS till's own Local Hub FIRST,
+        // exactly like an offline order would get one, and send it along
+        // so the cloud honors it instead of handing out its own. If the
+        // Local Hub can't be reached for some reason, orderPayload simply
+        // goes without one and the cloud falls back to its own counter,
+        // same as before this existed.
+        try {
+          orderPayload.requestedDailyOrderNumber = await reserveLocalOrderNumber();
+        } catch {
+          // Local Hub unreachable - fall through without a reserved
+          // number; not a reason to block the order.
+        }
+
         // isOnline only re-checks every 5s (see network-status.ts) and can
         // still read stale-true for a moment right after this till
         // actually loses its connection - racing a short timeout here
@@ -573,12 +589,11 @@ export default function POSPage() {
         savedOrder = await createOrder(orderPayload) as SavedOrder;
       }
 
-      // This order just got a real cloud dailyOrderNumber - hand it to the
-      // Local Hub right away so its offline counter is caught up to THIS
-      // moment, not just whenever shop-session.tsx next happens to refresh.
-      // Closes the collision window as tightly as possible: if the very
-      // next order is placed offline a second later, it already knows the
-      // true current count. See local-hub-api.ts's syncOrderCounter.
+      // Best-effort reconciliation, not the primary numbering mechanism any
+      // more (see the reservation above) - just keeps the Local Hub's
+      // counter honest in case it was ever unreachable a moment ago (or on
+      // pos-mobile's own direct-online path, once that's wired up). See
+      // local-hub-api.ts's syncOrderCounter.
       if (isDesktopApp() && !isOfflineOrder && shopSession?.id && typeof savedOrder.dailyOrderNumber === 'number') {
         void syncOrderCounter(shopSession.id, savedOrder.dailyOrderNumber);
       }

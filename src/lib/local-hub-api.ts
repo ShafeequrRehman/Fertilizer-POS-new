@@ -177,6 +177,19 @@ export async function getSyncStatus(): Promise<SyncStatus> {
   return response.data;
 }
 
+// Reserves the next ticket number from THIS till's Local Hub without
+// queuing an order record - called right before placing an order straight
+// online (see POSPage.tsx), so the number is always decided locally first,
+// online or offline. Throws if the Local Hub can't be reached; the caller
+// falls back to letting the cloud assign its own number in that case
+// (see orderController.js's createOrder - requestedDailyOrderNumber is
+// optional).
+export async function reserveLocalOrderNumber(): Promise<number> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<{ number: number }>('/orders/reserve-number');
+  return response.data.number;
+}
+
 // --- Editing an order while offline -------------------------------------
 // See backend/localHub/localOrders.js's "Editing an order while offline"
 // section for the full split between these two cases (still-local order

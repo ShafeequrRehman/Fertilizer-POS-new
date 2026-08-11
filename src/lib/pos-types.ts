@@ -145,6 +145,12 @@ export interface OrderPayload {
   orderId?: string;
   clientSyncId?: string;
   dailyOrderNumber?: number;
+  // Set by POSPage.tsx when placing an order straight online with a Local
+  // Hub available - see local-hub-api.ts's reserveLocalOrderNumber and
+  // orderController.js's createOrder. Never set for a plain browser tab
+  // (no Local Hub to reserve from) or pos-mobile's own direct online
+  // orders - those still get a fresh cloud-assigned number as before.
+  requestedDailyOrderNumber?: number;
   items: Array<{
     name: string;
     price: number;

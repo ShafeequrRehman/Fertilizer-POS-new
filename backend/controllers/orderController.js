@@ -171,32 +171,70 @@ exports.createOrder = async (req, res) => {
     // The shop must be explicitly "opened" (see shopSessionController) for
     // new orders to be rung up at all - enforced here, not just hidden in
     // the UI, so a stale POS tab or a direct API call can't slip an order
-    // in while the shop is marked closed. This same call also atomically
-    // hands out the next order number for the shift (see orderCounter on
-    // the ShopSession model) - findOneAndUpdate + $inc is a single atomic
-    // operation in MongoDB, so two orders placed at the exact same instant
-    // can never read/get the same number the way a separate
-    // "countDocuments() then +1" step could (that was producing duplicate
-    // "#001" tickets under real-world concurrent submissions). A dropped
-    // request after this point burns a number (a small gap in the
-    // sequence), which is a fine trade-off for guaranteeing no duplicates.
-    // Defense-in-depth: ShopSession now has a partial unique index that
-    // makes more than one "open" session per shop impossible going forward
-    // (see models/ShopSession.js), but this `sort` guarantees that if any
-    // legacy duplicate ever slips through some other way, the oldest (the
-    // one actually carrying the real running count) always wins rather
-    // than a non-deterministic match landing on a fresher duplicate whose
-    // orderCounter defaults to 0.
-    const openSession = await ShopSession.findOneAndUpdate(
-      { ...buildShopScope(req), status: "open" },
-      { $inc: { orderCounter: 1 } },
-      { new: true, sort: { openedAt: 1 } }
-    );
-    if (!openSession) {
-      return res.status(409).json({ error: "The shop is closed. Open the shop before taking new orders.", reason: "shop_closed" });
+    // in while the shop is marked closed.
+    const payload = req.body;
+
+    // The desktop till's own Local Hub is the one true source of order
+    // numbering for that till, online or offline (see
+    // backend/localHub/localOrders.js) - POSPage.tsx reserves a number from
+    // it BEFORE ever calling here, even when placing an order straight
+    // online, specifically so a shop's numbering never depends on whether
+    // this particular request happened to go through while connected. When
+    // present, requestedDailyOrderNumber is honored via $max (mirroring
+    // importOfflineOrders' same reasoning) instead of the old blind $inc -
+    // this can never burn an unused number the way $inc would, and the
+    // collision check below means it can never step on a number some
+    // other order in this session already has. Only a request with no
+    // Local Hub behind it at all (a plain browser tab, or pos-mobile
+    // placing its own order directly) falls back to the original
+    // findOneAndUpdate + $inc allocation - still a single atomic Mongo
+    // operation, so two such requests at the exact same instant still can
+    // never read/get the same number the way a separate
+    // "countDocuments() then +1" step could.
+    const requestedNumber = Number(payload.requestedDailyOrderNumber) || 0;
+    let openSession;
+    let dailyOrderNumber;
+
+    if (requestedNumber > 0) {
+      const openSessionBefore = await ShopSession.findOne(
+        { ...buildShopScope(req), status: "open" }
+      ).sort({ openedAt: 1 });
+      if (!openSessionBefore) {
+        return res.status(409).json({ error: "The shop is closed. Open the shop before taking new orders.", reason: "shop_closed" });
+      }
+      const collision = await Order.findOne({
+        ...buildShopScope(req),
+        dailyOrderNumber: requestedNumber,
+        createdAt: { $gte: openSessionBefore.openedAt },
+      });
+      if (!collision) {
+        openSession = await ShopSession.findOneAndUpdate(
+          { _id: openSessionBefore._id },
+          { $max: { orderCounter: requestedNumber } },
+          { new: true }
+        );
+        dailyOrderNumber = requestedNumber;
+      }
     }
 
-    const payload = req.body;
+    if (dailyOrderNumber === undefined) {
+      // Defense-in-depth: ShopSession now has a partial unique index that
+      // makes more than one "open" session per shop impossible going
+      // forward (see models/ShopSession.js), but this `sort` guarantees
+      // that if any legacy duplicate ever slips through some other way,
+      // the oldest (the one actually carrying the real running count)
+      // always wins rather than a non-deterministic match landing on a
+      // fresher duplicate whose orderCounter defaults to 0.
+      openSession = await ShopSession.findOneAndUpdate(
+        { ...buildShopScope(req), status: "open" },
+        { $inc: { orderCounter: 1 } },
+        { new: true, sort: { openedAt: 1 } }
+      );
+      if (!openSession) {
+        return res.status(409).json({ error: "The shop is closed. Open the shop before taking new orders.", reason: "shop_closed" });
+      }
+      dailyOrderNumber = openSession.orderCounter;
+    }
 
     // Idempotency guard: the desktop till races this call against a short
     // timeout and falls back to queuing the order in its offline Local Hub
@@ -217,7 +255,6 @@ exports.createOrder = async (req, res) => {
     }
 
     const totals = recalculateTotals(payload.items || [], payload.discount);
-    const dailyOrderNumber = openSession.orderCounter;
 
     const order = await Order.create({
       ...payload,
