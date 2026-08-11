@@ -337,25 +337,74 @@ exports.importOfflineOrders = async (req, res) => {
           }
         }
 
-        // Same atomic-counter allocation createOrder uses - see its
-        // comment above for why this has to be a single $inc, not a
-        // separate read-then-write. The shop must still be "open" right
-        // now for these to import; if it's been closed since the offline
-        // orders were queued, importing stops and reports what's left as
-        // failed so a human can decide (re-open the shop, or handle these
-        // manually) rather than silently dropping them.
-        const openSession = await ShopSession.findOneAndUpdate(
-          { ...buildShopScope(req), status: "open" },
-          { $inc: { orderCounter: 1 } },
-          { new: true, sort: { openedAt: 1 } }
-        );
-        if (!openSession) {
+        // The shop must still be "open" right now for these to import; if
+        // it's been closed since the offline orders were queued, importing
+        // stops and reports what's left as failed so a human can decide
+        // (re-open the shop, or handle these manually) rather than
+        // silently dropping them. Read-only lookup first (not the atomic
+        // update itself) because the number-preservation logic just below
+        // needs openedAt before deciding how to allocate dailyOrderNumber.
+        const openSessionBefore = await ShopSession.findOne(
+          { ...buildShopScope(req), status: "open" }
+        ).sort({ openedAt: 1 });
+        if (!openSessionBefore) {
           failed.push({ localOrderId: entry.localOrderId, error: "Shop is closed - open the shop to import queued offline orders." });
           continue;
         }
 
+        // Whoever placed this order offline already saw (and, for a
+        // kitchen ticket, already printed and handed to staff) a real
+        // ticket number the instant it was queued - see
+        // backend/localHub/localOrders.js's nextLocalOrderNumber. That
+        // number must become this order's permanent dailyOrderNumber
+        // whenever it safely can, instead of the cloud silently handing
+        // out a DIFFERENT number here (e.g. a printed "Order #25" ticket
+        // that the system then shows as "Order #5" forever after sync -
+        // confusing at best, and actively wrong if that ticket already
+        // went to the kitchen or the customer). $max only ever moves the
+        // counter forward, never backward, so honoring it can never make
+        // a later order (online or another offline import in this same
+        // batch) collide with it.
+        //
+        // The one case this can't be trusted: the requested number is
+        // already used by a real order from THIS session (some other,
+        // unrelated bug, or a very old queued order predating this
+        // logic) - fall back to the old behavior (a fresh sequential
+        // number) rather than ever create two orders sharing one ticket
+        // number.
+        const requestedNumber = Number(entry.localOrderNumber) || 0;
+        let dailyOrderNumber;
+        let openSession;
+
+        if (requestedNumber > 0) {
+          const collision = await Order.findOne({
+            ...buildShopScope(req),
+            dailyOrderNumber: requestedNumber,
+            createdAt: { $gte: openSessionBefore.openedAt },
+          });
+          if (!collision) {
+            openSession = await ShopSession.findOneAndUpdate(
+              { _id: openSessionBefore._id },
+              { $max: { orderCounter: requestedNumber } },
+              { new: true }
+            );
+            dailyOrderNumber = requestedNumber;
+          }
+        }
+
+        if (dailyOrderNumber === undefined) {
+          // Same atomic-counter allocation createOrder uses - see its
+          // comment above for why this has to be a single $inc, not a
+          // separate read-then-write.
+          openSession = await ShopSession.findOneAndUpdate(
+            { _id: openSessionBefore._id },
+            { $inc: { orderCounter: 1 } },
+            { new: true }
+          );
+          dailyOrderNumber = openSession.orderCounter;
+        }
+
         const totals = recalculateTotals(payload.items || [], payload.discount);
-        const dailyOrderNumber = openSession.orderCounter;
 
         const order = await Order.create({
           ...payload,
