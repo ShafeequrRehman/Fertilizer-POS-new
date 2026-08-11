@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { fetchShopSessionStatus } from "@/lib/pos-api";
 import { ShopSession } from "@/lib/pos-types";
 import { isDesktopApp } from "@/lib/api";
+import { syncOrderCounter } from "@/lib/local-hub-api";
 
 // Shared "is the shop open" state for everything under the shop dashboard -
 // the Open/Close Shop button in DashboardShell's topbar and the POS screen
@@ -104,6 +105,15 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
           setIsCached(false);
           clearPendingLocalShopOpen();
           writeCache({ isOpen: true, session: result.session });
+          // Every time this till genuinely confirms the cloud's current
+          // session + counter, hand it to the Local Hub so its own offline
+          // counter stays one seamless sequence with the cloud's - see
+          // local-hub-api.ts's syncOrderCounter. Best-effort/fire-and-forget:
+          // this is a background reconciliation, never something a cashier
+          // waits on.
+          if (isDesktopApp() && result.session) {
+            void syncOrderCounter(result.session.id, result.session.orderCounter ?? 0);
+          }
         } else if (hasPendingLocalShopOpen()) {
           // Connectivity is back but the sync engine hasn't reconciled the
           // locally-opened shop with the cloud yet (it ticks every 5

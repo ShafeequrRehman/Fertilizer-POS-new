@@ -212,6 +212,18 @@ app.post("/orders/edits/:id/fail", requirePairingKey, (req, res) => {
   res.json({ ok: changed });
 });
 
+// Keeps this till's local order counter in step with the cloud's real
+// ShopSession.orderCounter - see localOrders.js's syncOrderCounter for the
+// full reasoning. Loopback-only: only the till itself, which just talked
+// to the cloud, should ever be the source of truth for what the cloud's
+// counter currently is. Called from shop-session.tsx's refresh() and
+// right after any successful online order create/import.
+app.post("/order-counter-sync", requireLoopback, (req, res) => {
+  const { sessionId, orderCounter } = req.body || {};
+  const result = localOrders.syncOrderCounter(sessionId || null, orderCounter);
+  res.json(result);
+});
+
 app.get("/sync/status", requirePairingKey, (req, res) => {
   const all = localOrders.listAll();
   const pending = all.filter((order) => order.status === "pending");

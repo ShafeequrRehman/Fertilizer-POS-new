@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getIpcRenderer } from '@/lib/electron-bridge';
+import { isDesktopApp } from '@/lib/api';
 
 // Talks to THIS till's own Local Hub (backend/localHub/server.js), always
 // on localhost since it's embedded in this same Electron app - never the
@@ -225,4 +226,24 @@ export async function ackOrderEdits(ids: string[]) {
 
 export async function markOrderEditFailed(id: string, error: string) {
   await hub.post(`/orders/edits/${id}/fail`, { error });
+}
+
+// --- Keeping the local order counter in step with the cloud's real
+// ShopSession.orderCounter, regardless of connectivity -------------------
+// See backend/localHub/localOrders.js's syncOrderCounter for the full
+// reasoning. Call this every time the till successfully learns the
+// cloud's current session id + orderCounter (shop-session.tsx's refresh(),
+// and right after any successful online order create/import) - it's what
+// makes order numbering present as ONE unbroken sequence per shift no
+// matter how many times connectivity drops and comes back mid-shift, while
+// still correctly starting a genuinely new shift back at 1.
+export async function syncOrderCounter(sessionId: string | null, orderCounter: number): Promise<void> {
+  if (!isDesktopApp()) return;
+  try {
+    if (!getCachedPairingKey()) await getPairingInfo();
+    await hub.post('/order-counter-sync', { sessionId, orderCounter });
+  } catch {
+    // Best-effort - if this particular push fails, the next successful one
+    // (there are several opportunities per online moment) will catch it up.
+  }
 }

@@ -88,6 +88,8 @@ export interface ShopSession {
   summary: ShopSessionSummary;
   /** Only present on the currently open session (GET /shop-session/current) - live running totals. */
   liveSummary?: ShopSessionSummary;
+  /** Real, authoritative order-number counter for this session (backend/models/ShopSession.js). Used to keep the Local Hub's own offline order counter in step - see local-hub-api.ts's syncOrderCounter. */
+  orderCounter?: number;
 }
 
 export interface ShopSessionStatus {

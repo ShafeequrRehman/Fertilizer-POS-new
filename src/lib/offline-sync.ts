@@ -11,9 +11,10 @@ import {
   isLocalHubReachable,
   pushOrdersCache,
   pushReferenceData,
+  syncOrderCounter,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
 // The offline sync engine: every SYNC_INTERVAL_MS, if this till is online,
@@ -146,6 +147,23 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
   // earlier in this same tick above) can still have edits queued against
   // it with nothing new needing to be created.
   const editsResult = await syncOrderEdits();
+
+  // Whatever this tick just imported (or found nothing to import), pull
+  // the cloud's now-current session + orderCounter and hand it to the
+  // Local Hub - this is what keeps the local counter caught up even when
+  // no order happened to be placed right at reconnect (e.g. a quiet till
+  // that just came back online) rather than relying only on
+  // shop-session.tsx's own refresh() calls or a just-placed order's own
+  // push. See local-hub-api.ts's syncOrderCounter.
+  try {
+    const status = await fetchShopSessionStatus();
+    if (status?.isOpen && status.session) {
+      await syncOrderCounter(status.session.id, status.session.orderCounter ?? 0);
+    }
+  } catch {
+    // Best-effort - not worth failing the whole sync tick over.
+  }
+
   return { ...result, editsApplied: editsResult.applied, editsFailed: editsResult.failed };
 }
 

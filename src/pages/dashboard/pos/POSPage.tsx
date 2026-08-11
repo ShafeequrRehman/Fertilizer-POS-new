@@ -10,7 +10,7 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter } from '@/lib/local-hub-api';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -43,7 +43,7 @@ type ProductGroup = {
 };
 
 export default function POSPage() {
-  const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
+  const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
   const { toast: shopToast } = useToast();
   const { isOnline } = useNetworkStatus();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
@@ -571,6 +571,16 @@ export default function POSPage() {
         }
       } else {
         savedOrder = await createOrder(orderPayload) as SavedOrder;
+      }
+
+      // This order just got a real cloud dailyOrderNumber - hand it to the
+      // Local Hub right away so its offline counter is caught up to THIS
+      // moment, not just whenever shop-session.tsx next happens to refresh.
+      // Closes the collision window as tightly as possible: if the very
+      // next order is placed offline a second later, it already knows the
+      // true current count. See local-hub-api.ts's syncOrderCounter.
+      if (isDesktopApp() && !isOfflineOrder && shopSession?.id && typeof savedOrder.dailyOrderNumber === 'number') {
+        void syncOrderCounter(shopSession.id, savedOrder.dailyOrderNumber);
       }
 
       setCart([]);
