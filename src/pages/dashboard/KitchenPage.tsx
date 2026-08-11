@@ -24,7 +24,13 @@ export default function KitchenPage() {
   // Polling for live orders every 10 seconds (in a real app this would be WebSockets)
   async function loadOrders() {
     try {
-      const data = await fetchOrders();
+      // Only ever displays currently-pending tickets - bounding the fetch
+      // to the last 2 days (generous margin for anything genuinely stuck
+      // pending) keeps this 10-second poll fast regardless of how much
+      // order history this shop has accumulated overall. See getOrders'
+      // `since` handling in orderController.js.
+      const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+      const data = await fetchOrders({ since });
       setOrders(data || []);
     } catch (e) {
       // Suppress polling errors

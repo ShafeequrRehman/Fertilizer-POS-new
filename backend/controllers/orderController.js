@@ -128,6 +128,20 @@ exports.getOrders = async (req, res) => {
       const start = new Date(`${req.query.date}T00:00:00.000Z`);
       const end = new Date(`${req.query.date}T23:59:59.999Z`);
       query.createdAt = { $gte: start, $lte: end };
+    } else if (req.query.since) {
+      // Bounds an otherwise-unbounded "give me this shop's orders" fetch -
+      // used by pages that only ever care about recent activity (today's
+      // shift, the kitchen's currently-pending tickets) so they don't pull
+      // a shop's entire lifetime order history over the wire on every poll
+      // (Dashboard/Sales every 45s, Kitchen every 10s). Without this, that
+      // query only gets slower as a shop accumulates history, eventually
+      // past the point of timing out client-side even on a perfectly fine
+      // connection - see pos-web/src/pages/dashboard/components/
+      // DashboardPageClient.tsx, SalesPage.tsx, KitchenPage.tsx.
+      const since = new Date(req.query.since);
+      if (!Number.isNaN(since.getTime())) {
+        query.createdAt = { $gte: since };
+      }
     }
 
     const orders = await Order.find(query).sort({ createdAt: -1 });

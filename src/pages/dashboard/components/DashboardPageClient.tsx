@@ -81,7 +81,14 @@ export default function DashboardPageClient() {
   useEffect(() => {
     async function loadOrders() {
       try {
-        const ordersData = await fetchOrders();
+        // This page only ever shows "today's" (current/last shift) numbers
+        // via the business-window filtering below - bounding the fetch to
+        // the last 14 days (a generous margin over any realistic gap
+        // between shifts) keeps this 45-second poll fast regardless of how
+        // much order history this shop has accumulated overall. See
+        // getOrders' `since` handling in orderController.js.
+        const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+        const ordersData = await fetchOrders({ since });
         if (ordersData) setOrders(ordersData);
       } catch (error) {
         console.error('Dashboard orders fetch error', error);

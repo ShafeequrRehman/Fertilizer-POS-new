@@ -227,7 +227,7 @@ export async function createOrder(payload: OrderPayload) {
   }
 }
 
-export async function fetchOrders(params?: { date?: string }) {
+export async function fetchOrders(params?: { date?: string; since?: string }) {
   try {
     const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params });
     return response.data.map(normalizeOrder);

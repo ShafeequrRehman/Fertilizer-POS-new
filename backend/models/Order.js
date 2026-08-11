@@ -96,4 +96,12 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// getOrders (see orderController.js) always filters by shopId and sorts
+// by createdAt descending - the single-field shopId index above narrows
+// to this shop's documents fine, but MongoDB still has to sort the result
+// in memory without a compound index covering both, which gets
+// noticeably slower as a shop's order history grows. This is what that
+// query actually uses on every Dashboard/Sales/Kitchen page load.
+orderSchema.index({ shopId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("Order", orderSchema);

@@ -215,7 +215,14 @@ export default function SalesPage() {
 
   async function refresh() {
     try {
-      const [data, history] = await Promise.all([fetchOrders(), fetchShopSessionHistory()]);
+      // This page only ever shows the current/last shift's orders (via the
+      // business-window filtering below) - bounding the fetch to the last
+      // 14 days (a generous margin over any realistic gap between shifts)
+      // keeps this 45-second poll fast regardless of how much order
+      // history this shop has accumulated overall. See getOrders' `since`
+      // handling in orderController.js.
+      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      const [data, history] = await Promise.all([fetchOrders({ since }), fetchShopSessionHistory()]);
       const latestSession = history && history.length > 0 ? history[0] : null;
       setShopSession(latestSession);
 
