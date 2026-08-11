@@ -132,10 +132,26 @@ export default function POSPage() {
       }
 
       try {
-        const [productResponse, waiterResponse] = await Promise.all([
-          fetchProducts(),
-          fetchWaiters(),
-        ]);
+        const cloudLoad = Promise.all([fetchProducts(), fetchWaiters()]);
+        // useNetworkStatus only re-checks every 5s (see network-status.ts),
+        // so isOnline can still read stale-true for a moment right after
+        // this till actually loses its connection - without a bound here,
+        // that moment would show a "Loading products..." spinner for the
+        // full 8s cloud-request timeout (see AXIOS_REQUEST_TIMEOUT_MS in
+        // lib/api.ts) before falling back to the offline cache. Racing a
+        // shorter timeout here keeps that worst case to ~4s instead, at
+        // the cost of occasionally falling back to a slightly-stale cache
+        // on a genuinely online but very slow connection - an acceptable
+        // trade given the till re-runs this effect (with fresh data) the
+        // moment isOnline itself catches up.
+        const [productResponse, waiterResponse] = isDesktopApp()
+          ? await Promise.race([
+              cloudLoad,
+              new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error('Cloud product load timed out')), 4000);
+              }),
+            ])
+          : await cloudLoad;
         setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
         setProducts(productResponse?.products ?? []);
         setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
