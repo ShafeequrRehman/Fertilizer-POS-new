@@ -66,32 +66,28 @@ function resetCounter() {
 // every time it successfully talks to the cloud about the shop's session
 // (see shop-session.tsx's refresh(), and right after any successful
 // online order create/import - see offline-sync.ts / POSPage.tsx). This
-// function is the one place that reconciles it:
-//   - Same sessionId as last time (an already-open shift, connectivity
-//     just flickered) -> advance the local counter up to at least the
-//     cloud's true count. The next offline order continues the REAL
-//     sequence instead of whatever this till's file happened to say.
-//   - Different sessionId (a genuinely NEW shop-open - new shift/day) ->
-//     reset to the cloud's counter for that brand new session (0 for a
-//     freshly opened shift), so a new shift always starts clean at 1,
-//     exactly like the cloud does, and never carries over the previous
-//     shift's numbers into this one.
-//   - No sessionId at all yet (very first sync of this till's lifetime,
-//     or the shop session hasn't loaded) -> just advance, same as the
-//     matching-session case - there's nothing to compare against yet.
+// function is the one place that reconciles it, and it ALWAYS just
+// adopts the cloud's own value directly - it never tries to be "at least
+// as high as" whatever this file happened to already contain.
+//
+// That's deliberate, not an oversight: this call only ever happens right
+// after a genuinely successful, live call to the cloud, so cloudCounter
+// is always the true, current count at that exact instant - there's
+// nothing more authoritative to compare it against. Blindly trusting a
+// locally-stored value as a floor is exactly what caused a real bug: a
+// stale counter.json left over from earlier testing (or an old
+// pre-this-fix file with no sessionId at all) could sit at some high
+// number with nothing behind it, and get treated as "this till is ahead
+// of the cloud" - jumping a brand new order straight to #24 instead of
+// #3. Any orders genuinely placed offline and not yet synced are already
+// protected separately, by nextLocalOrderNumber's own highestQueued check
+// against the REAL queued order records (not this file) - so adopting
+// the cloud's value here directly can never cause a collision or lose
+// progress, only ever correct a wrong one.
 function syncOrderCounter(sessionId, cloudCounter) {
-  const counter = store.load(COUNTER_KEY, { sessionId: null, value: 0 });
   const cloudValue = Number(cloudCounter) || 0;
-
-  if (sessionId && counter.sessionId && counter.sessionId !== sessionId) {
-    store.save(COUNTER_KEY, { sessionId, value: cloudValue });
-    return { reset: true, sessionId, value: cloudValue };
-  }
-
-  const value = Math.max(counter.value, cloudValue);
-  const nextSessionId = sessionId || counter.sessionId || null;
-  store.save(COUNTER_KEY, { sessionId: nextSessionId, value });
-  return { reset: false, sessionId: nextSessionId, value };
+  store.save(COUNTER_KEY, { sessionId: sessionId || null, value: cloudValue });
+  return { sessionId: sessionId || null, value: cloudValue };
 }
 
 function queueOrder(payload, actor) {
