@@ -247,3 +247,19 @@ export async function syncOrderCounter(sessionId: string | null, orderCounter: n
     // (there are several opportunities per online moment) will catch it up.
   }
 }
+
+// Called the instant Open Shop is tapped while offline - see
+// shop-session.tsx's openLocally(). There's no cloud session to learn a
+// fresh orderCounter from yet at that moment, so this is what makes a
+// brand new shift's numbering start at 1 immediately even if the till
+// stays offline for a while after opening - see localOrders.js's
+// resetCounter for why syncOrderCounter alone can't cover this case.
+export async function resetLocalOrderCounter(): Promise<void> {
+  if (!isDesktopApp()) return;
+  try {
+    if (!getCachedPairingKey()) await getPairingInfo();
+    await hub.post('/order-counter/reset');
+  } catch {
+    // Best-effort, same reasoning as syncOrderCounter above.
+  }
+}

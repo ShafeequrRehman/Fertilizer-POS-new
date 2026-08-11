@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { fetchShopSessionStatus } from "@/lib/pos-api";
 import { ShopSession } from "@/lib/pos-types";
 import { isDesktopApp } from "@/lib/api";
-import { syncOrderCounter } from "@/lib/local-hub-api";
+import { syncOrderCounter, resetLocalOrderCounter } from "@/lib/local-hub-api";
 
 // Shared "is the shop open" state for everything under the shop dashboard -
 // the Open/Close Shop button in DashboardShell's topbar and the POS screen
@@ -161,6 +161,13 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
     setIsCached(true);
     if (typeof window !== "undefined") window.localStorage.setItem(PENDING_OPEN_KEY, "true");
     writeCache({ isOpen: true, session: localSession });
+    // This IS a new shift starting, right now, even though it's offline -
+    // reset the Local Hub's own order counter immediately so the very
+    // first offline order of this new shift gets #1, instead of wrongly
+    // continuing whatever number the previous (now-closed) shift left off
+    // at. See local-hub-api.ts's resetLocalOrderCounter for why this can't
+    // just wait for the next time this till talks to the cloud.
+    void resetLocalOrderCounter();
   }, []);
 
   useEffect(() => {

@@ -31,19 +31,40 @@ function writeOrders(orders) {
 function nextLocalOrderNumber() {
   const counter = store.load(COUNTER_KEY, { sessionId: null, value: 0 });
   // Defensive floor: never hand out a number at or below one already used
-  // by an order sitting in the queue right now. counter.json and
-  // orders.json are two separate files updated in two separate writes
+  // by an order STILL SITTING UNSYNCED in the queue right now. counter.json
+  // and orders.json are two separate files updated in two separate writes
   // (see queueOrder below) - if anything ever left them out of step (a
   // half-written file from a crash mid-save, a manually restored backup,
   // etc.), this guarantees numbering still only ever goes forward instead
-  // of quietly reusing a number that's already on a real, possibly
-  // already-completed order.
-  const highestQueued = readOrders().reduce((max, order) => Math.max(max, order.localOrderNumber || 0), 0);
+  // of quietly reusing a number that's already on a real order from the
+  // SAME still-open shift.
+  //
+  // Deliberately excludes already-synced orders - orders.json keeps every
+  // offline order ever placed, forever, across every past shift, purely as
+  // a local audit trail (see queueOrder/markSynced below - nothing ever
+  // deletes from it). Counting THOSE toward this floor would permanently
+  // block order numbering from ever resetting to 1 on a new shop-open (see
+  // resetCounter below) - a closed shift's numbers are already
+  // permanently recorded in the cloud and have nothing left to protect
+  // against colliding with.
+  const highestQueued = readOrders()
+    .filter((order) => order.status !== "synced")
+    .reduce((max, order) => Math.max(max, order.localOrderNumber || 0), 0);
   const next = Math.max(counter.value, highestQueued) + 1;
   store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: next });
   return next;
 }
 
+// Called the instant a new shift starts - both when Open Shop succeeds
+// online (via syncOrderCounter picking up the fresh session's orderCounter
+// of 0 - see shop-session.tsx's refresh()) AND, critically, the moment
+// Open Shop is tapped OFFLINE (see shop-session.tsx's openLocally()),
+// since in that case there's no cloud round-trip yet to learn "this is a
+// new session" from - nothing else would otherwise reset this file until
+// the till reconnects, so the first few offline orders of a brand new
+// shift would wrongly continue the previous shift's numbers instead of
+// starting at 1. Safe to call any time - resets the floor a fresh shift
+// starts counting from, nothing else.
 function resetCounter() {
   const counter = store.load(COUNTER_KEY, { sessionId: null, value: 0 });
   store.save(COUNTER_KEY, { sessionId: counter.sessionId, value: 0 });

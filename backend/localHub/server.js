@@ -224,6 +224,18 @@ app.post("/order-counter-sync", requireLoopback, (req, res) => {
   res.json(result);
 });
 
+// Called the instant Open Shop is tapped while OFFLINE (see
+// shop-session.tsx's openLocally()) - there's no cloud round-trip yet at
+// that moment to learn a fresh session's orderCounter from, so this is the
+// only way a brand new shift starting offline gets its order numbering
+// reset to 1 right away instead of wrongly continuing the previous
+// shift's count until the till happens to reconnect. See
+// localOrders.js's resetCounter.
+app.post("/order-counter/reset", requireLoopback, (req, res) => {
+  localOrders.resetCounter();
+  res.json({ ok: true });
+});
+
 app.get("/sync/status", requirePairingKey, (req, res) => {
   const all = localOrders.listAll();
   const pending = all.filter((order) => order.status === "pending");
