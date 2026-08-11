@@ -9,7 +9,7 @@ import {
 import { clearAuthSession, getAuthRole, hasPermission, isPageEnabled } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
 import { useOfflineSync } from '@/lib/offline-sync';
-import { logoutRequest } from '@/lib/api';
+import { isDesktopApp, logoutRequest } from '@/lib/api';
 import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, claimReceiptPrint, closeShopSession, fetchUnprintedKitchenOrders, fetchUnprintedKitchenUpdateOrders, fetchUnprintedReceiptOrders, openShopSession } from '@/lib/pos-api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
@@ -376,14 +376,23 @@ function KitchenUpdateWatcher() {
 // (Shop Owner always, or an employee whose Role grants it - Manager by
 // default) gets the actual buttons to toggle it.
 function ShopStatusControl() {
-  const { isOpen, session, loading, refresh } = useShopSession();
+  const { isOpen, session, loading, refresh, openLocally } = useShopSession();
   const { toast, confirm } = useToast();
   const canManage = hasPermission('shop.session.manage');
   const [busy, setBusy] = useState(false);
+  const { isOnline } = useNetworkStatus();
 
   async function handleOpen() {
     setBusy(true);
     try {
+      if (isDesktopApp() && !isOnline) {
+        // Same offline path as POSPage's "Open Shop" button - see
+        // shop-session.tsx's openLocally() and offline-sync.ts's
+        // reconciliation step for how this becomes a real ShopSession.
+        openLocally();
+        toast.success('Shop opened offline. Will sync once back online.');
+        return;
+      }
       await openShopSession();
       await refresh();
       toast.success('Shop opened. Orders can now be taken.');

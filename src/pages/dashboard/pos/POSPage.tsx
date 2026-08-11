@@ -43,7 +43,7 @@ type ProductGroup = {
 };
 
 export default function POSPage() {
-  const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession } = useShopSession();
+  const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
   const { toast: shopToast } = useToast();
   const { isOnline } = useNetworkStatus();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
@@ -603,6 +603,14 @@ export default function POSPage() {
   async function handleOpenShopFromPOS() {
     setIsOpeningShop(true);
     try {
+      if (isDesktopApp() && !isOnline) {
+        // No cloud to reach - open locally and let the sync engine turn
+        // this into a real ShopSession the moment the till is back online
+        // (see offline-sync.ts's reconciliation step).
+        openShopLocally();
+        shopToast.success('Shop opened offline. Will sync once back online.');
+        return;
+      }
       await openShopSession();
       await refreshShopSession();
       shopToast.success('Shop opened. Orders can now be taken.');

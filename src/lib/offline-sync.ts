@@ -10,7 +10,8 @@ import {
   pushReferenceData,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { fetchProducts, fetchAllCustomers, fetchWaiters } from '@/lib/pos-api';
+import { ApiError, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession } from '@/lib/pos-api';
+import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
 // The offline sync engine: every SYNC_INTERVAL_MS, if this till is online,
 // (1) pushes queued orders from the Local Hub (backend/localHub/) to the
@@ -34,6 +35,31 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
 
   const hubUp = await isLocalHubReachable();
   if (!hubUp) return { imported: 0, skipped: 0, failed: 0, error: 'Local Hub is not reachable on this till.' };
+
+  // If "Open Shop" was tapped while offline (see shop-session.tsx's
+  // openLocally()), the cloud still doesn't have a real ShopSession - and
+  // import-offline below needs one to assign real dailyOrderNumbers. Open
+  // it for real now, before touching any queued orders. A 409 here just
+  // means someone/something else already opened it in the meantime
+  // (e.g. another device, or this same till syncing twice) - either way
+  // the cloud now has an open session, which is all this step needs.
+  if (hasPendingLocalShopOpen()) {
+    try {
+      await openShopSession();
+      clearPendingLocalShopOpen();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        clearPendingLocalShopOpen();
+      } else {
+        return {
+          imported: 0,
+          skipped: 0,
+          failed: 0,
+          error: 'Could not reconcile the offline shop-open with the server yet - will retry automatically.',
+        };
+      }
+    }
+  }
 
   const pending = await getPendingLocalOrders();
   if (pending.length === 0) return { imported: 0, skipped: 0, failed: 0 };

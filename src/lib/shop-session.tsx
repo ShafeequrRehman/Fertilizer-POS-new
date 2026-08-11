@@ -1,17 +1,69 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { fetchShopSessionStatus } from "@/lib/pos-api";
 import { ShopSession } from "@/lib/pos-types";
+import { isDesktopApp } from "@/lib/api";
 
 // Shared "is the shop open" state for everything under the shop dashboard -
 // the Open/Close Shop button in DashboardShell's topbar and the POS screen
 // (which refuses to start new orders while closed, mirroring the backend
 // check in orderController.createOrder) both read from this one place so
 // they can never disagree with each other.
+//
+// This is also the piece that makes restarting the till while offline
+// usable at all: fetchShopSessionStatus() is a cloud call, so with no
+// internet it would otherwise fail and leave the till stuck showing
+// "shop closed" with no way to open it (Open Shop is a cloud call too).
+// CACHE_KEY below is a write-through cache of the last known status,
+// consulted whenever the real fetch fails - and openLocally() lets Open
+// Shop itself work offline, recording a locally-opened session that the
+// sync engine (lib/offline-sync.ts) turns into a real cloud ShopSession
+// the moment the till is back online.
+const CACHE_KEY = "pos_shop_session_cache";
+const PENDING_OPEN_KEY = "pos_shop_session_pending_open";
+
+interface CachedStatus {
+  isOpen: boolean;
+  session: ShopSession | null;
+}
+
+function readCache(): CachedStatus | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(CACHE_KEY);
+    return raw ? (JSON.parse(raw) as CachedStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(value: CachedStatus) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(CACHE_KEY, JSON.stringify(value));
+}
+
+// True once Open Shop has been tapped while offline and hasn't synced to
+// the cloud yet - lib/offline-sync.ts checks this before importing any
+// queued orders, since the cloud needs a real open ShopSession to assign
+// them real dailyOrderNumbers.
+export function hasPendingLocalShopOpen(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(PENDING_OPEN_KEY) === "true";
+}
+
+export function clearPendingLocalShopOpen() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(PENDING_OPEN_KEY);
+}
+
 interface ShopSessionContextValue {
   isOpen: boolean;
   session: ShopSession | null;
   loading: boolean;
+  /** True when the shown status came from the local cache, not a fresh server response - only ever happens offline. */
+  isCached: boolean;
   refresh: () => Promise<void>;
+  /** Opens the shop locally when there's no internet to reach the real Open Shop endpoint - see hasPendingLocalShopOpen. */
+  openLocally: () => void;
 }
 
 const ShopSessionContext = createContext<ShopSessionContextValue | null>(null);
@@ -20,19 +72,68 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
   const [session, setSession] = useState<ShopSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isCached, setIsCached] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const result = await fetchShopSessionStatus();
       if (result) {
-        setIsOpen(result.isOpen);
-        setSession(result.session);
+        if (result.isOpen) {
+          // Cloud confirms open - whether from a normal online Open Shop
+          // or because offline-sync.ts already reconciled a pending local
+          // open, this is now the authoritative state.
+          setIsOpen(true);
+          setSession(result.session);
+          setIsCached(false);
+          clearPendingLocalShopOpen();
+          writeCache({ isOpen: true, session: result.session });
+        } else if (hasPendingLocalShopOpen()) {
+          // Connectivity is back but the sync engine hasn't reconciled the
+          // locally-opened shop with the cloud yet (it ticks every 5
+          // minutes - see offline-sync.ts). Keep showing the local
+          // pending-open state instead of flipping back to "closed" out
+          // from under whoever's using the till right now.
+        } else {
+          setIsOpen(false);
+          setSession(result.session);
+          setIsCached(false);
+          writeCache({ isOpen: false, session: result.session });
+        }
       }
     } catch (error) {
       console.error("Failed to fetch shop session status", error);
+      // Only meaningful inside the desktop app - a plain browser tab has
+      // no offline order-taking path anyway, so falling back to a stale
+      // cache there would just be confusing rather than useful.
+      if (isDesktopApp()) {
+        const cached = readCache();
+        if (cached) {
+          setIsOpen(cached.isOpen);
+          setSession(cached.session);
+          setIsCached(true);
+        }
+      }
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const openLocally = useCallback(() => {
+    const localSession: ShopSession = {
+      id: "local-pending",
+      status: "open",
+      openedAt: new Date().toISOString(),
+      openedByName: "",
+      closedAt: null,
+      closedByName: "",
+      closedWithUnpaidOrders: false,
+      summary: { orderCount: 0, cancelledCount: 0, totalSales: 0, totalPaid: 0, totalDue: 0, paymentBreakdown: { Cash: 0, Card: 0, "E-Wallet": 0 } },
+    };
+    setIsOpen(true);
+    setSession(localSession);
+    setIsCached(true);
+    if (typeof window !== "undefined") window.localStorage.setItem(PENDING_OPEN_KEY, "true");
+    writeCache({ isOpen: true, session: localSession });
   }, []);
 
   useEffect(() => {
@@ -40,7 +141,7 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   return (
-    <ShopSessionContext.Provider value={{ isOpen, session, loading, refresh }}>
+    <ShopSessionContext.Provider value={{ isOpen, session, loading, isCached, refresh, openLocally }}>
       {children}
     </ShopSessionContext.Provider>
   );
