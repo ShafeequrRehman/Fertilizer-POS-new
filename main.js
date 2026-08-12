@@ -843,10 +843,319 @@ if (!gotTheLock) {
     );
   }
 
+  // --- Alternate receipt templates ----------------------------------------
+  // See src/pages/dashboard/components/ReceiptRenderer.tsx (renderer app)
+  // for the Settings > Manage Receipt picker that lets a shop choose these,
+  // and ItemizedBillReceipt.tsx / KitchenKotReceipt.tsx for the on-screen
+  // Print Center preview of the exact same layouts. react-pdf can't render
+  // those Tailwind/HTML React components directly - this is a completely
+  // separate rendering engine running in the Electron MAIN process, not the
+  // renderer - so the same visual template has to be rebuilt here from
+  // react-pdf primitives (View/Text/StyleSheet) for what an actual silent
+  // PDF print (see createReceiptPdfFromOrderData below) produces. Without
+  // this, a shop could pick a template in Settings and see it correctly in
+  // the on-screen Print Center, yet every REAL printed ticket would keep
+  // silently coming out in the classic ReceiptPdf layout above - exactly
+  // the bug this file exists to prevent.
+
+  // Plain-JS port of src/lib/number-to-words.ts's numberToWords - see that
+  // file for the full reasoning. Duplicated rather than imported for the
+  // same reason every other pure helper in this file is its own copy: this
+  // is a separate Node process (Electron main) with no TypeScript loader,
+  // not the renderer app's module graph.
+  function numberToWordsPdf(value) {
+    const ONES = ["", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN"];
+    const TENS = ["", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY", "SEVENTY", "EIGHTY", "NINETY"];
+    function threeDigitsToWords(n) {
+      const parts = [];
+      if (n >= 100) {
+        parts.push(ONES[Math.floor(n / 100)], "HUNDRED");
+        n %= 100;
+      }
+      if (n >= 20) {
+        const tensWord = TENS[Math.floor(n / 10)];
+        const onesWord = ONES[n % 10];
+        parts.push(onesWord ? `${tensWord}-${onesWord}` : tensWord);
+      } else if (n > 0) {
+        parts.push(ONES[n]);
+      }
+      return parts.join(" ");
+    }
+    const n = Math.max(0, Math.round(Math.abs(value || 0)));
+    if (n === 0) return "ZERO";
+    const groups = [[1000000000, "BILLION"], [1000000, "MILLION"], [1000, "THOUSAND"], [1, ""]];
+    let remaining = n;
+    const words = [];
+    for (const [size, label] of groups) {
+      const count = Math.floor(remaining / size);
+      if (count > 0) {
+        words.push(threeDigitsToWords(count));
+        if (label) words.push(label);
+        remaining %= size;
+      }
+    }
+    return words.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  const altReceiptStyles = StyleSheet.create({
+    boxedType: {
+      borderWidth: 1,
+      borderColor: "#000000",
+      borderStyle: "solid",
+      paddingVertical: 3,
+      marginVertical: 4,
+    },
+    boxedTypeText: {
+      fontSize: 10,
+      fontWeight: "bold",
+      textAlign: "center",
+    },
+    billTitle: {
+      fontSize: 13,
+      fontWeight: "bold",
+      textAlign: "center",
+      marginBottom: 4,
+    },
+    tableHeaderRow: {
+      flexDirection: "row",
+      borderBottomWidth: 1,
+      borderBottomColor: "#000000",
+      borderBottomStyle: "solid",
+      paddingBottom: 2,
+      marginBottom: 3,
+      gap: 4,
+    },
+    headerBold: {
+      fontSize: 8.5,
+      fontWeight: "bold",
+    },
+    col3: { flexGrow: 3, flexShrink: 1 },
+    col1Right: { flexGrow: 1, flexShrink: 0, textAlign: "right", fontSize: 8.5 },
+  });
+
+  // Customer-facing "Bill" template - see ItemizedBillReceipt.tsx (renderer
+  // app) for the on-screen preview this must match.
+  function ItemizedBillReceiptPdf({ orderData, printLogo, settings }) {
+    const items = orderData?.items || [];
+    const orderNumber = getOrderNumber(orderData);
+    const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
+    const scPercent = Number(settings?.serviceChargePercent) || 0;
+    const scAmount = scPercent > 0 ? Math.round((subtotal * scPercent) / 100) : 0;
+    const totalQty = items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    const billTotal = typeof orderData?.total === "number" ? orderData.total : Math.max(subtotal + scAmount, 0);
+    const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), billTotal) : undefined;
+    const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
+    const previousDues = Number(orderData?.previousDues) || 0;
+    const pageHeight = estimateItemizedBillHeightPt(orderData, !!printLogo, settings);
+
+    return h(Document, null,
+      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+        h(View, { style: receiptStyles.center },
+          printLogo ? h(Image, { src: printLogo, style: { width: 90 } }) : null,
+          h(Text, { style: receiptStyles.storeName }, settings?.receiptHeader || "THE HEAVEN SLICE"),
+          settings?.receiptSubHeader ? h(Text, { style: receiptStyles.small }, settings.receiptSubHeader) : null,
+          settings?.receiptAddress ? h(Text, { style: receiptStyles.small }, settings.receiptAddress) : null,
+          settings?.receiptContact ? h(Text, { style: [receiptStyles.small, receiptStyles.bold] }, settings.receiptContact) : null
+        ),
+        h(Text, { style: altReceiptStyles.billTitle }, "Bill"),
+        h(View, { style: altReceiptStyles.boxedType },
+          h(Text, { style: altReceiptStyles.boxedTypeText }, String(orderData?.orderType || "").toUpperCase())
+        ),
+        h(View, { style: receiptStyles.meta },
+          h(View, { style: receiptStyles.row },
+            h(Text, null, `Order#: ${orderNumber}`),
+            h(Text, null, `${formatReceiptDate(orderData?.createdAt)} ${formatReceiptTime(orderData?.createdAt)}`)
+          ),
+          orderData?.orderType === "DineIn" && orderData?.table ? h(Text, null, `Table: ${orderData.table}`) : null,
+          h(Text, null, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
+          orderData?.waiter ? h(Text, null, `Waiter: ${orderData.waiter}`) : null,
+          orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" ? h(Text, null, `Customer: ${orderData.customer.name}`) : null
+        ),
+        h(View, { style: receiptStyles.dashedRule }),
+        h(View, { style: altReceiptStyles.tableHeaderRow },
+          h(Text, { style: [altReceiptStyles.col3, altReceiptStyles.headerBold] }, "Item"),
+          h(Text, { style: [altReceiptStyles.col1Right, altReceiptStyles.headerBold] }, "Qty"),
+          h(Text, { style: [altReceiptStyles.col1Right, altReceiptStyles.headerBold] }, "Price"),
+          h(Text, { style: [altReceiptStyles.col1Right, altReceiptStyles.headerBold] }, "Amount")
+        ),
+        h(View, null,
+          items.map((item, index) => {
+            const quantity = Number(item.quantity || 1);
+            const price = Number(item.price || 0);
+            return h(View, { key: `${item.name}-${index}`, style: { marginBottom: 2 } },
+              h(View, { style: receiptStyles.row },
+                h(Text, { style: altReceiptStyles.col3 }, String(item.name || "")),
+                h(Text, { style: altReceiptStyles.col1Right }, String(quantity)),
+                h(Text, { style: altReceiptStyles.col1Right }, price.toFixed(0)),
+                h(Text, { style: altReceiptStyles.col1Right }, (price * quantity).toFixed(0))
+              ),
+              item.variation ? h(Text, { style: receiptStyles.variation }, `- ${String(item.variation).toUpperCase()}`) : null
+            );
+          })
+        ),
+        scAmount > 0 ? h(View, { style: receiptStyles.row },
+          h(Text, null, `SC ${scPercent}%`),
+          h(Text, { style: receiptStyles.rowRight }, scAmount.toFixed(0))
+        ) : null,
+        h(View, { style: receiptStyles.rule }),
+        h(View, { style: receiptStyles.row },
+          h(Text, { style: receiptStyles.bold }, "Total Sold:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `${totalQty.toFixed(2)}   ${subtotal.toFixed(0)}`)
+        ),
+        h(View, { style: receiptStyles.row },
+          h(Text, null, "Total Return:"),
+          h(Text, { style: receiptStyles.rowRight }, "0.00")
+        ),
+        h(View, { style: receiptStyles.rule }),
+        h(View, { style: receiptStyles.row },
+          h(Text, { style: receiptStyles.bold }, "Total:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `${totalQty.toFixed(2)}   ${(subtotal + scAmount).toFixed(0)}`)
+        ),
+        h(Text, { style: { textAlign: "right", marginTop: 6, fontWeight: "bold" } }, `Bill Total: ${billTotal.toFixed(0)}`),
+        amountTendered !== undefined ? h(Text, { style: { marginTop: 4 } }, `Amount Tendered: ${amountTendered.toFixed(0)}`) : null,
+        dueAmount > 0 ? h(Text, null, `Due: ${dueAmount.toFixed(0)}`) : null,
+        previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `Previous Dues: ${previousDues.toFixed(0)}`) : null,
+        previousDues > 0 ? h(Text, { style: receiptStyles.bold }, `Total Outstanding: ${(billTotal + previousDues).toFixed(0)}`) : null,
+        h(View, { style: { marginTop: 6 } },
+          h(Text, { style: receiptStyles.bold }, "In Words:"),
+          h(Text, null, `${numberToWordsPdf(billTotal)} ONLY.`)
+        ),
+        h(View, { style: receiptStyles.footer },
+          settings?.receiptPaymentInfo ? h(Text, { style: receiptStyles.small }, settings.receiptPaymentInfo) : null,
+          settings?.receiptFooterMessage ? h(Text, { style: receiptStyles.bold }, settings.receiptFooterMessage) : null
+        )
+      )
+    );
+  }
+
+  // Kitchen-facing "KOT" ticket - see KitchenKotReceipt.tsx (renderer app)
+  // for the on-screen preview this must match.
+  function KitchenKotReceiptPdf({ orderData, settings }) {
+    const items = orderData?.items || [];
+    const orderNumber = getOrderNumber(orderData);
+    const totalQty = items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    const rawId = String(orderData?.id || orderData?._id || "");
+    const trNumber = rawId.replace(/[^0-9a-z]/gi, "").slice(-6).toUpperCase();
+    const pageHeight = estimateKitchenKotHeightPt(orderData);
+
+    return h(Document, null,
+      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+        h(View, { style: receiptStyles.center },
+          h(Text, { style: receiptStyles.storeName }, settings?.receiptHeader || "THE HEAVEN SLICE"),
+          settings?.receiptSubHeader ? h(Text, { style: receiptStyles.small }, settings.receiptSubHeader) : null
+        ),
+        h(View, { style: altReceiptStyles.boxedType },
+          h(Text, { style: altReceiptStyles.boxedTypeText }, String(orderData?.orderType || "").toUpperCase())
+        ),
+        h(View, { style: receiptStyles.meta },
+          h(Text, null, `Tr#: ${trNumber}`),
+          h(View, { style: receiptStyles.row },
+            h(Text, null, `DATE: ${formatReceiptDate(orderData?.createdAt)}`),
+            h(Text, null, formatReceiptTime(orderData?.createdAt))
+          ),
+          h(Text, null, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
+          h(View, { style: receiptStyles.row },
+            h(Text, null, `Order#: ${orderNumber}`),
+            orderData?.orderType === "DineIn" && orderData?.table ? h(Text, null, `Table: ${orderData.table}`) : null
+          ),
+          orderData?.waiter ? h(Text, null, `Waiter: ${orderData.waiter}`) : null
+        ),
+        h(View, { style: receiptStyles.rule }),
+        h(Text, { style: receiptStyles.ticketLabel }, "*** KOT ***"),
+        h(View, { style: altReceiptStyles.tableHeaderRow },
+          h(Text, { style: [{ width: 16 }, altReceiptStyles.headerBold] }, "#"),
+          h(Text, { style: [{ flexGrow: 1 }, altReceiptStyles.headerBold] }, "Item Detail"),
+          h(Text, { style: [{ width: 30, textAlign: "right" }, altReceiptStyles.headerBold] }, "Qty")
+        ),
+        h(View, null,
+          items.map((item, index) => {
+            const quantity = Number(item.quantity || 1);
+            const name = String(item.name || "").toUpperCase();
+            return h(View, { key: `${name}-${index}`, style: { marginBottom: 4 } },
+              h(View, { style: receiptStyles.row },
+                h(Text, { style: { width: 16 } }, String(index + 1)),
+                h(Text, { style: { flexGrow: 1 } }, item.variation ? `${name} (${String(item.variation).toUpperCase()})` : name),
+                h(Text, { style: [receiptStyles.bold, { width: 30, textAlign: "right" }] }, String(quantity))
+              )
+            );
+          })
+        ),
+        h(View, { style: receiptStyles.rule }),
+        h(View, { style: receiptStyles.row },
+          h(Text, { style: receiptStyles.bold }, "Total:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, String(totalQty))
+        ),
+        orderData?.note ? h(View, { style: { marginTop: 8, borderWidth: 1, borderColor: "#000000", borderStyle: "solid", padding: 4 } },
+          h(Text, { style: receiptStyles.bold }, "Note:"),
+          h(Text, null, String(orderData.note))
+        ) : null
+      )
+    );
+  }
+
+  function estimateItemizedBillHeightPt(orderData, hasLogo, settings) {
+    let h = 55;
+    if (hasLogo) h += 100;
+    h += 55; // store name/sub/address/contact
+    h += 25; // "Bill" title + boxed type
+    h += 45; // meta block (order#/date, table, M/S, waiter, customer)
+    h += 20; // dashed rule + table header
+    const items = orderData?.items || [];
+    items.forEach((item) => {
+      h += 14;
+      if (item.variation) h += 10;
+    });
+    if (Number(settings?.serviceChargePercent) > 0) h += 14;
+    h += 70; // Total Sold/Return/Total + Bill Total
+    const total = typeof orderData?.total === "number" ? orderData.total : 0;
+    const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
+    if (amountTendered !== undefined) h += 14;
+    if (Math.max(total - (amountTendered ?? total), 0) > 0) h += 14;
+    if (Number(orderData?.previousDues) > 0) h += 28;
+    h += 40; // In Words block
+    h += 40; // footer
+    return h;
+  }
+
+  function estimateKitchenKotHeightPt(orderData) {
+    let h = 55;
+    h += 35; // header
+    h += 25; // boxed order type
+    h += 70; // meta (Tr#, date/time, M/S, order#/table, waiter)
+    h += 25; // rule + KOT label
+    h += 20; // table header
+    const items = orderData?.items || [];
+    items.forEach((item) => {
+      const nameLength = String(item.name || "").length;
+      const wrappedLines = Math.max(1, Math.ceil((nameLength + 10) / 22));
+      h += wrappedLines * 13 + 4;
+    });
+    h += 25; // total row
+    if (orderData?.note) h += 35;
+    return h;
+  }
+
+  // Picks which react-pdf template to actually print - the main-process
+  // equivalent of ReceiptRenderer.tsx's decision in the renderer app. Only
+  // the two main receipt types (a plain "kitchen" ticket, a "cashier"
+  // receipt) have alternates right now - cancel/remove tickets and the
+  // TakeAway order-number token always use the classic ReceiptPdf layout
+  // regardless of what a shop has picked, same scope ReceiptRenderer.tsx
+  // covers on the renderer side.
+  function pickReceiptElement({ orderData, type, printLogo, settings }) {
+    if (type === "cashier" && settings?.cashierReceiptTemplate === "itemizedBill") {
+      return h(ItemizedBillReceiptPdf, { orderData, printLogo, settings });
+    }
+    if (type === "kitchen" && settings?.kitchenReceiptTemplate === "kot") {
+      return h(KitchenKotReceiptPdf, { orderData, settings });
+    }
+    return h(ReceiptPdf, { orderData, type, printLogo, settings });
+  }
+
   async function createReceiptPdfFromOrderData(orderData, type = "kitchen", filePrefix = "receipt", printLogo = null, settings = null) {
     const safePrefix = String(filePrefix).replace(/[^a-z0-9_-]/gi, "_").slice(0, 64) || "receipt";
     const pdfPath = path.join(os.tmpdir(), `${safePrefix}_${Date.now()}.pdf`);
-    await ReactPDF.render(h(ReceiptPdf, { orderData, type, printLogo, settings }), pdfPath);
+    await ReactPDF.render(pickReceiptElement({ orderData, type, printLogo, settings }), pdfPath);
     logRuntime(`ReactPDF ${type} receipt created: ${pdfPath}`);
     return { success: true, pdfPath };
   }
