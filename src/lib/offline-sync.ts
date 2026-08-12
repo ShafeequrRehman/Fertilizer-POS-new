@@ -119,6 +119,11 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
           localOrderNumber: order.localOrderNumber,
           offlineCreatedAt: order.queuedAt,
           payload: order.payload,
+          // See localOrders.js's queueOrder - lets importOfflineOrders mark
+          // the cloud record as already-printed so the background print
+          // watchers never print it a second time.
+          kitchenPrinted: order.kitchenPrinted,
+          receiptPrinted: order.receiptPrinted,
         })),
       });
 

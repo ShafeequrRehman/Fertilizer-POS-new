@@ -148,7 +148,7 @@ app.post("/orders", requirePairingKey, (req, res) => {
   if (!payload || typeof payload !== "object") {
     return res.status(400).json({ message: "payload is required", reason: "validation_error" });
   }
-  const record = localOrders.queueOrder(payload, req.body?.actor || null);
+  const record = localOrders.queueOrder(payload, req.body?.actor || null, req.body?.printFlags || null);
   res.status(201).json(record);
 });
 

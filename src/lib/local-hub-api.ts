@@ -46,6 +46,12 @@ export interface LocalOrderRecord {
   queuedAt: string;
   syncedAt: string | null;
   lastError: string | null;
+  // Whether this till already attempted a kitchen/customer-receipt print
+  // for this order the instant it was queued - see POSPage.tsx and
+  // localOrders.js's queueOrder. Carried through to the cloud on sync so
+  // DashboardShell.tsx's background print watchers never print it again.
+  kitchenPrinted?: boolean;
+  receiptPrinted?: boolean;
 }
 
 export interface SyncStatus {
@@ -150,9 +156,13 @@ export async function getReferenceData(): Promise<ReferenceDataSnapshot> {
   return response.data;
 }
 
-export async function createLocalOrder(payload: object, actor?: { name?: string; deviceLabel?: string }) {
+export async function createLocalOrder(
+  payload: object,
+  actor?: { name?: string; deviceLabel?: string },
+  printFlags?: { kitchen?: boolean; receipt?: boolean },
+) {
   if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.post<LocalOrderRecord>('/orders', { payload, actor });
+  const response = await hub.post<LocalOrderRecord>('/orders', { payload, actor, printFlags });
   return response.data;
 }
 

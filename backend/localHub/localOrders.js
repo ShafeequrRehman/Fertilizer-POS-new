@@ -131,7 +131,7 @@ function syncOrderCounter(sessionId, cloudCounter) {
   return { sessionId: sessionId || null, value: cloudValue };
 }
 
-function queueOrder(payload, actor) {
+function queueOrder(payload, actor, printFlags) {
   const orders = readOrders();
   const record = {
     id: crypto.randomUUID(),
@@ -142,6 +142,17 @@ function queueOrder(payload, actor) {
     queuedAt: new Date().toISOString(),
     syncedAt: null,
     lastError: null,
+    // True when THIS till already attempted a kitchen/customer-receipt
+    // print for this order the instant it was queued (see POSPage.tsx -
+    // an offline order prints immediately, with no cloud record yet to
+    // claim first, since nothing else could possibly be racing to print
+    // it while it's still only sitting here). Carried through to the
+    // cloud on import (see orderController.js's importOfflineOrders) so
+    // the background KitchenPrintWatcher/ReceiptPrintWatcher never
+    // print it a second time once it syncs and shows up as "unprinted"
+    // there for the first time.
+    kitchenPrinted: !!(printFlags && printFlags.kitchen),
+    receiptPrinted: !!(printFlags && printFlags.receipt),
   };
   orders.push(record);
   writeOrders(orders);

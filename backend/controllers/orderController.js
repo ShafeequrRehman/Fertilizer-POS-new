@@ -458,6 +458,20 @@ exports.importOfflineOrders = async (req, res) => {
           createdOffline: true,
           offlineOrderNumber: entry.localOrderNumber || null,
           offlineCreatedAt: entry.offlineCreatedAt ? new Date(entry.offlineCreatedAt) : null,
+          // The till already attempted these prints the instant the order
+          // was queued offline (see localOrders.js's queueOrder / POSPage.tsx
+          // - no cloud record existed yet to claim first, since nothing else
+          // could possibly be racing to print it while it only lived here).
+          // Marking them printed now, at creation, is what stops
+          // DashboardShell.tsx's background KitchenPrintWatcher/
+          // ReceiptPrintWatcher from printing this same order again the
+          // moment it shows up in their "unprinted" query for the first
+          // time. Left null (the default) when no printer was configured
+          // on this till, exactly like a real print never having happened -
+          // some OTHER till (or this one, once configured) can still catch
+          // and print it later.
+          kitchenPrintedAt: entry.kitchenPrinted ? new Date() : null,
+          customerReceiptPrintedAt: entry.receiptPrinted ? new Date() : null,
         });
 
         if (payload.customer?.phone && payload.customer.phone !== "03000000000") {

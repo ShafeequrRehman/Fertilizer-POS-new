@@ -508,7 +508,21 @@ export default function POSPage() {
       let savedOrder: SavedOrder;
 
       async function queueLocally() {
-        const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username });
+        // Any order that takes this path prints locally, immediately,
+        // right below (no cloud record exists yet to claim first - see
+        // that block's own comment) - whenever a printer is actually
+        // configured for it. Telling the Local Hub about that NOW, at
+        // queue time, is what lets importOfflineOrders mark the eventual
+        // cloud record as already-printed, so DashboardShell.tsx's
+        // background KitchenPrintWatcher/ReceiptPrintWatcher don't print
+        // this same order a second time the moment it syncs.
+        const printSettings = getStoreSettings();
+        const isElectronNow = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+        const printFlags = {
+          kitchen: isElectronNow && !!printSettings.kitchenPrinter,
+          receipt: isElectronNow && orderPayload.orderType === 'TakeAway' && !!printSettings.counterPrinter,
+        };
+        const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username }, printFlags);
         return {
           ...orderPayload,
           id: `local-${localRecord.id}`,
