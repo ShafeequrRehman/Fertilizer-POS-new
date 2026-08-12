@@ -941,7 +941,6 @@ if (!gotTheLock) {
     const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
     const scPercent = Number(settings?.serviceChargePercent) || 0;
     const scAmount = scPercent > 0 ? Math.round((subtotal * scPercent) / 100) : 0;
-    const totalQty = items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
     const billTotal = typeof orderData?.total === "number" ? orderData.total : Math.max(subtotal + scAmount, 0);
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), billTotal) : undefined;
     const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
@@ -999,17 +998,8 @@ if (!gotTheLock) {
         ) : null,
         h(View, { style: receiptStyles.rule }),
         h(View, { style: receiptStyles.row },
-          h(Text, { style: receiptStyles.bold }, "Total Sold:"),
-          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `${totalQty.toFixed(2)}   ${subtotal.toFixed(0)}`)
-        ),
-        h(View, { style: receiptStyles.row },
-          h(Text, null, "Total Return:"),
-          h(Text, { style: receiptStyles.rowRight }, "0.00")
-        ),
-        h(View, { style: receiptStyles.rule }),
-        h(View, { style: receiptStyles.row },
           h(Text, { style: receiptStyles.bold }, "Total:"),
-          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `${totalQty.toFixed(2)}   ${(subtotal + scAmount).toFixed(0)}`)
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (subtotal + scAmount).toFixed(0))
         ),
         h(Text, { style: { textAlign: "right", marginTop: 6, fontWeight: "bold" } }, `Bill Total: ${billTotal.toFixed(0)}`),
         amountTendered !== undefined ? h(Text, { style: { marginTop: 4 } }, `Amount Tendered: ${amountTendered.toFixed(0)}`) : null,
@@ -1107,7 +1097,7 @@ if (!gotTheLock) {
       if (item.variation) h += 10;
     });
     if (Number(settings?.serviceChargePercent) > 0) h += 14;
-    h += 70; // Total Sold/Return/Total + Bill Total
+    h += 40; // Total + Bill Total
     const total = typeof orderData?.total === "number" ? orderData.total : 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
     if (amountTendered !== undefined) h += 14;

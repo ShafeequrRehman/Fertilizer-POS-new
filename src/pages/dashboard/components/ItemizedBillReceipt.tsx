@@ -37,7 +37,6 @@ export default function ItemizedBillReceipt({
     : '--:--';
   const orderNumber = String(order.dailyOrderNumber ?? order.id.slice(-3)).padStart(3, '0');
 
-  const totalQty = order.items.reduce((sum, item) => sum + item.quantity, 0);
   const subtotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const scPercent = Number(settings.serviceChargePercent) || 0;
   const scAmount = scPercent > 0 ? Math.round((subtotal * scPercent) / 100) : 0;
@@ -125,20 +124,9 @@ export default function ItemizedBillReceipt({
 
       <div className="border-t border-black my-1.5" />
 
-      <div className="space-y-0.5">
-        <div className="flex justify-between font-bold">
-          <span>Total Sold:</span>
-          <span>{totalQty.toFixed(2)}    {subtotal.toFixed(0)}</span>
-        </div>
-        <div className="flex justify-between">
-          <span>Total Return:</span>
-          <span>0.00</span>
-        </div>
-        <div className="border-t border-black my-1" />
-        <div className="flex justify-between font-bold">
-          <span>Total:</span>
-          <span>{totalQty.toFixed(2)}    {(subtotal + scAmount).toFixed(0)}</span>
-        </div>
+      <div className="flex justify-between font-bold">
+        <span>Total:</span>
+        <span>{(subtotal + scAmount).toFixed(0)}</span>
       </div>
 
       <div className="text-right mt-2">
