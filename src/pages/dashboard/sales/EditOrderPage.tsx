@@ -7,7 +7,7 @@ import { getStoreSettings } from '@/lib/pos-settings';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
-import { localOrderToSavedOrder, saveOrderEditOffline } from '@/lib/offline-order-helpers';
+import { localOrderToSavedOrder, saveOrderEditOffline, computeKitchenIncreaseDelta } from '@/lib/offline-order-helpers';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
@@ -172,12 +172,24 @@ export default function EditOrderPage() {
     };
 
     if (isDesktopApp() && !isOnline) {
-      // No kitchen-print claim here - that coordinates printing across
+      // No kitchen-print CLAIM here - that coordinates printing across
       // devices via the cloud, same reasoning as SalesPage.tsx's
-      // saveUpdate offline branch. The removed/added items themselves are
-      // still fully recorded in what gets synced.
+      // saveUpdate offline branch. The tickets themselves still print
+      // immediately below (printKitchenRemoveTicket/printKitchenUpdateTicket
+      // are already self-contained - no-op if no printer's configured),
+      // same as they would online - nothing else could possibly be racing
+      // to print this same delta while it's still only sitting on this
+      // till, so there's no claim to make first. This page can only ever
+      // reach here for a still-local (not yet synced) order - see the load
+      // effect above - so the removed/added items are still fully recorded
+      // in what gets synced either way.
+      const kitchenDelta = computeKitchenIncreaseDelta(order.items, items);
       try {
-        const updated = await saveOrderEditOffline(order, patch);
+        const updated = await saveOrderEditOffline(order, patch, kitchenDelta.length > 0);
+        printKitchenRemoveTicket(updated, removedItems);
+        if (kitchenDelta.length > 0) {
+          printKitchenUpdateTicket(updated, kitchenDelta);
+        }
         setRemovedItems([]);
         setStatus(`Order ${updated.id} saved offline - will sync once back online.`);
         setOrder(updated);

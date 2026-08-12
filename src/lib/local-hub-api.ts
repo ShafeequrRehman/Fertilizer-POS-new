@@ -216,6 +216,10 @@ export interface LocalOrderEditRecord {
   queuedAt: string;
   syncedAt: string | null;
   lastError: string | null;
+  // Whether this till already attempted a kitchen print for this edit's
+  // delta items the instant it was queued - see offline-order-helpers.ts's
+  // computeKitchenPrintDelta and orderController.js's importOfflineOrderUpdates.
+  kitchenPrinted?: boolean;
 }
 
 // Mutates a still-unsynced local order's own queued payload directly -
@@ -230,9 +234,14 @@ export async function updateQueuedLocalOrder(localId: string, payload: object): 
 // Queues an edit against an order that already has a real cloud _id, to be
 // replayed by the sync engine (offline-sync.ts) via the cloud's
 // POST /orders/import-offline-updates once back online.
-export async function queueOrderEdit(orderId: string, payload: object, actor?: { name?: string; deviceLabel?: string }): Promise<LocalOrderEditRecord> {
+export async function queueOrderEdit(
+  orderId: string,
+  payload: object,
+  actor?: { name?: string; deviceLabel?: string },
+  kitchenPrinted = false,
+): Promise<LocalOrderEditRecord> {
   if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor });
+  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor, kitchenPrinted });
   return response.data;
 }
 

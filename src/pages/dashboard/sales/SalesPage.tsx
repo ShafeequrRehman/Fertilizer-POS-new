@@ -9,7 +9,7 @@ import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from 
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { getLocalHubStartDiagnostics, getReferenceData, pushOrdersCache } from '@/lib/local-hub-api';
-import { loadOrdersFromLocalHub, saveOrderEditOffline } from '@/lib/offline-order-helpers';
+import { loadOrdersFromLocalHub, saveOrderEditOffline, computeKitchenPrintDelta } from '@/lib/offline-order-helpers';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 
@@ -263,16 +263,47 @@ export default function SalesPage() {
       // Editing an order while offline - see offline-order-helpers.ts's
       // saveOrderEditOffline for the split between the two cases (still-
       // local order vs. one that already has a real cloud _id). No
-      // claim-before-print or WhatsApp here at all, same as order
-      // creation offline (POSPage.tsx) - both are online-only by design
-      // (claims coordinate printing across devices; WhatsApp was
-      // explicitly scoped online-only from the start). Everything queued
-      // here is replayed for real - dues cascade included - once synced.
+      // claim-before-print coordination or WhatsApp here (claims exist to
+      // coordinate printing ACROSS devices via the cloud, which isn't
+      // reachable right now anyway; WhatsApp was explicitly scoped
+      // online-only from the start). The kitchen ticket for whatever
+      // items just got added still prints immediately below, regardless
+      // of order type (DineIn/TakeAway/Delivery) - same as a brand new
+      // order's ticket prints immediately offline (POSPage.tsx). Nothing
+      // else could possibly be racing to print this same delta while it's
+      // still only sitting on this till, so there's no claim to make
+      // first. Everything queued here is replayed for real - dues cascade
+      // included - once synced.
+      const kitchenDelta = computeKitchenPrintDelta(selectedOrder, payload);
+      const printSettings = getStoreSettings();
+      const isElectronNow = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+      const willPrintKitchen = isElectronNow && kitchenDelta.length > 0 && !!printSettings.kitchenPrinter;
+
       try {
-        const updated = await saveOrderEditOffline(selectedOrder, payload);
+        const updated = await saveOrderEditOffline(selectedOrder, payload, willPrintKitchen);
         setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
         setSelectedOrder(updated);
-        setStatus({ tone: 'info', text: 'Saved offline - will sync to the cloud once back online.' });
+
+        if (willPrintKitchen) {
+          try {
+            const electronRequire = (window as ElectronWindow).require;
+            const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
+            if (ipcRenderer) {
+              const printLogo = localStorage.getItem('preferred-print-logo');
+              const kitchenReceiptData = { ...updated, items: kitchenDelta };
+              await ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, printSettings.kitchenPrinter, printLogo, printSettings);
+            }
+          } catch (printErr) {
+            console.error('Offline kitchen update print failed:', printErr);
+          }
+        }
+
+        setStatus({
+          tone: 'info',
+          text: willPrintKitchen
+            ? 'Saved offline - kitchen ticket printed. Will sync to the cloud once back online.'
+            : 'Saved offline - will sync to the cloud once back online.',
+        });
         return updated;
       } catch (err) {
         setStatus({ tone: 'error', text: err instanceof Error ? err.message : 'Could not save this change offline.' });

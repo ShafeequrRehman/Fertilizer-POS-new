@@ -56,6 +56,10 @@ async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
         orderId: edit.orderId,
         offlineUpdatedAt: edit.queuedAt,
         payload: edit.payload,
+        // See localOrders.js's queueOrderEdit - lets importOfflineOrderUpdates
+        // suppress pendingKitchenUpdate so the background KitchenUpdateWatcher
+        // never prints a delta this till already printed offline.
+        kitchenPrinted: edit.kitchenPrinted,
       })),
     });
 

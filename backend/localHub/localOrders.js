@@ -296,7 +296,7 @@ function writeEdits(edits) {
   store.save(EDITS_KEY, edits);
 }
 
-function queueOrderEdit(orderId, patch, actor) {
+function queueOrderEdit(orderId, patch, actor, kitchenPrinted) {
   const edits = readEdits();
   const record = {
     id: crypto.randomUUID(),
@@ -307,6 +307,11 @@ function queueOrderEdit(orderId, patch, actor) {
     queuedAt: new Date().toISOString(),
     syncedAt: null,
     lastError: null,
+    // See queueOrder's own kitchenPrinted comment above - same idea, for
+    // an edit against an order that already has a real cloud _id. Read by
+    // offline-sync.ts's syncOrderEdits and consumed by
+    // orderController.js's importOfflineOrderUpdates.
+    kitchenPrinted: !!kitchenPrinted,
   };
   edits.push(record);
   writeEdits(edits);

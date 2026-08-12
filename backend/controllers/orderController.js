@@ -680,12 +680,24 @@ exports.checkPendingOrder = async (req, res) => {
 // anything that should reject with a specific non-500 response (e.g.
 // attempting to cancel through here); callers should catch that and use
 // those fields instead of always falling back to a generic 500.
-async function applyOrderPatch(order, patch, req) {
+async function applyOrderPatch(order, patch, req, options) {
     // Items changing (addItems/replaceItems) or the discount itself
     // changing both require the subtotal/tax/total/remainingAmount to be
     // recomputed from scratch, rather than trusting whatever the client
     // sends for those - see recalculateTotals above.
     let itemsOrDiscountChanged = false;
+
+    // Set by importOfflineOrderUpdates when the till already printed this
+    // exact delta to the kitchen itself, offline, the instant the edit was
+    // made (see SalesPage.tsx's saveUpdate) - there's no cloud record to
+    // claim/queue against yet at that moment, same reasoning as an offline
+    // order's original ticket (orderController.js's importOfflineOrders).
+    // Skipping pendingKitchenUpdate here is what stops
+    // DashboardShell.tsx's KitchenUpdateWatcher printing that same delta a
+    // second time once this edit syncs. The online PATCH path (updateOrder
+    // below) never passes this - a live edit always needs the normal
+    // claim-and-print (or watcher) flow.
+    const suppressKitchenUpdate = !!(options && options.suppressKitchenUpdate);
 
     if (patch.action === "addItems" && Array.isArray(patch.items)) {
       // Every item in an addItems payload IS the delta by definition - the
@@ -693,7 +705,7 @@ async function applyOrderPatch(order, patch, req) {
       const delta = patch.items
         .map((item) => ({ name: item.name, price: item.price, variation: item.variation || "", quantity: Number(item.quantity) || 0 }))
         .filter((item) => item.quantity > 0);
-      if (delta.length > 0) {
+      if (delta.length > 0 && !suppressKitchenUpdate) {
         order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
       }
       order.items = [...order.items, ...patch.items];
@@ -702,7 +714,7 @@ async function applyOrderPatch(order, patch, req) {
 
     if (patch.action === "replaceItems" && Array.isArray(patch.items)) {
       const delta = computeKitchenIncreaseDelta(order.items, patch.items);
-      if (delta.length > 0) {
+      if (delta.length > 0 && !suppressKitchenUpdate) {
         order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
       }
       order.items = patch.items;
@@ -880,7 +892,7 @@ exports.importOfflineOrderUpdates = async (req, res) => {
     const failed = [];
 
     for (const entry of ordered) {
-      const { localEditId, orderId, payload } = entry || {};
+      const { localEditId, orderId, payload, kitchenPrinted } = entry || {};
       try {
         if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
           skipped.push({ localEditId, reason: "invalid_order_id" });
@@ -891,7 +903,7 @@ exports.importOfflineOrderUpdates = async (req, res) => {
           skipped.push({ localEditId, orderId, reason: "order_not_found" });
           continue;
         }
-        await applyOrderPatch(order, payload || {}, req);
+        await applyOrderPatch(order, payload || {}, req, { suppressKitchenUpdate: !!kitchenPrinted });
         applied.push({ localEditId, orderId });
       } catch (entryError) {
         console.error("Failed to import one offline order edit:", entryError);

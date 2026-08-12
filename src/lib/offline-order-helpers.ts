@@ -50,6 +50,62 @@ function computeDiscountAmount(discount: Discount | null | undefined, subtotal: 
   return Math.min(Math.round(value), subtotal);
 }
 
+type KitchenItem = SavedOrder['items'][number];
+
+function kitchenItemKey(item: { name: string; variation?: string }): string {
+  return `${item.name}::${item.variation || ''}`;
+}
+
+function sumQuantitiesByKey(items: KitchenItem[] | undefined): Map<string, number> {
+  const map = new Map<string, number>();
+  (items || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    map.set(key, (map.get(key) || 0) + (Number(item.quantity) || 0));
+  });
+  return map;
+}
+
+// Client-side mirror of orderController.js's computeKitchenIncreaseDelta -
+// what a "replaceItems" save (EditOrderPage.tsx's full editor) actually
+// added that the kitchen needs to know about: only quantity INCREASES,
+// whether that's an existing line going up or a brand new line appearing.
+// Removed items / decreases go through a separate "kitchen-remove" ticket
+// (see EditOrderPage.tsx's printKitchenRemoveTicket), same online or off.
+export function computeKitchenIncreaseDelta(oldItems: KitchenItem[], newItems: KitchenItem[]): KitchenItem[] {
+  const oldQuantities = sumQuantitiesByKey(oldItems);
+  const newQuantities = sumQuantitiesByKey(newItems);
+  const meta = new Map<string, { name: string; price: number; variation: string }>();
+  (newItems || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    if (!meta.has(key)) meta.set(key, { name: item.name, price: item.price, variation: item.variation || '' });
+  });
+
+  const delta: KitchenItem[] = [];
+  newQuantities.forEach((newQty, key) => {
+    const oldQty = oldQuantities.get(key) || 0;
+    const diff = newQty - oldQty;
+    if (diff > 0) {
+      const info = meta.get(key)!;
+      delta.push({ ...info, quantity: diff } as KitchenItem);
+    }
+  });
+  return delta;
+}
+
+// What the kitchen actually needs printed for a given edit, offline or on -
+// exactly the same "what counts as new" rule applyOrderPatch uses on the
+// backend (see orderController.js), so an offline print and the eventual
+// synced pendingKitchenUpdate (when not suppressed) always agree.
+export function computeKitchenPrintDelta(order: SavedOrder, patch: OrderUpdatePayload): KitchenItem[] {
+  if (patch.action === 'addItems' && Array.isArray(patch.items)) {
+    return (patch.items as KitchenItem[]).filter((item) => (Number(item.quantity) || 0) > 0);
+  }
+  if (patch.action === 'replaceItems' && Array.isArray(patch.items)) {
+    return computeKitchenIncreaseDelta(order.items, patch.items as KitchenItem[]);
+  }
+  return [];
+}
+
 // Client-side mirror of the non-cascade branches of applyOrderPatch (see
 // backend/controllers/orderController.js) - paints an immediate,
 // reasonable-looking result on screen while offline. Never authoritative:
@@ -106,13 +162,24 @@ export function applyPatchOptimistically(order: SavedOrder, patch: OrderUpdatePa
 // resulting SavedOrder for immediate display. Throws on a genuine Local
 // Hub failure (e.g. unreachable), same as the online path throwing on a
 // genuine network failure.
-export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdatePayload): Promise<SavedOrder> {
+// `kitchenPrinted` - set by the caller (SalesPage.tsx/EditOrderPage.tsx)
+// when it already attempted a kitchen print for this exact edit's delta
+// items the instant it was made (see computeKitchenPrintDelta above) - only
+// meaningful for the already-synced-order path below: it's what tells
+// importOfflineOrderUpdates to suppress pendingKitchenUpdate once this edit
+// replays for real, so DashboardShell.tsx's KitchenUpdateWatcher never
+// prints the same delta a second time. A still-local order's edits don't
+// need this - they get folded into the ONE queueOrder-level print flag
+// already set when the order was first created (see localOrders.js), since
+// the whole thing syncs as a single finished order via importOfflineOrders,
+// never through the separate pendingKitchenUpdate path at all.
+export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdatePayload, kitchenPrinted = false): Promise<SavedOrder> {
   if (order.id.startsWith('local-')) {
     const localId = order.id.slice('local-'.length);
     const record = await updateQueuedLocalOrder(localId, patch);
     return localOrderToSavedOrder(record);
   }
-  await queueOrderEdit(order.id, patch);
+  await queueOrderEdit(order.id, patch, undefined, kitchenPrinted);
   return applyPatchOptimistically(order, patch);
 }
 

@@ -202,7 +202,7 @@ app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
 // Case 2: the order already has a real cloud _id - queue the edit for the
 // sync engine to replay against the real document.
 app.post("/orders/:orderId/edits", requirePairingKey, (req, res) => {
-  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null);
+  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null, !!req.body?.kitchenPrinted);
   res.status(201).json(record);
 });
 
