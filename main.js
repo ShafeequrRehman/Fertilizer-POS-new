@@ -1021,8 +1021,9 @@ if (!gotTheLock) {
           h(Text, null, `${numberToWordsPdf(billTotal)} ONLY.`)
         ),
         h(View, { style: receiptStyles.footer },
-          settings?.receiptPaymentInfo ? h(Text, { style: receiptStyles.small }, settings.receiptPaymentInfo) : null,
-          settings?.receiptFooterMessage ? h(Text, { style: receiptStyles.bold }, settings.receiptFooterMessage) : null
+          settings?.receiptFooterMessage ? h(Text, { style: receiptStyles.bold }, settings.receiptFooterMessage) : null,
+          h(Text, null, "Haider's Creation"),
+          h(Text, null, "0315-0707167")
         )
       )
     );
@@ -1113,7 +1114,7 @@ if (!gotTheLock) {
     if (Math.max(total - (amountTendered ?? total), 0) > 0) h += 14;
     if (Number(orderData?.previousDues) > 0) h += 28;
     h += 40; // In Words block
-    h += 40; // footer
+    h += 50; // footer (optional footer message + fixed "Haider's Creation" / phone lines)
     return h;
   }
 

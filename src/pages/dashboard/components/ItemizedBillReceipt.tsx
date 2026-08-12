@@ -165,8 +165,9 @@ export default function ItemizedBillReceipt({
 
       {/* Footer */}
       <div className="text-center mt-4 mb-2">
-        {settings.receiptPaymentInfo && <p className="text-[11px]">{settings.receiptPaymentInfo}</p>}
-        {settings.receiptFooterMessage && <p className="font-bold mt-1">{settings.receiptFooterMessage}</p>}
+        {settings.receiptFooterMessage && <p className="font-bold">{settings.receiptFooterMessage}</p>}
+        <p>Haider&apos;s Creation</p>
+        <p>0315-0707167</p>
       </div>
     </div>
   );
