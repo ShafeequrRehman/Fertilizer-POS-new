@@ -44,6 +44,20 @@ const orderSchema = new mongoose.Schema(
     clientSyncId: { type: String, default: "", index: true },
     items: { type: [orderItemSchema], default: [] },
     dailyOrderNumber: { type: Number, default: 1 },
+    // Permanent, shop-lifetime running count - printed on receipts as
+    // "Tr#" (see ItemizedBillReceipt.tsx/KitchenKotReceipt.tsx and their
+    // main.js react-pdf counterparts). Unlike dailyOrderNumber above (which
+    // resets to 1 every time the shop opens a new session/shift),
+    // shopSequenceNumber NEVER resets - it starts at 1 on this shop's very
+    // first order ever and keeps counting up for the life of the shop, so
+    // it doubles as a true all-time order count. Allocated from
+    // Shop.orderSequenceCounter - see orderController.js's createOrder/
+    // importOfflineOrders for the same requested-number-first-else-$inc
+    // pattern already used for dailyOrderNumber (honoring a number the
+    // till's Local Hub already reserved and printed offline, instead of
+    // blindly reassigning one at sync time). null on orders created before
+    // this field existed - never backfilled.
+    shopSequenceNumber: { type: Number, default: null },
     subtotal: { type: Number, default: 0 },
     tax: { type: Number, default: 0 },
     total: { type: Number, default: 0 },

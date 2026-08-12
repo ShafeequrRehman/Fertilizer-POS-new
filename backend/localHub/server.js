@@ -43,7 +43,16 @@ const app = express();
 // LAN-only, pairing-key-gated server, not a public one, so there's no
 // meaningful origin to restrict to.
 app.use(cors());
-app.use(express.json());
+// Default express.json() body limit is 100kb - fine for every other route
+// here (pairing, single-order queue/edit payloads), but /orders-cache
+// pushes this shop's ENTIRE recent cloud order history down for offline
+// caching (see orderCache.js) and blows straight through that once a shop
+// has any real order volume, failing with a 500 on every single push
+// (see the error handler below - it doesn't distinguish PayloadTooLarge's
+// real 413 from anything else). Everything through this app is loopback or
+// LAN-only traffic between this till and its own paired phones, so there's
+// no meaningful cost to allowing a much larger body.
+app.use(express.json({ limit: "50mb" }));
 
 function isLoopback(req) {
   const ip = req.socket.remoteAddress || "";
@@ -165,6 +174,13 @@ app.post("/orders/reserve-number", requirePairingKey, (req, res) => {
   res.json({ number: localOrders.reserveNextNumber() });
 });
 
+// Tr# / shopSequenceNumber - the shop's permanent, never-resetting order
+// count (see localOrders.js's own comment on nextLifetimeNumber). Same
+// reserve-before-placing-online pattern as reserve-number above.
+app.post("/orders/reserve-lifetime-number", requirePairingKey, (req, res) => {
+  res.json({ number: localOrders.reserveNextLifetimeNumber() });
+});
+
 app.get("/orders/all", requirePairingKey, (req, res) => {
   res.json(localOrders.listAll());
 });
@@ -245,6 +261,16 @@ app.post("/order-counter/reset", requireLoopback, (req, res) => {
   res.json({ ok: true });
 });
 
+// Keeps this till's local Tr#/lifetime counter in step with the cloud's
+// real Shop.orderSequenceCounter - see localOrders.js's syncLifetimeCounter.
+// Loopback-only, same reasoning as order-counter-sync above. No reset
+// endpoint equivalent - this counter is never reset by anything.
+app.post("/lifetime-counter-sync", requireLoopback, (req, res) => {
+  const { value } = req.body || {};
+  const result = localOrders.syncLifetimeCounter(value);
+  res.json(result);
+});
+
 app.get("/sync/status", requirePairingKey, (req, res) => {
   const all = localOrders.listAll();
   const pending = all.filter((order) => order.status === "pending");
@@ -261,7 +287,11 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
 
 app.use((err, req, res, next) => {
   console.error("[localHub] error:", err);
-  res.status(500).json({ message: err.message || "Local hub error" });
+  // Preserve a real status (e.g. body-parser's 413 PayloadTooLarge) instead
+  // of always reporting 500 - makes a future version of this exact bug
+  // class (see express.json() limit above) show up correctly in devtools
+  // instead of looking like a generic server error.
+  res.status(err.status || err.statusCode || 500).json({ message: err.message || "Local hub error" });
 });
 
 let serverInstance = null;

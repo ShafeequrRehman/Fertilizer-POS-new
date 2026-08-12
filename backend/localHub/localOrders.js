@@ -131,11 +131,45 @@ function syncOrderCounter(sessionId, cloudCounter) {
   return { sessionId: sessionId || null, value: cloudValue };
 }
 
+// --- Tr# / shopSequenceNumber - the shop's permanent, never-resetting
+// order count (backend/models/Order.js's shopSequenceNumber /
+// backend/models/Shop.js's orderSequenceCounter) ---------------------------
+//
+// Completely separate counter from COUNTER_KEY above. It never resets (no
+// resetCounter equivalent, no resetAt/sessionId scoping) - it starts at 1
+// on this shop's very first order ever and keeps counting up for the life
+// of the shop, printed on receipts as "Tr#".
+const LIFETIME_COUNTER_KEY = "lifetimeCounter";
+const DEFAULT_LIFETIME_COUNTER = { value: 0 };
+
+function nextLifetimeNumber() {
+  const counter = store.load(LIFETIME_COUNTER_KEY, DEFAULT_LIFETIME_COUNTER);
+  // Same defensive floor as nextLocalOrderNumber above, but against ALL
+  // currently-unsynced queued orders regardless of when they were queued -
+  // there's no resetAt cutoff here since this counter is never reset.
+  const highestQueued = readOrders()
+    .filter((order) => order.status !== "synced")
+    .reduce((max, order) => Math.max(max, order.shopSequenceNumber || 0), 0);
+  const next = Math.max(counter.value, highestQueued) + 1;
+  store.save(LIFETIME_COUNTER_KEY, { value: next });
+  return next;
+}
+
+// Same reasoning as syncOrderCounter below - always adopts the cloud's
+// value directly, since this only ever runs right after a genuinely live,
+// successful cloud call. No resetAt to preserve here, unlike syncOrderCounter.
+function syncLifetimeCounter(cloudCounter) {
+  const cloudValue = Number(cloudCounter) || 0;
+  store.save(LIFETIME_COUNTER_KEY, { value: cloudValue });
+  return { value: cloudValue };
+}
+
 function queueOrder(payload, actor, printFlags) {
   const orders = readOrders();
   const record = {
     id: crypto.randomUUID(),
     localOrderNumber: nextLocalOrderNumber(),
+    shopSequenceNumber: nextLifetimeNumber(),
     payload,
     actor: actor || null, // { name, deviceLabel } - self-reported, display only
     status: "pending", // pending | synced | failed
@@ -370,6 +404,8 @@ module.exports = {
   // the order ends up going through the cloud immediately or the local
   // queue - both paths pull from this exact same counter.
   reserveNextNumber: nextLocalOrderNumber,
+  reserveNextLifetimeNumber: nextLifetimeNumber,
+  syncLifetimeCounter,
   STALE_AFTER_MS,
   updateQueuedOrder,
   queueOrderEdit,

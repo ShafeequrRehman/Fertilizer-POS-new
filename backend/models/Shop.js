@@ -50,6 +50,14 @@ const shopSchema = new mongoose.Schema(
     // concrete array. This only hides pages from the sidebar; it is not a
     // backend access-control boundary.
     enabledPages: { type: [String], default: null },
+    // Permanent, all-time order counter for this shop - printed on receipts
+    // as "Tr#" (see models/Order.js's shopSequenceNumber). Deliberately
+    // lives here rather than on ShopSession (whose own orderCounter resets
+    // every shift by design) since the whole point is that this one never
+    // resets, ever. Atomically incremented via $inc in
+    // orderController.createOrder/importOfflineOrders, same pattern as
+    // ShopSession.orderCounter.
+    orderSequenceCounter: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

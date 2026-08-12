@@ -236,6 +236,40 @@ exports.createOrder = async (req, res) => {
       dailyOrderNumber = openSession.orderCounter;
     }
 
+    // Tr# (see models/Order.js's shopSequenceNumber) - a completely
+    // separate, never-resetting counter from dailyOrderNumber above. Same
+    // requested-number-first-else-$inc pattern and the same reason: the
+    // till's Local Hub reserves this number before ever getting here too
+    // (see POSPage.tsx), so a number it already printed offline must
+    // become permanent rather than silently reassigned. The collision
+    // check is shop-wide (no session/date bound), matching the fact that
+    // this counter itself never resets.
+    const requestedSequenceNumber = Number(payload.requestedShopSequenceNumber) || 0;
+    let shopSequenceNumber;
+
+    if (requestedSequenceNumber > 0) {
+      const sequenceCollision = await Order.findOne({
+        ...buildShopScope(req),
+        shopSequenceNumber: requestedSequenceNumber,
+      });
+      if (!sequenceCollision) {
+        await Shop.findOneAndUpdate(
+          { _id: req.user.shopId },
+          { $max: { orderSequenceCounter: requestedSequenceNumber } }
+        );
+        shopSequenceNumber = requestedSequenceNumber;
+      }
+    }
+
+    if (shopSequenceNumber === undefined) {
+      const updatedShop = await Shop.findOneAndUpdate(
+        { _id: req.user.shopId },
+        { $inc: { orderSequenceCounter: 1 } },
+        { new: true }
+      );
+      shopSequenceNumber = updatedShop ? updatedShop.orderSequenceCounter : 1;
+    }
+
     // Idempotency guard: the desktop till races this call against a short
     // timeout and falls back to queuing the order in its offline Local Hub
     // if it doesn't hear back in time (see POSPage.tsx's handleSaveOrder) -
@@ -265,6 +299,7 @@ exports.createOrder = async (req, res) => {
       total: totals.total,
       discount: buildDiscountRecord(payload.discount, totals.discountAmount),
       dailyOrderNumber,
+      shopSequenceNumber,
       clientSyncId: payload.clientSyncId || payload.orderId || "",
       paidAmount: payload.paidAmount || 0,
       remainingAmount: typeof payload.remainingAmount === "number" ? payload.remainingAmount : totals.total,
@@ -441,6 +476,37 @@ exports.importOfflineOrders = async (req, res) => {
           dailyOrderNumber = openSession.orderCounter;
         }
 
+        // Tr# (see createOrder's own comment above and models/Order.js's
+        // shopSequenceNumber) - same requested-first-else-$inc pattern,
+        // honoring the number the till already reserved and potentially
+        // printed offline via entry.localSequenceNumber. Shop-wide
+        // collision check since this counter never resets per session.
+        const requestedSequenceNumber = Number(entry.localSequenceNumber) || 0;
+        let shopSequenceNumber;
+
+        if (requestedSequenceNumber > 0) {
+          const sequenceCollision = await Order.findOne({
+            ...buildShopScope(req),
+            shopSequenceNumber: requestedSequenceNumber,
+          });
+          if (!sequenceCollision) {
+            await Shop.findOneAndUpdate(
+              { _id: req.user.shopId },
+              { $max: { orderSequenceCounter: requestedSequenceNumber } }
+            );
+            shopSequenceNumber = requestedSequenceNumber;
+          }
+        }
+
+        if (shopSequenceNumber === undefined) {
+          const updatedShop = await Shop.findOneAndUpdate(
+            { _id: req.user.shopId },
+            { $inc: { orderSequenceCounter: 1 } },
+            { new: true }
+          );
+          shopSequenceNumber = updatedShop ? updatedShop.orderSequenceCounter : 1;
+        }
+
         const totals = recalculateTotals(payload.items || [], payload.discount);
 
         const order = await Order.create({
@@ -452,6 +518,7 @@ exports.importOfflineOrders = async (req, res) => {
           total: totals.total,
           discount: buildDiscountRecord(payload.discount, totals.discountAmount),
           dailyOrderNumber,
+          shopSequenceNumber,
           clientSyncId,
           paidAmount: payload.paidAmount || 0,
           remainingAmount: typeof payload.remainingAmount === "number" ? payload.remainingAmount : totals.total,
