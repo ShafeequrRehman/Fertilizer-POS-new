@@ -343,13 +343,21 @@ export default function SalesPage() {
       try {
         receiptOrder = await claimReceiptPrint(updated.id);
       } catch (err) {
-        if (!(err instanceof ApiError) || err.status !== 409) {
+        const already409 = err instanceof ApiError && err.status === 409;
+        if (!already409) {
           console.error('Receipt print claim failed:', err);
         }
-        // Either already printed elsewhere, or the claim itself failed - in
-        // either case DashboardShell's ReceiptPrintWatcher will pick this
-        // order up and print it within a few seconds anyway, so there is
-        // no local fallback here (avoids risking a duplicate).
+        // A 409 here means customerReceiptPrintedAt was already non-null -
+        // most commonly a TakeAway order that already printed its receipt
+        // at placement (POSPage.tsx), which is expected and fine to stay
+        // silent about. Anything else (a genuine claim failure) is
+        // surfaced - previously this was swallowed into a console.error
+        // only, which made a real failure here look identical to "printed
+        // fine", with nothing telling the cashier the receipt never came
+        // out.
+        if (!already409) {
+          setStatus({ tone: 'error', text: `Could not print the receipt: ${err instanceof Error ? err.message : 'claim failed'}. Use the printer icon to print it manually.` });
+        }
         return updated;
       }
     } else {
@@ -401,10 +409,32 @@ export default function SalesPage() {
         const kitchenReceiptData = { ...updated, items: kitchenUpdateItems || [] };
         const receiptData = targetPrintType === 'cashier' ? { ...receiptOrder, previousDues: customerDue } : kitchenReceiptData;
 
+        // main.js's print handlers never reject - a real failure (bad
+        // printer name, react-pdf render error, etc.) comes back as
+        // { success: false, error }, not a thrown/rejected promise - so a
+        // bare .catch() here was never actually seeing those failures.
+        // Checking result.success explicitly is what surfaces a genuine
+        // print failure to the cashier instead of it looking identical to
+        // a successful, silent print.
+        function reportPrintResult(promise: Promise<unknown>, label: string) {
+          promise
+            .then((result) => {
+              const outcome = result as { success?: boolean; error?: string } | undefined;
+              if (outcome && outcome.success === false) {
+                console.error(`${label} print failed:`, outcome.error);
+                setStatus({ tone: 'error', text: `${label} did not print: ${outcome.error || 'unknown error'}.` });
+              }
+            })
+            .catch((err) => {
+              console.error(`${label} print IPC call failed:`, err);
+              setStatus({ tone: 'error', text: `${label} did not print - the print request itself failed.` });
+            });
+        }
+
         if (targetPrintType === 'cashier' && settings.counterPrinter) {
-          ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings).catch(console.error);
+          reportPrintResult(ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings), 'Cashier receipt');
         } else if (targetPrintType === 'kitchen' && settings.kitchenPrinter) {
-          ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+          reportPrintResult(ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, settings.kitchenPrinter, printLogo, settings), 'Kitchen ticket');
         } else {
           setPrintReadyUrl(printPageUrl(targetPrintType));
         }
