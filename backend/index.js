@@ -45,6 +45,7 @@ const purchaseRoutes = require("./routes/purchaseRoutes");
 const expenseRoutes = require("./routes/expenseRoutes");
 const whatsappRoutes = require("./routes/whatsappRoutes");
 const printerRoutes = require("./routes/printerRoutes");
+const appVersionRoutes = require("./routes/appVersionRoutes");
 
 const app = express();
 
@@ -62,6 +63,19 @@ app.get("/api/health", (req, res) => {
   const status = connectivityMonitor.getStatus();
   res.status(status.isOnline ? 200 : 503).json({ ok: status.isOnline, dbConnected: status.isOnline, lastCheckedAt: status.lastCheckedAt, time: Date.now() });
 });
+
+// Mobile app-update check (see routes/appVersionRoutes.js) - mounted here,
+// same as /api/health above, so it works even when MongoDB Atlas is
+// unreachable and without needing a logged-in session (a phone should be
+// able to tell it needs an update before it can even log in).
+app.use("/api/app-version", appVersionRoutes);
+
+// Static hosting for built pos-mobile APKs - drop a new build into
+// backend/public/apk/ and point `npm run set-app-version` at
+// /apk/<filename> (see backend/scripts/setAppVersion.js). No auth - the
+// file itself isn't sensitive, and a phone needs to download it before it
+// can log in.
+app.use("/apk", express.static(path.join(__dirname, "public", "apk")));
 
 // TEMPORARY DEBUG LOGGING - proves whether a request from the frontend
 // ever actually reaches this Express process at all. Remove once the
