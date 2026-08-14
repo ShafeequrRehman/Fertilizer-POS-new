@@ -17,6 +17,7 @@ const {
   claimKitchenUpdatePrint,
   importOfflineOrders,
   importOfflineOrderUpdates,
+  getOccupiedDineInTables,
 } = require("../controllers/orderController");
 
 const router = express.Router();
@@ -36,6 +37,7 @@ router.get("/pending/:phone", checkPendingOrder);
 router.get("/kitchen/unprinted", getUnprintedKitchenOrders);
 router.get("/receipts/unprinted", getUnprintedReceiptOrders);
 router.get("/kitchen-updates/unprinted", getUnprintedKitchenUpdateOrders);
+router.get("/dinein/occupied-tables", getOccupiedDineInTables);
 router.get("/:id", getOrder);
 router.patch("/:id", updateOrder);
 router.patch("/:id/claim-kitchen-print", claimKitchenPrint);

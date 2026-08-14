@@ -578,6 +578,35 @@ exports.importOfflineOrders = async (req, res) => {
 // without the phone needing its own Bluetooth printer. Cancelled orders are
 // excluded (nothing to cook); oldest first so tickets come out in the order
 // they were actually placed.
+// GET /api/orders/dinein/occupied-tables
+// Deliberately separate from getOrders above (and its date/since bound) -
+// a DineIn table needs to stay marked "occupied" for as long as its order
+// is still pending, even if that order was placed days ago and just never
+// got completed/cancelled (see POSPage.tsx's occupiedTables check, which
+// blocks a table from being picked for a brand-new order while it's
+// already tied to one). Bounding this by date the way getOrders does would
+// silently let a stale-but-still-open old order's table look "free"
+// again, which is exactly the double-booking this feature exists to
+// prevent. Safe to leave unbounded regardless of a shop's order history
+// size: a "pending DineIn order" count can never realistically exceed the
+// shop's own physical table count, so this result set is always small.
+exports.getOccupiedDineInTables = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      ...buildShopScope(req),
+      orderType: "DineIn",
+      status: "pending",
+      table: { $nin: [null, ""] },
+    })
+      .select("table")
+      .lean();
+    const tables = Array.from(new Set(orders.map((order) => order.table).filter(Boolean)));
+    res.json({ tables });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 exports.getUnprintedKitchenOrders = async (req, res) => {
   try {
     const orders = await Order.find({
@@ -765,6 +794,15 @@ async function applyOrderPatch(order, patch, req, options) {
     // below) never passes this - a live edit always needs the normal
     // claim-and-print (or watcher) flow.
     const suppressKitchenUpdate = !!(options && options.suppressKitchenUpdate);
+    // Set by importOfflineOrderUpdates when the till already printed the
+    // customer/cashier receipt for this exact completeAndSettle, offline,
+    // the instant the order was completed (DineIn/Delivery print their
+    // receipt at completion, not placement - see SalesPage.tsx's
+    // saveUpdate). Marks the order as already-printed so
+    // DashboardShell.tsx's ReceiptPrintWatcher never prints it a second
+    // time once this edit syncs - same reasoning as suppressKitchenUpdate
+    // above, just for the receipt claim instead of pendingKitchenUpdate.
+    const receiptPrinted = !!(options && options.receiptPrinted);
 
     if (patch.action === "addItems" && Array.isArray(patch.items)) {
       // Every item in an addItems payload IS the delta by definition - the
@@ -867,6 +905,7 @@ async function applyOrderPatch(order, patch, req, options) {
       order.status = "completed";
       if (typeof patch.paymentMethod === "string") order.paymentMethod = patch.paymentMethod;
       if (typeof patch.note === "string") order.note = patch.note;
+      if (receiptPrinted) order.customerReceiptPrintedAt = new Date();
       order.version = Number(order.version || 0) + 1;
       await order.save();
       return order;
@@ -959,7 +998,7 @@ exports.importOfflineOrderUpdates = async (req, res) => {
     const failed = [];
 
     for (const entry of ordered) {
-      const { localEditId, orderId, payload, kitchenPrinted } = entry || {};
+      const { localEditId, orderId, payload, kitchenPrinted, receiptPrinted } = entry || {};
       try {
         if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
           skipped.push({ localEditId, reason: "invalid_order_id" });
@@ -970,7 +1009,7 @@ exports.importOfflineOrderUpdates = async (req, res) => {
           skipped.push({ localEditId, orderId, reason: "order_not_found" });
           continue;
         }
-        await applyOrderPatch(order, payload || {}, req, { suppressKitchenUpdate: !!kitchenPrinted });
+        await applyOrderPatch(order, payload || {}, req, { suppressKitchenUpdate: !!kitchenPrinted, receiptPrinted: !!receiptPrinted });
         applied.push({ localEditId, orderId });
       } catch (entryError) {
         console.error("Failed to import one offline order edit:", entryError);

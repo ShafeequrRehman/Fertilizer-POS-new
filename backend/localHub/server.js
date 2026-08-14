@@ -5,6 +5,9 @@ const pairing = require("./pairing");
 const localOrders = require("./localOrders");
 const referenceData = require("./referenceData");
 const orderCache = require("./orderCache");
+const localStaff = require("./localStaff");
+const employeesCache = require("./employeesCache");
+const occupiedTablesCache = require("./occupiedTablesCache");
 
 // The Local Hub: a small, self-contained Express server that runs inside
 // the desktop (Electron) app ALWAYS, independent of whether this till
@@ -150,6 +153,30 @@ app.get("/orders-cache", requirePairingKey, (req, res) => {
   res.json(orderCache.get());
 });
 
+// Manage Staff's own full employee-list cache - see employeesCache.js for
+// why this is separate from /reference-data's lightweight `staff` (waiter
+// dropdown) field. Same push/read shape as /orders-cache above.
+app.post("/employees-cache", requireLoopback, (req, res) => {
+  const snapshot = employeesCache.set(req.body?.employees || []);
+  res.json(snapshot);
+});
+
+app.get("/employees-cache", requirePairingKey, (req, res) => {
+  res.json(employeesCache.get());
+});
+
+// DineIn table-occupancy cache - see occupiedTablesCache.js. Same
+// push/read shape as /orders-cache and /employees-cache above, but
+// deliberately never date-bounded.
+app.post("/occupied-tables-cache", requireLoopback, (req, res) => {
+  const snapshot = occupiedTablesCache.set(req.body?.tables || []);
+  res.json(snapshot);
+});
+
+app.get("/occupied-tables-cache", requirePairingKey, (req, res) => {
+  res.json(occupiedTablesCache.get());
+});
+
 // Queue an order locally - called by a paired phone's Checkout screen, or
 // by the till's own POS page, whenever the cloud is unreachable.
 app.post("/orders", requirePairingKey, (req, res) => {
@@ -208,7 +235,7 @@ app.post("/orders/:id/fail", requirePairingKey, (req, res) => {
 // :localId here is that uuid with the "local-" prefix already stripped by
 // the caller.
 app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
-  const updated = localOrders.updateQueuedOrder(req.params.localId, req.body?.payload || {});
+  const updated = localOrders.updateQueuedOrder(req.params.localId, req.body?.payload || {}, !!req.body?.receiptPrinted);
   if (!updated) {
     return res.status(404).json({ message: "No such queued order (it may have already synced)." });
   }
@@ -218,7 +245,7 @@ app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
 // Case 2: the order already has a real cloud _id - queue the edit for the
 // sync engine to replay against the real document.
 app.post("/orders/:orderId/edits", requirePairingKey, (req, res) => {
-  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null, !!req.body?.kitchenPrinted);
+  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null, !!req.body?.kitchenPrinted, !!req.body?.receiptPrinted);
   res.status(201).json(record);
 });
 
@@ -234,6 +261,98 @@ app.post("/orders/edits/ack", requirePairingKey, (req, res) => {
 
 app.post("/orders/edits/:id/fail", requirePairingKey, (req, res) => {
   const changed = localOrders.markEditFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// --- Offline Manage Staff - see localStaff.js for the full design. Same
+// "queue it, sync engine replays it for real" shape as orders above, split
+// the same way: a brand-new staff member has no real cloud _id yet
+// (CREATES), while editing/removing one that already exists on the cloud
+// gets queued separately (EDITS/DELETES) to replay against the real
+// document once synced.
+
+app.post("/employees", requirePairingKey, (req, res) => {
+  const payload = req.body?.payload;
+  if (!payload || typeof payload !== "object") {
+    return res.status(400).json({ message: "payload is required", reason: "validation_error" });
+  }
+  const record = localStaff.queueEmployeeCreate(payload);
+  res.status(201).json(record);
+});
+
+app.get("/employees/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingCreates());
+});
+
+app.post("/employees/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markCreatesSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markCreateFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// Case 1: the staff member being edited/removed is itself still only
+// queued locally (its frontend id looks like "local-<uuid>", stripped by
+// the caller before it reaches here - see offline-staff-helpers.ts).
+app.patch("/employees/local/:localId", requirePairingKey, (req, res) => {
+  const updated = localStaff.updateQueuedEmployee(req.params.localId, req.body?.payload || {});
+  if (!updated) {
+    return res.status(404).json({ message: "No such queued staff member (it may have already synced)." });
+  }
+  res.json(updated);
+});
+
+app.delete("/employees/local/:localId", requirePairingKey, (req, res) => {
+  const removed = localStaff.deleteQueuedEmployee(req.params.localId);
+  if (!removed) {
+    return res.status(404).json({ message: "No such queued staff member (it may have already synced)." });
+  }
+  res.json({ ok: true });
+});
+
+// Case 2: the staff member already has a real cloud _id - queue the change
+// for the sync engine to replay against the real document.
+app.post("/employees/:employeeId/edits", requirePairingKey, (req, res) => {
+  const record = localStaff.queueEmployeeEdit(req.params.employeeId, req.body?.payload || {});
+  res.status(201).json(record);
+});
+
+app.get("/employees/edits/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingEdits());
+});
+
+app.post("/employees/edits/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markEditsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/edits/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markEditFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+app.post("/employees/:employeeId/delete", requirePairingKey, (req, res) => {
+  const record = localStaff.queueEmployeeDelete(req.params.employeeId);
+  res.status(201).json(record);
+});
+
+app.get("/employees/deletes/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingDeletes());
+});
+
+app.post("/employees/deletes/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markDeletesSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/deletes/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markDeleteFailed(req.params.id, req.body?.error);
   res.json({ ok: changed });
 });
 
@@ -276,12 +395,28 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
   const pending = all.filter((order) => order.status === "pending");
   const failed = all.filter((order) => order.status === "failed");
   const pendingEdits = localOrders.listPendingEdits();
+
+  const staffCreates = localStaff.listAllCreates();
+  const pendingStaffCreates = staffCreates.filter((entry) => entry.status === "pending");
+  const failedStaffCreates = staffCreates.filter((entry) => entry.status === "failed");
+  const pendingStaffEdits = localStaff.listPendingEdits();
+  const pendingStaffDeletes = localStaff.listPendingDeletes();
+
   res.json({
     pendingCount: pending.length,
     failedCount: failed.length,
     totalQueued: all.length,
     pendingEditCount: pendingEdits.filter((edit) => edit.status === "pending").length,
     failedEditCount: pendingEdits.filter((edit) => edit.status === "failed").length,
+    // Offline Manage Staff - see localStaff.js. Folded into the same
+    // sync-status payload OfflineSyncPage.tsx already reads for orders, so
+    // one screen shows everything still waiting to reach the cloud.
+    pendingStaffCount: pendingStaffCreates.length,
+    failedStaffCount: failedStaffCreates.length,
+    pendingStaffEditCount: pendingStaffEdits.filter((entry) => entry.status === "pending").length,
+    failedStaffEditCount: pendingStaffEdits.filter((entry) => entry.status === "failed").length,
+    pendingStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "pending").length,
+    failedStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "failed").length,
   });
 });
 

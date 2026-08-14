@@ -272,12 +272,21 @@ function recalculateTotals(items, discount) {
   return { subtotal, tax: 0, total, discountAmount };
 }
 
-function updateQueuedOrder(localId, patch) {
+function updateQueuedOrder(localId, patch, receiptPrinted) {
   const orders = readOrders();
   const index = orders.findIndex((entry) => entry.id === localId);
   if (index === -1) return null;
   const record = orders[index];
   if (record.status === "synced") return null;
+
+  // Same idea as queueOrder's own receiptPrinted flag, but for an order
+  // that already printed its ORIGINAL kitchen ticket (or, for TakeAway,
+  // its receipt too) at placement and is only now - still offline - being
+  // completed (see SalesPage.tsx's saveUpdate). OR'd rather than
+  // overwritten so a TakeAway order that already printed at placement
+  // never loses that fact just because this particular edit wasn't the
+  // one that triggered a print.
+  if (receiptPrinted) record.receiptPrinted = true;
 
   const payload = { ...record.payload };
   const touchesItems = (patch.action === "addItems" || patch.action === "replaceItems") && Array.isArray(patch.items);
@@ -330,7 +339,7 @@ function writeEdits(edits) {
   store.save(EDITS_KEY, edits);
 }
 
-function queueOrderEdit(orderId, patch, actor, kitchenPrinted) {
+function queueOrderEdit(orderId, patch, actor, kitchenPrinted, receiptPrinted) {
   const edits = readEdits();
   const record = {
     id: crypto.randomUUID(),
@@ -346,6 +355,12 @@ function queueOrderEdit(orderId, patch, actor, kitchenPrinted) {
     // offline-sync.ts's syncOrderEdits and consumed by
     // orderController.js's importOfflineOrderUpdates.
     kitchenPrinted: !!kitchenPrinted,
+    // Same idea, for the customer/cashier receipt - set when this edit IS
+    // a completeAndSettle that already printed the receipt offline (see
+    // SalesPage.tsx's saveUpdate), so importOfflineOrderUpdates can mark
+    // customerReceiptPrintedAt and DashboardShell.tsx's ReceiptPrintWatcher
+    // never prints it a second time once this edit replays for real.
+    receiptPrinted: !!receiptPrinted,
   };
   edits.push(record);
   writeEdits(edits);
