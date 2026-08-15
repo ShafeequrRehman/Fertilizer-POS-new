@@ -17,6 +17,7 @@ const {
   claimKitchenUpdatePrint,
   importOfflineOrders,
   importOfflineOrderUpdates,
+  importOfflineCancellations,
   getOccupiedDineInTables,
 } = require("../controllers/orderController");
 
@@ -31,6 +32,7 @@ router.post("/", createOrder);
 // routes.
 router.post("/import-offline", importOfflineOrders);
 router.post("/import-offline-updates", importOfflineOrderUpdates);
+router.post("/import-offline-cancellations", importOfflineCancellations);
 router.get("/pending/:phone", checkPendingOrder);
 // Must come before the generic "/:id" GET below, or Express would try to
 // treat "kitchen"/"receipts"/"kitchen-updates" as an order id.

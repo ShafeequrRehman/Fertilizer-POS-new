@@ -124,6 +124,18 @@ function buildShopScope(req) {
 exports.getOrders = async (req, res) => {
   try {
     const query = buildShopScope(req);
+    // Optional status filter, most importantly `status=pending` combined
+    // with NO date/since - a still-pending order (an unpaid DineIn table,
+    // a Delivery that never got closed out) needs to stay findable no
+    // matter how old it is, same reasoning as getOccupiedDineInTables
+    // below: the result is bounded by how many orders are actually still
+    // open at once (small), not by the shop's total order history, so
+    // leaving it unbounded here is safe. Callers that also want a to
+    // date/since bound (e.g. "completed orders from the last 14 days")
+    // can still combine both params.
+    if (req.query.status) {
+      query.status = req.query.status;
+    }
     if (req.query.date) {
       const start = new Date(`${req.query.date}T00:00:00.000Z`);
       const end = new Date(`${req.query.date}T23:59:59.999Z`);
@@ -651,23 +663,24 @@ exports.claimKitchenPrint = async (req, res) => {
 
 // GET /api/orders/receipts/unprinted
 // Sibling to getUnprintedKitchenOrders above, for the customer-receipt side.
-// Two kinds of orders are candidates here: (1) TakeAway orders, printed the
-// moment they're placed (still pending) so the customer gets their receipt
-// right away, and (2) ANY order (DineIn/Delivery/TakeAway) that just
-// reached "completed" without a till already having claimed+printed it
-// locally - this is what makes completing an order from the mobile app
+// TakeAway only, and only once "completed" - the customer is right there
+// collecting their order at that point, so auto-printing makes sense; a
+// completed DineIn/Delivery order never auto-prints its receipt, here or
+// anywhere else (see SalesPage.tsx/RecordPage.tsx's completion flows) -
+// it's available on demand only, via the printer icon on the order detail
+// card. This is what makes completing a TakeAway order from the mobile app
 // (which has no printer of its own) result in the same receipt printing on
 // this till that completing it here directly would. SalesPage.tsx's own
-// completion flow claims the receipt itself the instant it completes an
-// order on this till, so a normal desktop completion never lingers here
-// long enough to double-print.
+// completion flow claims the receipt itself the instant it completes a
+// TakeAway order on this till, so a normal desktop completion never
+// lingers here long enough to double-print.
 exports.getUnprintedReceiptOrders = async (req, res) => {
   try {
     const orders = await Order.find({
       ...buildShopScope(req),
       customerReceiptPrintedAt: null,
-      status: { $ne: "cancelled" },
-      $or: [{ orderType: "TakeAway" }, { status: "completed" }],
+      status: "completed",
+      orderType: "TakeAway",
     }).sort({ createdAt: 1 });
     res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
   } catch (error) {
@@ -1023,52 +1036,110 @@ exports.importOfflineOrderUpdates = async (req, res) => {
   }
 };
 
-// POST /api/orders/:id/cancel  body: { key, reason? }
-// The only way an order's status can ever become "cancelled" (see the
-// block in updateOrder above). `key` is checked against the shop's
-// cancelOrderKeyHash (set by the Super Admin - see
+// Shared by the online POST /orders/:id/cancel handler below and the
+// offline bulk replay path (exports.importOfflineCancellations) - the
+// exact same "one real implementation, never a second copy that could
+// quietly drift" reasoning as applyOrderPatch above. `key` is checked
+// against the shop's cancelOrderKeyHash (set by the Super Admin - see
 // superAdminController.exports.createShop / resetCancelOrderKey) with
 // bcrypt.compare, exactly like a login password check. Never hardcoded,
-// never compared as plaintext, and scoped to this shop only.
+// never compared as plaintext, and scoped to this shop only. Throws an
+// Error with `.status` (and optional `.reason`) attached, same convention
+// as applyOrderPatch, so callers can distinguish e.g. "already cancelled"
+// from a genuine failure.
+async function cancelOrderCore(orderId, key, reason, req) {
+  if (!mongoose.Types.ObjectId.isValid(orderId)) {
+    throw Object.assign(new Error("Order not found"), { status: 404 });
+  }
+
+  const order = await Order.findOne({ _id: orderId, ...buildShopScope(req) });
+  if (!order) {
+    throw Object.assign(new Error("Order not found"), { status: 404 });
+  }
+  if (order.status === "cancelled") {
+    throw Object.assign(new Error("This order is already cancelled."), { status: 400, reason: "already_cancelled" });
+  }
+  if (!key) {
+    throw Object.assign(new Error("The shop's Cancel Order Key is required."), { status: 400 });
+  }
+
+  const shop = await Shop.findById(req.user.shopId).select("cancelOrderKeyHash").lean();
+  if (!shop || !shop.cancelOrderKeyHash) {
+    throw Object.assign(
+      new Error("No Cancel Order Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one."),
+      { status: 409 }
+    );
+  }
+
+  const matches = await bcrypt.compare(String(key), shop.cancelOrderKeyHash);
+  if (!matches) {
+    throw Object.assign(new Error("Incorrect Cancel Order Key."), { status: 401, reason: "wrong_key" });
+  }
+
+  const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
+
+  order.status = "cancelled";
+  order.cancelledAt = new Date();
+  order.cancelledBy = user?.name || user?.username || "";
+  order.cancelReason = reason || "No reason provided";
+  order.version = Number(order.version || 0) + 1;
+  await order.save();
+  return order;
+}
+
+// POST /api/orders/:id/cancel  body: { key, reason? }
+// The only way an order's status can ever become "cancelled" - see
+// cancelOrderCore above for the actual gate.
 exports.cancelOrder = async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    if (order.status === "cancelled") {
-      return res.status(400).json({ error: "This order is already cancelled." });
-    }
-
-    const { key, reason } = req.body;
-    if (!key) {
-      return res.status(400).json({ error: "The shop's Cancel Order Key is required." });
-    }
-
-    const shop = await Shop.findById(req.user.shopId).select("cancelOrderKeyHash").lean();
-    if (!shop || !shop.cancelOrderKeyHash) {
-      return res.status(409).json({ error: "No Cancel Order Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one." });
-    }
-
-    const matches = await bcrypt.compare(String(key), shop.cancelOrderKeyHash);
-    if (!matches) {
-      return res.status(401).json({ error: "Incorrect Cancel Order Key." });
-    }
-
-    const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
-
-    order.status = "cancelled";
-    order.cancelledAt = new Date();
-    order.cancelledBy = user?.name || user?.username || "";
-    order.cancelReason = reason || "No reason provided";
-    order.version = Number(order.version || 0) + 1;
-    await order.save();
-
+    const order = await cancelOrderCore(req.params.id, req.body?.key, req.body?.reason, req);
     res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message, reason: error.reason });
+    }
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// POST /api/orders/import-offline-cancellations
+// body: { cancellations: [{ localCancellationId, orderId, key, reason }] }
+// The Cancel-specific counterpart to importOfflineOrderUpdates above -
+// replays a Cancel Order made while offline (see CancelOrderModal.tsx +
+// backend/localHub/localOrders.js's queueOrderCancellation) against the
+// REAL, bcrypt-gated cancelOrderCore - deliberately never applyOrderPatch,
+// which rejects status:"cancelled" outright (see its own comment on why).
+// A wrong key comes back in `failed`, not `applied`: the till already
+// showed this order as cancelled the moment it was entered offline (see
+// CancelOrderModal.tsx), but that was only ever an optimistic guess, never
+// authoritative - the next fresh orders-cache pull corrects the display
+// back to whatever the cloud actually has once this fails.
+exports.importOfflineCancellations = async (req, res) => {
+  try {
+    const entries = Array.isArray(req.body?.cancellations) ? req.body.cancellations : [];
+    const applied = [];
+    const failed = [];
+
+    for (const entry of entries) {
+      const { localCancellationId, orderId, key, reason } = entry || {};
+      try {
+        const order = await cancelOrderCore(orderId, key, reason, req);
+        applied.push({ localCancellationId, orderId, id: String(order._id) });
+      } catch (entryError) {
+        if (entryError.reason === "already_cancelled") {
+          // Already in the state we wanted - most likely this exact
+          // cancellation already synced on an earlier attempt and this
+          // till just never got to ack it. Applied, not a failure to
+          // surface/retry.
+          applied.push({ localCancellationId, orderId });
+          continue;
+        }
+        console.error("Failed to import one offline order cancellation:", entryError);
+        failed.push({ localCancellationId, orderId, error: entryError.message, reason: entryError.reason });
+      }
+    }
+
+    res.json({ applied, failed });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

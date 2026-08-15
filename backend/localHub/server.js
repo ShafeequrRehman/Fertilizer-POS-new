@@ -264,6 +264,33 @@ app.post("/orders/edits/:id/fail", requirePairingKey, (req, res) => {
   res.json({ ok: changed });
 });
 
+// Cancelling an already-synced order while offline - see localOrders.js's
+// own "Cancelling an ALREADY-SYNCED order while offline" section for why
+// this is a completely separate queue from /orders/:orderId/edits above
+// (a cancellation needs the real Cancel Order Key verified against the
+// cloud, which this queue just carries until sync - see
+// CancelOrderModal.tsx and orderController.js's
+// POST /orders/import-offline-cancellations).
+app.post("/orders/:orderId/cancellations", requirePairingKey, (req, res) => {
+  const record = localOrders.queueOrderCancellation(req.params.orderId, req.body?.key, req.body?.reason, req.body?.actor || null);
+  res.status(201).json(record);
+});
+
+app.get("/orders/cancellations/pending", requirePairingKey, (req, res) => {
+  res.json(localOrders.listPendingCancellations());
+});
+
+app.post("/orders/cancellations/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localOrders.markCancellationsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/orders/cancellations/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localOrders.markCancellationFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
 // --- Offline Manage Staff - see localStaff.js for the full design. Same
 // "queue it, sync engine replays it for real" shape as orders above, split
 // the same way: a brand-new staff member has no real cloud _id yet
@@ -395,6 +422,7 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
   const pending = all.filter((order) => order.status === "pending");
   const failed = all.filter((order) => order.status === "failed");
   const pendingEdits = localOrders.listPendingEdits();
+  const pendingCancellations = localOrders.listPendingCancellations();
 
   const staffCreates = localStaff.listAllCreates();
   const pendingStaffCreates = staffCreates.filter((entry) => entry.status === "pending");
@@ -408,6 +436,10 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
     totalQueued: all.length,
     pendingEditCount: pendingEdits.filter((edit) => edit.status === "pending").length,
     failedEditCount: pendingEdits.filter((edit) => edit.status === "failed").length,
+    // Offline Cancel Order - see localOrders.js's "Cancelling an ALREADY-
+    // SYNCED order while offline" section.
+    pendingCancellationCount: pendingCancellations.filter((entry) => entry.status === "pending").length,
+    failedCancellationCount: pendingCancellations.filter((entry) => entry.status === "failed").length,
     // Offline Manage Staff - see localStaff.js. Folded into the same
     // sync-status payload OfflineSyncPage.tsx already reads for orders, so
     // one screen shows everything still waiting to reach the cloud.

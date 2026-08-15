@@ -315,7 +315,19 @@ function updateQueuedOrder(localId, patch, receiptPrinted) {
     if (typeof patch.paymentMethod === "string") payload.paymentMethod = patch.paymentMethod;
     if (typeof patch.note === "string") payload.note = patch.note;
   } else {
-    ["note", "waiter", "table", "address", "status", "paymentMethod"].forEach((field) => {
+    // cancelledAt/cancelledBy/cancelReason cover cancelling a STILL-LOCAL
+    // order offline (see CancelOrderModal.tsx) - safe to trust directly
+    // here, unlike an already-synced order's cancellation (see
+    // queueOrderCancellation below, which requires the real Cancel Order
+    // Key to be verified against the cloud once synced): this order has
+    // never existed anywhere but this till, so there's no shared/other-
+    // device state for a wrong key to have put at risk - it'll reach the
+    // cloud as a single, already-finished "create" (see
+    // orderController.js's importOfflineOrders, which never re-checks the
+    // key on a brand new order), the exact same trust model this till
+    // already has over every other field of an order that's solely its
+    // own responsibility until sync.
+    ["note", "waiter", "table", "address", "status", "paymentMethod", "cancelledAt", "cancelledBy", "cancelReason"].forEach((field) => {
       if (patch[field] !== undefined) payload[field] = patch[field];
     });
     if (typeof patch.paidAmount === "number") payload.paidAmount = patch.paidAmount;
@@ -397,6 +409,88 @@ function markEditFailed(id, errorMessage) {
   return true;
 }
 
+// --- Cancelling an ALREADY-SYNCED order while offline --------------------
+//
+// Deliberately NOT the same edit queue as above: a cancellation requires
+// the shop's real Cancel Order Key, checked against the cloud's bcrypt
+// hash (backend/controllers/orderController.js's exports.cancelOrder) -
+// the key is never shipped to the till, so there's nothing for THIS
+// process to verify it against right now. Instead, the entered key is
+// trusted immediately (the order shows cancelled here, and its kitchen
+// cancel ticket prints, right away - see CancelOrderModal.tsx), and gets
+// replayed for real against the actual gated endpoint once synced (see
+// POST /orders/import-offline-cancellations in orderController.js). If it
+// turns out the key was wrong, that replay fails and this becomes a
+// "failed" entry the shop owner needs to review (OfflineSyncPage.tsx) -
+// the order's local optimistic "cancelled" state then gets corrected back
+// to its real cloud status the next time this till pulls a fresh orders
+// cache, since nothing here is ever treated as more authoritative than
+// that.
+const CANCELLATIONS_KEY = "orderCancellations";
+
+function readCancellations() {
+  return store.load(CANCELLATIONS_KEY, []);
+}
+
+function writeCancellations(cancellations) {
+  store.save(CANCELLATIONS_KEY, cancellations);
+}
+
+function queueOrderCancellation(orderId, key, reason, actor) {
+  const cancellations = readCancellations();
+  const record = {
+    id: crypto.randomUUID(),
+    orderId,
+    key,
+    reason: reason || "",
+    actor: actor || null,
+    status: "pending", // pending | synced | failed
+    queuedAt: new Date().toISOString(),
+    syncedAt: null,
+    lastError: null,
+  };
+  cancellations.push(record);
+  writeCancellations(cancellations);
+  return record;
+}
+
+function listPendingCancellations() {
+  return readCancellations().filter((entry) => entry.status !== "synced");
+}
+
+// The plaintext key is only ever needed for the ONE real replay attempt -
+// cleared here regardless of outcome (success or failure) rather than left
+// sitting in this till's local storage indefinitely. A failed attempt
+// (most likely a wrong key) needs a fresh Cancel Order Key entry to retry
+// anyway, never a silent replay of the same value.
+function markCancellationsSynced(ids) {
+  const idSet = new Set(ids);
+  const cancellations = readCancellations();
+  let changed = false;
+  for (const entry of cancellations) {
+    if (idSet.has(entry.id) && entry.status !== "synced") {
+      entry.status = "synced";
+      entry.syncedAt = new Date().toISOString();
+      entry.lastError = null;
+      entry.key = null;
+      changed = true;
+    }
+  }
+  if (changed) writeCancellations(cancellations);
+  return changed;
+}
+
+function markCancellationFailed(id, errorMessage) {
+  const cancellations = readCancellations();
+  const entry = cancellations.find((item) => item.id === id);
+  if (!entry) return false;
+  entry.status = "failed";
+  entry.lastError = errorMessage || "Unknown error";
+  entry.key = null;
+  writeCancellations(cancellations);
+  return true;
+}
+
 // Pending orders older than this are dropped from "pending" counts shown
 // in the UI as stale-but-still-queued (not deleted - sync still retries
 // them) - purely so a till that's been offline for days doesn't show a
@@ -427,4 +521,8 @@ module.exports = {
   listPendingEdits,
   markEditsSynced,
   markEditFailed,
+  queueOrderCancellation,
+  listPendingCancellations,
+  markCancellationsSynced,
+  markCancellationFailed,
 };
