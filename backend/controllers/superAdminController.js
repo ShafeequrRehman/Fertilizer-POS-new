@@ -8,6 +8,12 @@ const Payment = require("../models/Payment");
 const Role = require("../models/Role");
 const SystemSettings = require("../models/SystemSettings");
 const { DEFAULT_ROLE_PRESETS } = require("../config/permissions");
+// requireLicenseValid caches its shop/license verdict for 30s per shop (see
+// that file's own comment) to keep it from adding two extra DB round trips
+// to nearly every request - every place below that changes a shop's status
+// or its license must drop that shop's cached entry immediately, or a
+// suspend/renew done here wouldn't actually take effect for up to 30s.
+const invalidateLicenseCache = require("../middleware/requireLicenseValid").invalidate;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -248,6 +254,7 @@ exports.deleteShop = async (req, res) => {
       License.deleteMany({ shopId: shop._id }),
       Shop.deleteOne({ _id: shop._id }),
     ]);
+    invalidateLicenseCache(shop._id);
 
     res.json({ message: "Shop and its accounts have been deleted. Business records (products, sales, etc.) were preserved." });
   } catch (error) {
@@ -267,6 +274,7 @@ exports.setShopStatus = async (req, res) => {
 
     shop.status = status;
     await shop.save();
+    invalidateLicenseCache(shop._id);
     res.json(shop);
   } catch (error) {
     res.status(500).json({ message: "Failed to update shop status", detail: error.message });
@@ -380,6 +388,7 @@ exports.extendLicense = async (req, res) => {
     });
 
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to extend license", detail: error.message });
@@ -418,6 +427,7 @@ exports.setLicenseExpiry = async (req, res) => {
     });
 
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to update license expiry", detail: error.message });
@@ -437,6 +447,7 @@ exports.setLicenseStatus = async (req, res) => {
 
     license.status = status;
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to update license status", detail: error.message });

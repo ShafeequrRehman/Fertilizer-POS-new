@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const dns = require("dns");
+const fs = require("fs");
 const { exec } = require("child_process");
 
 // Single database, reached directly: Express -> Mongoose -> MongoDB Atlas.
@@ -7,6 +8,25 @@ const { exec } = require("child_process");
 const mongoURI = process.env.MONGO_URI;
 
 const hasValidMongoURI = mongoURI && mongoURI !== "undefined" && mongoURI !== "null" && mongoURI.length > 10;
+
+// In a packaged Electron build there's no terminal attached to see
+// console.log output in (see main.js, which sets this env var to the same
+// desktop.log it writes its own runtime log to) - mirror every connect/
+// disconnect/retry message there too, so a connectivity problem is
+// actually diagnosable without running the app from a dev terminal first.
+// Falls back to a no-op outside Electron (dev via `node backend/index.js`,
+// where the console itself is already visible).
+function logConnectionEvent(message) {
+  console.log(message);
+  const logFile = process.env.POS_RUNTIME_LOG_FILE;
+  if (!logFile) return;
+  try {
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [db] ${message}\n`);
+  } catch {
+    // Best-effort only - never let logging itself take down the connection
+    // attempt it's trying to describe.
+  }
+}
 
 // ---------------------------------------------------------------------
 // Reliable DNS resolution, independent of whatever the OS/router/ISP's
@@ -144,15 +164,23 @@ async function attemptConnect(onConnected) {
 
   try {
     await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds
+      // Deliberately shorter than the frontend's own request timeout
+      // (AXIOS_REQUEST_TIMEOUT_MS in src/lib/api.ts, 8000ms) - this used to
+      // be 10000ms, which meant a query issued while Atlas was unreachable
+      // could still be "trying" past the point the frontend had already
+      // given up and shown a bare, generic "timeout of 8000ms exceeded"
+      // instead of ever getting a chance to surface this module's own
+      // clear "database unavailable" error (see index.js's readyState
+      // check) or logConnectionEvent's message below.
+      serverSelectionTimeoutMS: 6000,
       socketTimeoutMS: 45000,
     });
-    console.log("✅ MongoDB Atlas Connected");
+    logConnectionEvent("✅ MongoDB Atlas Connected");
     retryDelayMs = RETRY_DELAY_START_MS; // reset backoff for any future disconnect
     if (onConnected) onConnected();
   } catch (error) {
-    console.error(`❌ MongoDB Connection Error: ${error.message}`);
-    console.error(`⚠️ Retrying in ${Math.round(retryDelayMs / 1000)}s - the app stays open in the meantime and will connect automatically once reachable.`);
+    logConnectionEvent(`❌ MongoDB Connection Error: ${error.message}`);
+    logConnectionEvent(`⚠️ Retrying in ${Math.round(retryDelayMs / 1000)}s - the app stays open in the meantime and will connect automatically once reachable.`);
     scheduleRetry(onConnected);
   }
 }
@@ -163,6 +191,7 @@ async function attemptConnect(onConnected) {
 // the rare case that the driver gives up retrying entirely.
 mongoose.connection.on("disconnected", () => {
   if (!hasValidMongoURI) return;
+  logConnectionEvent("⚠️ MongoDB disconnected mid-session - retrying automatically...");
   scheduleRetry();
 });
 
