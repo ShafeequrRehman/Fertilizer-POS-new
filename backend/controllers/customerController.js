@@ -71,7 +71,18 @@ exports.getCustomerLedger = async (req, res) => {
     const scope = shopScope(req);
     const [customers, orders] = await Promise.all([
       Customer.find(scope).sort({ name: 1 }).lean(),
-      Order.find({ ...scope, "customer.phone": { $exists: true, $ne: "" } })
+      // Projected to just the fields this endpoint actually reads below -
+      // an unprojected find() here pulls every order's full `items` array
+      // and everything else across the shop's ENTIRE order history (this
+      // intentionally isn't date-bounded, since an old unpaid order must
+      // still count towards totalOrderBalance no matter how old it is), so
+      // on a shop with a large order history that was the main cost behind
+      // this endpoint occasionally being slow enough to hit the frontend's
+      // request timeout.
+      Order.find(
+        { ...scope, "customer.phone": { $exists: true, $ne: "" } },
+        "customer.phone dailyOrderNumber createdAt orderType status paymentMethod total paidAmount remainingAmount"
+      )
         .sort({ createdAt: -1 })
         .lean(),
     ]);
