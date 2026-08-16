@@ -78,20 +78,48 @@ function requirePairingKey(req, res, next) {
 }
 
 // Every non-internal, non-loopback IPv4 address this machine currently
-// has - a LAN can have more than one adapter (WiFi + Ethernet, or a VPN
-// adapter), so the Connect Devices page shows all of them and lets
-// whoever's pairing pick the one that actually matches their WiFi.
+// has - a LAN can have more than one adapter, and on Windows specifically
+// that's often NOT just "WiFi + Ethernet": Docker Desktop, WSL2, Hyper-V,
+// VMware/VirtualBox, and VPN clients (Tailscale, ZeroTier, work VPNs) all
+// install their own virtual adapter with its own private IP, and
+// os.networkInterfaces() returns all of them with no indication of which
+// one is the real WiFi. Real incident this fixes: a phone on the same
+// physical WiFi as the till still got "could not reach that till" every
+// time, because the till's QR code defaulted to ips[0] - whichever
+// adapter Windows happened to enumerate first - which was a Hyper-V
+// vEthernet adapter, not the WiFi card; the phone was never going to
+// reach that address no matter how correct the WiFi connection was.
+//
+// Sorted (not just listed) so the till's own Connect Devices page can
+// keep defaulting to ips[0] and have a real chance of it being right,
+// while still returning every candidate (each labeled with its adapter
+// name) so a still-wrong guess can be corrected by hand instead of by
+// trial and error.
+const VIRTUAL_ADAPTER_NAME_PATTERN = /vEthernet|Virtual|VMware|VirtualBox|Hyper-V|Docker|WSL|Tailscale|ZeroTier|Loopback|Bluetooth|Npcap|TAP|VPN/i;
+const PHYSICAL_ADAPTER_NAME_PATTERN = /Wi-?Fi|WLAN|Wireless|Ethernet/i;
+
+function scoreAdapterName(name) {
+  // Virtual is checked FIRST and deliberately - "vEthernet" (Hyper-V's own
+  // naming, exactly the adapter in the real incident this fixes) contains
+  // the substring "Ethernet", so checking the physical pattern first would
+  // wrongly score it as a real adapter every time.
+  if (VIRTUAL_ADAPTER_NAME_PATTERN.test(name)) return 0;
+  if (PHYSICAL_ADAPTER_NAME_PATTERN.test(name)) return 2;
+  return 1; // Unrecognized name - neither confidently real nor confidently virtual.
+}
+
 function listLanAddresses() {
   const interfaces = os.networkInterfaces();
-  const addresses = [];
-  for (const entries of Object.values(interfaces)) {
+  const candidates = [];
+  for (const [name, entries] of Object.entries(interfaces)) {
     for (const entry of entries || []) {
       if (entry.family === "IPv4" && !entry.internal) {
-        addresses.push(entry.address);
+        candidates.push({ address: entry.address, name, score: scoreAdapterName(name) });
       }
     }
   }
-  return addresses;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
 }
 
 app.get("/health", (req, res) => {
@@ -102,8 +130,18 @@ app.get("/health", (req, res) => {
 // render the QR code / manual pairing details. Loopback-only - this is
 // the one place the key itself is ever revealed.
 app.get("/pairing-info", requireLoopback, (req, res) => {
+  const candidates = listLanAddresses();
   res.json({
-    ips: listLanAddresses(),
+    // Kept as a plain string array for backward compatibility (older
+    // renderer builds, and anything that just wants "the addresses") -
+    // now sorted best-guess-first instead of whatever order the OS
+    // happened to enumerate adapters in.
+    ips: candidates.map((c) => c.address),
+    // Adapter name per address, so the Connect Devices page can label
+    // each option ("Wi-Fi", "vEthernet (WSL)", ...) instead of a bare IP
+    // list nobody can tell apart - see listLanAddresses' own comment for
+    // why that label is often the only way to tell which one is real.
+    interfaceNames: Object.fromEntries(candidates.map((c) => [c.address, c.name])),
     port: LOCAL_HUB_PORT,
     pairingKey: pairing.getOrCreatePairingKey(),
   });
