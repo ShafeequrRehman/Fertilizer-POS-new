@@ -17,6 +17,7 @@ router.get("/ledger", customerController.getCustomerLedger);
 router.get("/:phone/outstanding", customerController.getCustomerOutstanding);
 router.get("/", customerController.getAllCustomers);
 router.post("/", customerController.createCustomer);
+router.post("/:phone/settle-dues", customerController.settleCustomerDues);
 router.patch("/dues/:phone", customerController.updateCustomerDues);
 router.patch("/:id", customerController.updateCustomer);
 

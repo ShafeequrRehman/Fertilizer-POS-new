@@ -203,3 +203,76 @@ exports.updateCustomerDues = async (req, res) => {
 
   res.json(customer);
 };
+
+// POST /api/customers/:phone/settle-dues  body: { amount }
+// A real cash-in-hand payment against everything this customer owes -
+// unlike updateCustomerDues above (which only ever moves the manual
+// previousDues number and never touches an order), this is money actually
+// collected, so it has to land the same way completing an order's payment
+// does: the older lump-sum previousDues first, then this customer's
+// unpaid orders oldest-first, same distribution as completeAndSettle's own
+// cascade in orderController.js (kept deliberately identical so "pay
+// Rs500 off what they owe" behaves the same whether it's collected here or
+// alongside completing one of their orders). An order that reaches
+// remainingAmount 0 this way is marked "completed" the same way that
+// cascade already does - not a new kind of side effect, just the same one
+// reachable from a second place.
+exports.settleCustomerDues = async (req, res) => {
+  try {
+    const phone = req.params.phone;
+    const amount = Math.max(Number(req.body.amount) || 0, 0);
+    if (amount <= 0) {
+      return res.status(400).json({ message: "amount must be greater than 0", reason: "validation_error" });
+    }
+
+    const scope = shopScope(req);
+    const customer = await Customer.findOne({ phone, ...scope });
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    let remaining = amount;
+    let previousDues = Number(customer.previousDues || 0);
+
+    if (previousDues > 0 && remaining > 0) {
+      const applied = Math.min(previousDues, remaining);
+      previousDues -= applied;
+      remaining -= applied;
+    }
+
+    if (remaining > 0) {
+      const orders = await Order.find({
+        ...scope,
+        "customer.phone": phone,
+        status: { $ne: "cancelled" },
+      }).sort({ createdAt: 1 });
+
+      for (const order of orders) {
+        if (remaining <= 0) break;
+        const due = typeof order.remainingAmount === "number"
+          ? order.remainingAmount
+          : Math.max((order.total || 0) - (order.paidAmount || 0), 0);
+        if (due <= 0) continue;
+
+        const applied = Math.min(due, remaining);
+        order.paidAmount = Number(order.paidAmount || 0) + applied;
+        order.remainingAmount = Math.max(due - applied, 0);
+        if (order.remainingAmount === 0) order.status = "completed";
+        order.version = Number(order.version || 0) + 1;
+        await order.save();
+        remaining -= applied;
+      }
+    }
+
+    customer.previousDues = previousDues;
+    await customer.save();
+
+    // appliedAmount can be less than the requested amount if it exceeded
+    // everything this customer actually owed - the frontend caps the input
+    // at totalDue before ever sending this, but this stays defensive
+    // rather than trusting that.
+    res.json({ appliedAmount: amount - remaining, unapplied: remaining });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to settle dues", detail: error.message });
+  }
+};
