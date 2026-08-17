@@ -5,16 +5,32 @@ import { useNetworkStatus } from '@/lib/network-status';
 import {
   ackLocalOrders,
   ackOrderEdits,
+  ackOrderCancellations,
   getPendingLocalOrders,
   getPendingOrderEdits,
+  getPendingOrderCancellations,
+  markOrderCancellationFailed,
   getSyncStatus,
   isLocalHubReachable,
   pushOrdersCache,
   pushReferenceData,
   syncOrderCounter,
+  syncLifetimeCounter,
+  pushEmployeesCache,
+  pushOccupiedTablesCache,
+  getPendingEmployeeCreates,
+  ackEmployeeCreates,
+  markEmployeeCreateFailed,
+  getPendingEmployeeEdits,
+  ackEmployeeEdits,
+  markEmployeeEditFailed,
+  getPendingEmployeeDeletes,
+  ackEmployeeDeletes,
+  markEmployeeDeleteFailed,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
+import { shopApi } from '@/lib/shop-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
 // The offline sync engine: every SYNC_INTERVAL_MS, if this till is online,
@@ -25,7 +41,19 @@ import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-s
 // data (to this till's own offline POS view, and to any paired phone) the
 // next time the internet drops. Only meaningful inside the Electron app -
 // there's no Local Hub to talk to in a plain browser tab.
-const SYNC_INTERVAL_MS = 5 * 60 * 1000;
+//
+// Was 5 minutes back when this only mattered for genuine outages. Now
+// that every order action (this till's own, via triggerBackgroundSync,
+// AND a paired phone's - see pos-mobile's OrderDetailScreen/
+// CheckoutScreen) queues to the Local Hub FIRST as the normal, always-on
+// path rather than an outage fallback, this periodic tick is the ONLY
+// thing that ever picks up something a phone queued (the Local Hub itself
+// has no cloud credentials of its own to push with - see server.js's own
+// comment on the security model - only this renderer, holding the shop's
+// real session, can). Shortened so a phone-placed/edited order reaches
+// the cloud (and therefore shows up for other tills) within seconds
+// instead of minutes.
+const SYNC_INTERVAL_MS = 15 * 1000;
 
 export interface OfflineSyncResult {
   imported: number;
@@ -33,6 +61,21 @@ export interface OfflineSyncResult {
   failed: number;
   editsApplied?: number;
   editsFailed?: number;
+  // Offline Manage Staff - see syncEmployeeQueues below. Combines all three
+  // staff queues (creates/edits/deletes) into one count, same as
+  // editsApplied/editsFailed do for order edits.
+  staffApplied?: number;
+  staffFailed?: number;
+  // Offline Cancel Order - see syncOrderCancellations below. A failure here
+  // most often means the Cancel Order Key entered offline turned out to be
+  // wrong once actually checked against the cloud (see cancelOrderCore in
+  // orderController.js) - wrongKeyOrderIds specifically calls those out so
+  // a consumer (DashboardShell.tsx) can surface a clear "this cancellation
+  // needs to be redone with the correct key" alert instead of a generic
+  // failure count.
+  cancellationsApplied?: number;
+  cancellationsFailed?: number;
+  wrongKeyOrderIds?: string[];
   error?: string;
 }
 
@@ -60,6 +103,11 @@ async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
         // suppress pendingKitchenUpdate so the background KitchenUpdateWatcher
         // never prints a delta this till already printed offline.
         kitchenPrinted: edit.kitchenPrinted,
+        // Same idea, for the customer/cashier receipt - lets
+        // importOfflineOrderUpdates mark customerReceiptPrintedAt so
+        // ReceiptPrintWatcher never prints a receipt this till already
+        // printed offline at completion time.
+        receiptPrinted: edit.receiptPrinted,
       })),
     });
 
@@ -79,6 +127,172 @@ async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
   } catch {
     return { applied: 0, failed: pendingEdits.length };
   }
+}
+
+// Third phase - replays a Cancel Order made while offline (see
+// CancelOrderModal.tsx + localOrders.js's queueOrderCancellation) against
+// the real, bcrypt-gated cancel endpoint. Deliberately separate from
+// syncOrderEdits above and its own dedicated backend route (see
+// orderController.js's importOfflineCancellations) - applyOrderPatch,
+// which syncOrderEdits relies on, rejects status:"cancelled" outright.
+// Never throws - same "report it back, don't block the rest of the sync
+// tick" contract as every other phase here.
+async function syncOrderCancellations(): Promise<{ applied: number; failed: number; wrongKeyOrderIds: string[] }> {
+  const pending = await getPendingOrderCancellations();
+  if (pending.length === 0) return { applied: 0, failed: 0, wrongKeyOrderIds: [] };
+
+  try {
+    const response = await api.post('/orders/import-offline-cancellations', {
+      cancellations: pending.map((entry) => ({
+        localCancellationId: entry.id,
+        orderId: entry.orderId,
+        key: entry.key,
+        reason: entry.reason,
+      })),
+    });
+
+    const { applied = [], failed: failedEntries = [] } = response.data as {
+      applied: Array<{ localCancellationId: string; orderId: string }>;
+      failed: Array<{ localCancellationId: string; orderId: string; error: string; reason?: string }>;
+    };
+
+    const appliedIds = applied.map((entry) => entry.localCancellationId);
+    if (appliedIds.length) await ackOrderCancellations(appliedIds);
+
+    const wrongKeyOrderIds: string[] = [];
+    for (const entry of failedEntries) {
+      // Clears the (now-used) key from local storage regardless of why it
+      // failed - see localOrders.js's markCancellationFailed. A genuine
+      // wrong key needs a fresh Cancel Order Key entry to retry either way,
+      // never a silent replay of the same value.
+      await markOrderCancellationFailed(entry.localCancellationId, entry.error);
+      if (entry.reason === 'wrong_key') wrongKeyOrderIds.push(entry.orderId);
+    }
+
+    return { applied: appliedIds.length, failed: failedEntries.length, wrongKeyOrderIds };
+  } catch {
+    return { applied: 0, failed: pending.length, wrongKeyOrderIds: [] };
+  }
+}
+
+// --- Offline Manage Staff sync - the staff-CRUD counterpart to
+// syncOrderEdits above. See backend/localHub/localStaff.js for the queue
+// design. None of these three ever throw - a failed record is reported
+// back (and marked failed so OfflineSyncPage.tsx can surface it) but never
+// blocks the rest of the sync tick.
+
+async function syncEmployeeCreates(): Promise<{ applied: number; failed: number }> {
+  const pending = await getPendingEmployeeCreates();
+  if (pending.length === 0) return { applied: 0, failed: 0 };
+
+  const appliedIds: string[] = [];
+  let failed = 0;
+
+  for (const record of pending) {
+    try {
+      // roleName was only ever denormalized into the queued payload for
+      // offline display (see offline-staff-helpers.ts's
+      // localEmployeeToSummary) - the cloud only wants the real roleId.
+      const { roleName: _roleName, ...payload } = record.payload as Record<string, unknown> & { roleName?: string };
+      await shopApi.createEmployee(payload);
+      appliedIds.push(record.id);
+    } catch (error) {
+      const reason = (error as { response?: { data?: { reason?: string } } })?.response?.data?.reason;
+      if (reason === 'username_taken') {
+        // Most likely this exact create already succeeded on an earlier
+        // sync attempt (e.g. it landed on the cloud but the connection
+        // dropped again before this till got to ack it) - treat it as
+        // already-synced rather than retrying forever against a username
+        // that will never become available. If it's a genuine collision
+        // with someone else's account instead, the shop owner will notice
+        // the staff member missing from Manage Staff and can re-create them
+        // under a different username.
+        appliedIds.push(record.id);
+      } else {
+        failed += 1;
+        const message = error instanceof Error ? error.message : 'Sync failed - will retry automatically.';
+        await markEmployeeCreateFailed(record.id, message);
+      }
+    }
+  }
+
+  if (appliedIds.length) await ackEmployeeCreates(appliedIds);
+  return { applied: appliedIds.length, failed };
+}
+
+async function syncEmployeeEdits(): Promise<{ applied: number; failed: number }> {
+  const pending = await getPendingEmployeeEdits();
+  if (pending.length === 0) return { applied: 0, failed: 0 };
+
+  const appliedIds: string[] = [];
+  let failed = 0;
+
+  for (const record of pending) {
+    try {
+      await shopApi.updateEmployee(record.employeeId, record.payload);
+      appliedIds.push(record.id);
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        // The target employee is gone (e.g. a queued delete for the same
+        // employee already synced first) - nothing left to apply this
+        // edit to.
+        appliedIds.push(record.id);
+      } else {
+        failed += 1;
+        const message = error instanceof Error ? error.message : 'Sync failed - will retry automatically.';
+        await markEmployeeEditFailed(record.id, message);
+      }
+    }
+  }
+
+  if (appliedIds.length) await ackEmployeeEdits(appliedIds);
+  return { applied: appliedIds.length, failed };
+}
+
+async function syncEmployeeDeletes(): Promise<{ applied: number; failed: number }> {
+  const pending = await getPendingEmployeeDeletes();
+  if (pending.length === 0) return { applied: 0, failed: 0 };
+
+  const appliedIds: string[] = [];
+  let failed = 0;
+
+  for (const record of pending) {
+    try {
+      await shopApi.deleteEmployee(record.employeeId);
+      appliedIds.push(record.id);
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        // Already gone - a previous sync attempt likely already deleted it.
+        appliedIds.push(record.id);
+      } else {
+        failed += 1;
+        const message = error instanceof Error ? error.message : 'Sync failed - will retry automatically.';
+        await markEmployeeDeleteFailed(record.id, message);
+      }
+    }
+  }
+
+  if (appliedIds.length) await ackEmployeeDeletes(appliedIds);
+  return { applied: appliedIds.length, failed };
+}
+
+// Runs all three staff queues in one call - order doesn't affect
+// correctness (a queued edit/delete only ever targets a staff member that
+// already had a real cloud _id before this offline stretch, never one
+// still sitting in the creates queue - see localStaff.js), creates just go
+// first for tidiness.
+async function syncEmployeeQueues(): Promise<{ applied: number; failed: number }> {
+  const [creates, edits, deletes] = await Promise.all([
+    syncEmployeeCreates(),
+    syncEmployeeEdits(),
+    syncEmployeeDeletes(),
+  ]);
+  return {
+    applied: creates.applied + edits.applied + deletes.applied,
+    failed: creates.failed + edits.failed + deletes.failed,
+  };
 }
 
 export async function runSyncNow(): Promise<OfflineSyncResult> {
@@ -121,6 +335,10 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
         orders: pending.map((order) => ({
           localOrderId: order.id,
           localOrderNumber: order.localOrderNumber,
+          // Tr# / shopSequenceNumber - see localOrders.js's queueOrder and
+          // orderController.js's importOfflineOrders (reads this as
+          // entry.localSequenceNumber).
+          localSequenceNumber: order.shopSequenceNumber,
           offlineCreatedAt: order.queuedAt,
           payload: order.payload,
           // See localOrders.js's queueOrder - lets importOfflineOrders mark
@@ -157,6 +375,16 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
   // it with nothing new needing to be created.
   const editsResult = await syncOrderEdits();
 
+  // Same "runs regardless of what else happened this tick" reasoning as
+  // editsResult above - a queued cancellation targets an order that could
+  // have existed well before this offline stretch even started.
+  const cancellationsResult = await syncOrderCancellations();
+
+  // Offline Manage Staff - completely independent of the order queue above
+  // (different Local Hub queue entirely, see localStaff.js), so it always
+  // runs regardless of whether there were any orders to sync this tick.
+  const staffResult = await syncEmployeeQueues();
+
   // Whatever this tick just imported (or found nothing to import), pull
   // the cloud's now-current session + orderCounter and hand it to the
   // Local Hub - this is what keeps the local counter caught up even when
@@ -169,11 +397,61 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
     if (status?.isOpen && status.session) {
       await syncOrderCounter(status.session.id, status.session.orderCounter ?? 0);
     }
+    // Tr# / shopSequenceNumber's counter - present regardless of isOpen
+    // (unlike orderCounter above), and never resets. See
+    // local-hub-api.ts's syncLifetimeCounter.
+    if (status) {
+      await syncLifetimeCounter(status.shopSequenceCounter ?? 0);
+    }
   } catch {
     // Best-effort - not worth failing the whole sync tick over.
   }
 
-  return { ...result, editsApplied: editsResult.applied, editsFailed: editsResult.failed };
+  return {
+    ...result,
+    editsApplied: editsResult.applied,
+    editsFailed: editsResult.failed,
+    staffApplied: staffResult.applied,
+    staffFailed: staffResult.failed,
+    cancellationsApplied: cancellationsResult.applied,
+    cancellationsFailed: cancellationsResult.failed,
+    wrongKeyOrderIds: cancellationsResult.wrongKeyOrderIds,
+  };
+}
+
+// Fire-and-forget sync trigger for the "always local-first" order actions
+// (POSPage placement, SalesPage's Add Items/Complete Payment,
+// EditOrderPage, CancelOrderModal, RecordPage's Complete Order) - every one
+// of those writes to the Local Hub queue immediately and returns instantly
+// regardless of connectivity, then calls this right after so the cloud
+// (and therefore other tills / the paired phone) finds out within a
+// second or two instead of waiting on the regular SYNC_INTERVAL_MS timer.
+// Safe to call even when genuinely offline - runSyncNow no-ops the moment
+// it can't reach the Local Hub or the cloud, and the regular timer (or the
+// reconnect-triggered sync in useOfflineSync) picks the backlog back up
+// once connectivity actually returns. The in-flight guard just avoids
+// piling up redundant sync attempts if several actions happen in quick
+// succession (e.g. placing several orders back to back).
+let backgroundSyncInFlight = false;
+export function triggerBackgroundSync(): void {
+  if (!isDesktopApp() || backgroundSyncInFlight) return;
+  backgroundSyncInFlight = true;
+  (async () => {
+    try {
+      await runSyncNow();
+      // Keeps this till's own order list / table-occupancy view correct
+      // immediately after a sync, not just the cloud's copy - relevant
+      // since Sales/Kitchen/table-picker all render from these caches
+      // (see offline-order-helpers.ts's loadOrdersFromLocalHub), never a
+      // live call.
+      await pushCurrentOrdersCache();
+      await pushCurrentOccupiedTables();
+    } catch {
+      // Best-effort, same as every other background push in this file.
+    } finally {
+      backgroundSyncInFlight = false;
+    }
+  })();
 }
 
 export async function pushCurrentReferenceData(): Promise<void> {
@@ -182,10 +460,11 @@ export async function pushCurrentReferenceData(): Promise<void> {
   if (!hubUp) return;
 
   try {
-    const [productsResult, customers, waiters] = await Promise.all([
+    const [productsResult, customers, waiters, roles] = await Promise.all([
       fetchProducts(),
       fetchAllCustomers(),
       fetchWaiters(),
+      shopApi.listRoles(),
     ]);
 
     await pushReferenceData({
@@ -193,6 +472,7 @@ export async function pushCurrentReferenceData(): Promise<void> {
       products: productsResult?.products || [],
       customers: customers || [],
       staff: waiters || [],
+      roles: roles || [],
     });
   } catch {
     // Best-effort - the next 5-minute tick will just try again. Nothing
@@ -216,6 +496,42 @@ export async function pushCurrentOrdersCache(): Promise<void> {
     const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const orders = await fetchOrders({ since });
     await pushOrdersCache(orders || []);
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
+// Manage Staff's own full employee-list cache - see employeesCache.js for
+// why this is separate from pushCurrentReferenceData's lightweight `staff`
+// (waiter dropdown) field. EmployeesPage.tsx also does its own best-effort
+// push right after a successful online load (see its `load()`), so this
+// periodic one mainly covers "the till came back online on some other page
+// and Manage Staff hasn't been opened yet this session".
+export async function pushCurrentEmployeesCache(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const employees = await shopApi.listEmployees();
+    await pushEmployeesCache(employees || []);
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
+// DineIn table-occupancy cache - see occupiedTablesCache.js. Deliberately
+// its own lightweight push (not folded into pushCurrentOrdersCache's
+// 14-day-bounded snapshot) - see fetchOccupiedDineInTables's own comment
+// for why this stays unbounded and cheap regardless of order history size.
+export async function pushCurrentOccupiedTables(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const tables = await fetchOccupiedDineInTables();
+    await pushOccupiedTablesCache(tables || []);
   } catch {
     // Best-effort - same reasoning as pushCurrentReferenceData.
   }
@@ -253,6 +569,8 @@ export function useOfflineSync() {
       setLastSyncAt(new Date());
       await pushCurrentReferenceData();
       await pushCurrentOrdersCache();
+      await pushCurrentEmployeesCache();
+      await pushCurrentOccupiedTables();
       await refreshStatus();
       return result;
     } finally {

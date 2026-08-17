@@ -83,13 +83,23 @@ export default function ItemizedBillReceipt({
           print-readiness check in PrintOrderPage.tsx/ReceiptPrintPage.tsx
           (which waits for this text to appear before printing) still works
           regardless of which template a shop has picked. */}
-      <div className="mb-2 space-y-0.5">
+      <div className="mt-3 mb-3 space-y-2">
         <div className="flex justify-between"><span>Order#: {orderNumber}</span><span>DATE: {dateString} {timeString}</span></div>
         {order.orderType === 'DineIn' && order.table && <p>Table: {order.table}</p>}
         <p>M/S: {(order.paymentMethod || 'Cash').toUpperCase()}</p>
         {order.waiter && <p>Waiter: {order.waiter}</p>}
         {cashierName && <p>User: {cashierName}</p>}
         {order.customer?.name && order.customer.name !== 'Walk-in Customer' && <p>Customer: {order.customer.name}</p>}
+        {/* Phone stays gated on a real (non-Walk-in) name - validateOrderForm
+            in POSPage.tsx never lets a phone through without a name
+            alongside it, so this is always consistent - plus the walk-in
+            placeholder phone (03000000000) is excluded since it was never a
+            real number the customer gave. Address is DELIBERATELY NOT gated
+            on name: a Delivery order can be placed with an address but no
+            typed name (both are optional now), and the address is exactly
+            what the delivery needs - it must still print even then. */}
+        {order.customer?.name && order.customer.name !== 'Walk-in Customer' && order.customer.phone && order.customer.phone !== '03000000000' && <p>Phone: {order.customer.phone}</p>}
+        {order.customer?.address && <p>Address: {order.customer.address}</p>}
       </div>
 
       <div className="border-t border-dashed border-black my-1.5" />

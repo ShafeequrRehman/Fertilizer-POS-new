@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Lock, PackagePlus, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, claimReceiptPrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
-import { Discount, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
+import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
-import { getLocalHubStartDiagnostics, getReferenceData, pushOrdersCache } from '@/lib/local-hub-api';
+import { getLocalHubStartDiagnostics, getOccupiedTablesCache, getReferenceData, pushOccupiedTablesCache, pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub, saveOrderEditOffline, computeKitchenPrintDelta } from '@/lib/offline-order-helpers';
+import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
+import { useToast } from '@/lib/toast';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 
-const filters = ['All', 'Dine In', 'Take Away', 'Delivery', 'Fariha', 'Ahsan Raza', 'Rehman', 'Rehan'];
+const BASE_FILTERS = ['All', 'Dine In', 'Take Away', 'Delivery'];
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -35,8 +39,20 @@ function isReceiptPdfResult(value: unknown): value is ReceiptPdfResult {
 }
 
 export default function SalesPage() {
+  const { toast } = useToast();
+  // The hidden auto-print iframe (see printReadyUrl further down) loads
+  // PrintOrderPage.tsx in its own separate React tree - a toast shown from
+  // inside it would render invisibly in that hidden iframe. It posts a
+  // message up here instead once it's actually called window.print(); this
+  // is what shows the popup for real, on screen. See print-notify.ts.
+  useEffect(() => listenForPrintSentMessages(toast), [toast]);
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  // Real, DB-backed waiters (previously this filter row had hardcoded
+  // placeholder names - "Fariha"/"Ahsan Raza"/etc - that never matched any
+  // real order and made the filter buttons silently do nothing when
+  // clicked) - see BASE_FILTERS above and the filters memo below.
+  const [waiters, setWaiters] = useState<Waiter[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<SavedOrder | null>(null);
   const [filter, setFilter] = useState('All');
   const [search, setSearch] = useState('');
@@ -45,9 +61,17 @@ export default function SalesPage() {
   const [showPayment, setShowPayment] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showAddItems, setShowAddItems] = useState(false);
+  const [showTableEdit, setShowTableEdit] = useState(false);
   const [settings, setSettings] = useState<StoreSettings | null>(null);
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
+  // Requires a deliberate, explicit tick before "Confirm Payment" is
+  // allowed through with nothing typed in Amount Paid - see completeOrder's
+  // own comment for why an accidental/stray click on Confirm Payment
+  // shouldn't be able to silently leave an order fully unpaid. Typing a
+  // real amount doesn't need this at all; it's only the "nothing entered"
+  // case this guards.
+  const [confirmPending, setConfirmPending] = useState(false);
   // Discount now lives here, not in POS checkout - the cashier applies it
   // when actually completing/collecting payment on an order, using either a
   // flat PKR amount or a percent of the subtotal (Amount wins if both are
@@ -92,8 +116,10 @@ export default function SalesPage() {
       try {
         const snapshot = await getReferenceData();
         if (snapshot.products?.length) setProducts(snapshot.products as Product[]);
+        const offlineWaiters = (snapshot.staff || []) as Waiter[];
+        if (offlineWaiters.length) setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
       } catch {
-        // Best-effort - only used by the Add Items modal, never blocks the order list above.
+        // Best-effort - only used by the Add Items modal / waiter filter, never blocks the order list above.
       }
     } catch {
       const diagnostics = await getLocalHubStartDiagnostics();
@@ -144,6 +170,14 @@ export default function SalesPage() {
   useEffect(() => {
     async function loadDue() {
       if (!selectedOrder?.customer.phone || selectedOrder.customer.phone === '03000000000') return setCustomerDue(0);
+      // Cloud-only lookup (rolls in every OTHER unpaid order of this
+      // customer's, which only the cloud has a full view of) - skipped
+      // outright while offline instead of waiting out a doomed request's
+      // timeout just to land on the same 0 anyway. Complete Payment still
+      // works fine without it, it just won't also collect other unrelated
+      // dues in the same payment until this syncs (same as RecordPage.tsx's
+      // own Complete Order modal).
+      if (isDesktopApp() && !isOnline) return setCustomerDue(0);
       try {
         const result = await fetchCustomerOutstanding(selectedOrder.customer.phone, selectedOrder.id);
         setCustomerDue(Number(result?.outstanding ?? 0));
@@ -152,7 +186,7 @@ export default function SalesPage() {
       }
     }
     void loadDue();
-  }, [selectedOrder]);
+  }, [selectedOrder, isOnline]);
 
   // "Today" here is exactly the current/most recent shop shift - same
   // definition used on the Dashboard and Record page - not a fixed
@@ -161,12 +195,20 @@ export default function SalesPage() {
   // separate "days"; once closed it freezes at [openedAt, closedAt).
   const sessionWindow = useMemo(() => getBusinessWindow(shopSession, new Date()), [shopSession]);
 
+  // Real DB waiters appended after the fixed order-type filters - see
+  // BASE_FILTERS above.
+  const filters = useMemo(() => [...BASE_FILTERS, ...waiters.map((waiter) => waiter.name)], [waiters]);
+
   const shiftOrders = useMemo(
     () => filterOrdersInBusinessWindow(orders, sessionWindow),
     [orders, sessionWindow],
   );
 
-  const visibleOrders = useMemo(() => shiftOrders.filter((order) => {
+  // Type/waiter + search filtered, but NOT restricted by status - this is
+  // what the Completed/Cancelled StatCards below count from, so they stay
+  // "today's shift" numbers even though the list itself (visibleOrders,
+  // below) is sourced differently.
+  const filteredOrders = useMemo(() => shiftOrders.filter((order) => {
     const byFilter = filter === 'All'
       || (filter === 'Dine In' && order.orderType === 'DineIn')
       || (filter === 'Take Away' && order.orderType === 'TakeAway')
@@ -176,12 +218,40 @@ export default function SalesPage() {
     return byFilter && haystack.includes(search.toLowerCase());
   }), [filter, shiftOrders, search]);
 
+  // Every currently pending order shop-wide, with NO shift/date bound - a
+  // still-open DineIn table or unclosed Delivery has to stay findable here
+  // no matter how old it is, otherwise it silently falls out of the list
+  // the moment a new shift opens after it (exactly the "some pending
+  // orders are missing" bug this was built to fix). Bounded by count -
+  // there's only ever as many of these as there are still-open tabs/
+  // tables - not by order history size, same reasoning as RecordPage.tsx's
+  // own allPendingOrders and the backend's status=pending unbounded fetch.
+  const allPendingOrders = useMemo(() => orders.filter((order) => order.status === 'pending'), [orders]);
+
+  // The actual order list only ever shows still-open (pending) orders - a
+  // completed or cancelled order is done, and cluttered the list a cashier
+  // is scanning to find who still needs attention. Already-settled orders
+  // remain fully intact in the database (and countable via the Completed/
+  // Cancelled StatCards, which read from filteredOrders instead) - this
+  // only affects what's rendered here. Sourced from allPendingOrders
+  // (unbounded), NOT filteredOrders (shift-scoped) - see that comment
+  // above for why.
+  const visibleOrders = useMemo(() => allPendingOrders.filter((order) => {
+    const byFilter = filter === 'All'
+      || (filter === 'Dine In' && order.orderType === 'DineIn')
+      || (filter === 'Take Away' && order.orderType === 'TakeAway')
+      || (filter === 'Delivery' && order.orderType === 'Delivery')
+      || order.waiter === filter;
+    const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order)} ${phoneLabel(order)}`.toLowerCase();
+    return byFilter && haystack.includes(search.toLowerCase());
+  }), [filter, allPendingOrders, search]);
+
   // A new filter/search re-derives the whole list, so a stale "load more"
   // position would otherwise leave the grid showing an arbitrary/
   // inconsistent slice - always restart at 10 when they change.
   useEffect(() => {
     setVisibleOrderCount(10);
-  }, [filter, search, shiftOrders]);
+  }, [filter, search, allPendingOrders]);
 
   const pagedOrders = visibleOrders.slice(0, visibleOrderCount);
 
@@ -200,18 +270,31 @@ export default function SalesPage() {
 
   async function refresh() {
     try {
-      // This page only ever shows the current/last shift's orders (via the
-      // business-window filtering below) - bounding the fetch to the last
-      // 14 days (a generous margin over any realistic gap between shifts)
-      // keeps this 45-second poll fast regardless of how much order
-      // history this shop has accumulated overall. See getOrders' `since`
-      // handling in orderController.js.
+      // Two fetches, merged: the last-14-days window (a generous margin
+      // over any realistic gap between shifts, keeps this 45-second poll
+      // fast regardless of how much order history this shop has
+      // accumulated overall - see getOrders' `since` handling in
+      // orderController.js) PLUS every currently pending order shop-wide
+      // with NO date bound at all. Without the second call, a still-open
+      // DineIn table or Delivery placed more than 14 days ago (or from
+      // before the current/last shift) would silently vanish from this
+      // page's list the moment it aged out of the window - exactly the
+      // "pending orders missing" bug this was built to fix. See
+      // allPendingOrders above for where the merged result actually gets
+      // used.
       const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-      const [data, history] = await Promise.all([fetchOrders({ since }), fetchShopSessionHistory()]);
+      const [recentData, pendingData, history] = await Promise.all([
+        fetchOrders({ since }),
+        fetchOrders({ status: 'pending' }),
+        fetchShopSessionHistory(),
+      ]);
       const latestSession = history && history.length > 0 ? history[0] : null;
       setShopSession(latestSession);
 
-      if (data) {
+      if (recentData) {
+        const merged = new Map(recentData.map((order) => [order.id, order]));
+        (pendingData || []).forEach((order) => merged.set(order.id, order));
+        const data = Array.from(merged.values());
         setOrders(data);
 
         // Default selection should come from THIS shift's orders, not just
@@ -238,6 +321,13 @@ export default function SalesPage() {
       } catch {
         // Best-effort - the cache-first paint already has a product list.
       }
+
+      try {
+        const waiterData = await fetchWaiters();
+        if (waiterData) setWaiters(waiterData.filter((waiter) => waiter.isActive));
+      } catch {
+        // Best-effort - falls back to whatever the offline cache already had.
+      }
     } catch (err) {
       console.error('Failed to load orders', err);
       // Let's not wipe out the current orders if it's just a transient error,
@@ -251,36 +341,72 @@ export default function SalesPage() {
   }
 
   async function refreshOne(id: string) {
-    const updated = await fetchOrder(id);
-    setOrders((previous) => previous.map((order) => order.id === id ? updated : order));
-    setSelectedOrder(updated);
+    // Offline: re-derive from the same cached-cloud-snapshot-plus-pending-
+    // edits merge loadFromCache already uses for the whole list, instead
+    // of a live fetchOrder that would just fail outright with nothing to
+    // show for it (previously an unhandled rejection - the button looked
+    // broken with no explanation).
+    if (isDesktopApp() && !isOnline) {
+      try {
+        const merged = await loadOrdersFromLocalHub();
+        const found = merged.find((order) => order.id === id);
+        if (found) {
+          setOrders((previous) => previous.map((order) => order.id === id ? found : order));
+          setSelectedOrder(found);
+        } else {
+          toast.error("This order isn't in this till's local cache - try again once back online.");
+        }
+      } catch {
+        toast.error("Couldn't refresh this order offline.");
+      }
+      return;
+    }
+    try {
+      const updated = await fetchOrder(id);
+      setOrders((previous) => previous.map((order) => order.id === id ? updated : order));
+      setSelectedOrder(updated);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not refresh this order.');
+    }
   }
 
   async function saveUpdate(payload: Parameters<typeof updateOrder>[1]) {
     if (!selectedOrder) return null;
 
-    if (isDesktopApp() && !isOnline) {
-      // Editing an order while offline - see offline-order-helpers.ts's
-      // saveOrderEditOffline for the split between the two cases (still-
+    if (isDesktopApp()) {
+      // Always local-first inside the desktop app, online or not - queues
+      // to the Local Hub and returns instantly instead of waiting on a
+      // live cloud round trip (see offline-order-helpers.ts's
+      // saveOrderEditOffline for the split between the two cases: still-
       // local order vs. one that already has a real cloud _id). No
       // claim-before-print coordination or WhatsApp here (claims exist to
-      // coordinate printing ACROSS devices via the cloud, which isn't
-      // reachable right now anyway; WhatsApp was explicitly scoped
-      // online-only from the start). The kitchen ticket for whatever
-      // items just got added still prints immediately below, regardless
-      // of order type (DineIn/TakeAway/Delivery) - same as a brand new
-      // order's ticket prints immediately offline (POSPage.tsx). Nothing
-      // else could possibly be racing to print this same delta while it's
-      // still only sitting on this till, so there's no claim to make
-      // first. Everything queued here is replayed for real - dues cascade
-      // included - once synced.
+      // coordinate printing ACROSS devices via the cloud; this till
+      // prints its own kitchen ticket immediately below either way, and
+      // WhatsApp is explicitly online-only, sent separately once this
+      // syncs). Nothing else could possibly be racing to print this same
+      // delta while it's still only sitting on this till, so there's no
+      // claim to make first. Everything queued here - dues cascade
+      // included - is replayed for real moments later, once
+      // triggerBackgroundSync's immediate sync attempt lands (typically a
+      // second or two, not the full 5-minute timer) or, if actually
+      // offline, once back online.
       const kitchenDelta = computeKitchenPrintDelta(selectedOrder, payload);
       const printSettings = getStoreSettings();
       const isElectronNow = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
-      const willPrintKitchen = isElectronNow && kitchenDelta.length > 0 && !!printSettings.kitchenPrinter;
+      // counterPrinter only counts here for Urban Crunch (see
+      // kitchen-print-routing.ts) - every other shop only ever prints to
+      // kitchenPrinter.
+      const willPrintKitchen = isElectronNow && kitchenDelta.length > 0 && !!(printSettings.kitchenPrinter || (isCategoryPrintRoutingEnabled() && printSettings.counterPrinter));
+      // No order type - DineIn, TakeAway, or Delivery - auto-prints its
+      // customer receipt at completion, offline or on. It's always a
+      // deliberate, on-demand action via the Print Receipt button or
+      // printer icon on the order detail card, never automatic. Passing
+      // `false` as receiptPrinted below (instead of ever claiming/printing
+      // it here) is what keeps customerReceiptPrintedAt unset, so that
+      // on-demand print is always available later.
 
       try {
-        const updated = await saveOrderEditOffline(selectedOrder, payload, willPrintKitchen);
+        const updated = await saveOrderEditOffline(selectedOrder, payload, willPrintKitchen, false);
         setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
         setSelectedOrder(updated);
 
@@ -290,97 +416,81 @@ export default function SalesPage() {
             const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
             if (ipcRenderer) {
               const printLogo = localStorage.getItem('preferred-print-logo');
-              const kitchenReceiptData = { ...updated, items: kitchenDelta };
-              await ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, printSettings.kitchenPrinter, printLogo, printSettings);
+              const categoryLookup = buildCategoryLookup(products);
+              await dispatchKitchenPrints(
+                kitchenDelta,
+                categoryLookup,
+                printSettings,
+                async (groupItems, printerName, label) => {
+                  const printPromise = ipcRenderer.invoke('print-kitchen-receipt-data', { ...updated, items: groupItems }, printerName, printLogo, printSettings);
+                  reportPrintOutcome(printPromise, label, toast);
+                  await printPromise.catch(() => {});
+                },
+              );
             }
           } catch (printErr) {
             console.error('Offline kitchen update print failed:', printErr);
           }
         }
 
+        triggerBackgroundSync();
         setStatus({
           tone: 'info',
           text: willPrintKitchen
-            ? 'Saved offline - kitchen ticket printed. Will sync to the cloud once back online.'
-            : 'Saved offline - will sync to the cloud once back online.',
+            ? `Saved - kitchen ticket printed. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`
+            : isOnline ? 'Saved - syncing to the cloud...' : 'Saved - will sync once back online.',
         });
         return updated;
       } catch (err) {
-        setStatus({ tone: 'error', text: err instanceof Error ? err.message : 'Could not save this change offline.' });
+        setStatus({ tone: 'error', text: err instanceof Error ? err.message : 'Could not save this change.' });
         return null;
       }
     }
 
+    // Only ever reached from a plain browser tab now (no Local Hub to
+    // queue into - see the isDesktopApp() branch above, which now always
+    // handles the desktop app, online or not) - a real live cloud call is
+    // the only option it has.
     const updated = await updateOrder(selectedOrder.id, payload);
     setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
     setSelectedOrder(updated);
 
-    // Fire only the receipt that belongs to this workflow.
-    const targetPrintType = payload.status === 'completed'
-      ? 'cashier'
-      : payload.action === 'addItems'
-        ? 'kitchen'
-        : null;
-
-    if (!targetPrintType) {
+    // The only thing this ever auto-prints is a kitchen ticket for items
+    // just added (addItems) - completing an order never auto-prints the
+    // customer receipt here, for any order type (see the offline branch
+    // above for the full reasoning; the receipt stays available on demand
+    // via the Print Receipt button / printer icon).
+    if (payload.action !== 'addItems') {
       return updated;
     }
 
-    // Claim-before-print, same invariant used everywhere else a receipt or
-    // kitchen ticket gets auto-printed (see POSPage.tsx / DashboardShell.tsx's
-    // watchers). This is what makes completing an order - or adding items
-    // to one - from the mobile app work the same as doing it here: the
-    // phone has no printer of its own, so DashboardShell's watchers poll
-    // for completed/updated, unclaimed orders and print them on this till -
-    // and this claim is what stops BOTH a watcher and this same tick here
-    // from printing two copies when the till itself makes the edit. A
-    // TakeAway order that already printed its receipt at placement will
-    // simply fail the cashier claim (409) and print nothing a second time.
-    let receiptOrder = updated;
+    // Claim-before-print, same invariant used everywhere else a kitchen
+    // ticket gets auto-printed (see POSPage.tsx / DashboardShell.tsx's
+    // KitchenUpdateWatcher). This is what makes adding items to an order
+    // from the mobile app work the same as doing it here: the phone has no
+    // printer of its own, so DashboardShell's watcher polls for updated,
+    // unclaimed orders and prints them on this till - and this claim is
+    // what stops both the watcher and this same tick here from printing
+    // two copies when the till itself makes the edit.
     let kitchenUpdateItems: SavedOrder['items'] | null = null;
-
-    if (targetPrintType === 'cashier') {
-      try {
-        receiptOrder = await claimReceiptPrint(updated.id);
-      } catch (err) {
-        const already409 = err instanceof ApiError && err.status === 409;
-        if (!already409) {
-          console.error('Receipt print claim failed:', err);
-        }
-        // A 409 here means customerReceiptPrintedAt was already non-null -
-        // most commonly a TakeAway order that already printed its receipt
-        // at placement (POSPage.tsx), which is expected and fine to stay
-        // silent about. Anything else (a genuine claim failure) is
-        // surfaced - previously this was swallowed into a console.error
-        // only, which made a real failure here look identical to "printed
-        // fine", with nothing telling the cashier the receipt never came
-        // out.
-        if (!already409) {
-          setStatus({ tone: 'error', text: `Could not print the receipt: ${err instanceof Error ? err.message : 'claim failed'}. Use the printer icon to print it manually.` });
-        }
-        return updated;
+    try {
+      const claimed = await claimKitchenUpdatePrint(updated.id);
+      if (!claimed || claimed.items.length === 0) return updated;
+      kitchenUpdateItems = claimed.items;
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 409) {
+        console.error('Kitchen update claim failed:', err);
       }
-    } else {
-      try {
-        const claimed = await claimKitchenUpdatePrint(updated.id);
-        if (!claimed || claimed.items.length === 0) return updated;
-        kitchenUpdateItems = claimed.items;
-      } catch (err) {
-        if (!(err instanceof ApiError) || err.status !== 409) {
-          console.error('Kitchen update claim failed:', err);
-        }
-        // Same reasoning as the cashier branch - DashboardShell's
-        // KitchenUpdateWatcher is the safety net, no local fallback here.
-        return updated;
-      }
+      // DashboardShell's KitchenUpdateWatcher is the safety net, no local
+      // fallback here.
+      return updated;
     }
 
     // Browser/no-printer fallback goes through PrintOrderPage.tsx, which
-    // fetches the order fresh (full merged item list) - so for an
-    // addItems kitchen ticket, stash just the claimed new items here for
-    // that page to pick up, same reasoning as kitchenReceiptData below.
-    function printPageUrl(type: 'kitchen' | 'cashier') {
-      if (type === 'kitchen' && kitchenUpdateItems) {
+    // fetches the order fresh (full merged item list) - stash just the
+    // claimed new items here for that page to pick up instead.
+    function printPageUrl() {
+      if (kitchenUpdateItems) {
         try {
           sessionStorage.setItem(`kitchen-add-items-${updated.id}`, JSON.stringify(kitchenUpdateItems));
         } catch {
@@ -388,7 +498,7 @@ export default function SalesPage() {
           // the full item list instead, which is an acceptable degradation.
         }
       }
-      return `/dashboard/sales/print/${updated.id}?auto=true&type=${type}`;
+      return `/dashboard/sales/print/${updated.id}?auto=true&type=kitchen`;
     }
 
     const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
@@ -399,50 +509,38 @@ export default function SalesPage() {
         if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
 
         const printLogo = localStorage.getItem('preferred-print-logo');
-        // customerDue is whatever "Previous Dues" was showing in the
-        // Complete Payment panel for this order - carried onto the printed
-        // receipt so the customer sees the same combined total they were
-        // actually charged.
         // Only the claimed delta ever goes to the kitchen - reprinting the
         // whole order's items would have the kitchen re-cook stuff they
-        // already started (or finished) on the original ticket.
-        const kitchenReceiptData = { ...updated, items: kitchenUpdateItems || [] };
-        const receiptData = targetPrintType === 'cashier' ? { ...receiptOrder, previousDues: customerDue } : kitchenReceiptData;
+        // already started (or finished) on the original ticket. Ice Cream/
+        // Drinks/Shwarma items within that delta route to the counter
+        // printer instead - see kitchen-print-routing.ts.
+        const deltaItems = kitchenUpdateItems || [];
 
         // main.js's print handlers never reject - a real failure (bad
         // printer name, react-pdf render error, etc.) comes back as
         // { success: false, error }, not a thrown/rejected promise - so a
         // bare .catch() here was never actually seeing those failures.
-        // Checking result.success explicitly is what surfaces a genuine
-        // print failure to the cashier instead of it looking identical to
-        // a successful, silent print.
-        function reportPrintResult(promise: Promise<unknown>, label: string) {
-          promise
-            .then((result) => {
-              const outcome = result as { success?: boolean; error?: string } | undefined;
-              if (outcome && outcome.success === false) {
-                console.error(`${label} print failed:`, outcome.error);
-                setStatus({ tone: 'error', text: `${label} did not print: ${outcome.error || 'unknown error'}.` });
-              }
-            })
-            .catch((err) => {
-              console.error(`${label} print IPC call failed:`, err);
-              setStatus({ tone: 'error', text: `${label} did not print - the print request itself failed.` });
-            });
-        }
-
-        if (targetPrintType === 'cashier' && settings.counterPrinter) {
-          reportPrintResult(ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings), 'Cashier receipt');
-        } else if (targetPrintType === 'kitchen' && settings.kitchenPrinter) {
-          reportPrintResult(ipcRenderer.invoke('print-kitchen-receipt-data', kitchenReceiptData, settings.kitchenPrinter, printLogo, settings), 'Kitchen ticket');
+        // reportPrintOutcome (print-notify.ts) checks result.success
+        // explicitly, surfacing a genuine print failure AND popping the
+        // success toast on a real success, instead of both looking
+        // identical to a silent no-op.
+        if (settings.kitchenPrinter || settings.counterPrinter) {
+          const categoryLookup = buildCategoryLookup(products);
+          void dispatchKitchenPrints(
+            deltaItems,
+            categoryLookup,
+            settings,
+            (groupItems, printerName, label) =>
+              reportPrintOutcome(ipcRenderer.invoke('print-kitchen-receipt-data', { ...updated, items: groupItems }, printerName, printLogo, settings), label, toast),
+          );
         } else {
-          setPrintReadyUrl(printPageUrl(targetPrintType));
+          setPrintReadyUrl(printPageUrl());
         }
       } catch {
-        setPrintReadyUrl(printPageUrl(targetPrintType));
+        setPrintReadyUrl(printPageUrl());
       }
     } else {
-      setPrintReadyUrl(printPageUrl(targetPrintType));
+      setPrintReadyUrl(printPageUrl());
     }
 
     return updated;
@@ -451,7 +549,32 @@ export default function SalesPage() {
   async function completeOrder(full: boolean) {
     if (!selectedOrder) return;
     const paid = full ? payable : Number(paymentAmount || 0);
-    if (!full && (paid <= 0 || paid > payable)) return setStatus({ tone: 'error', text: 'Enter a valid payment amount.' });
+    if (!full && (paid < 0 || paid > payable)) return setStatus({ tone: 'error', text: 'Enter a valid payment amount.' });
+    // Nothing typed in Amount Paid is only allowed through with the
+    // "Put in Pending" box explicitly ticked - a bare Confirm Payment
+    // click with an empty field (a stray click, a misplaced tap) used to
+    // silently complete the order with paid=0 and leave the whole bill as
+    // an unpaid due with no confirmation at all. Typing any real amount
+    // (partial or full via the field) never needs the tick.
+    if (!full && paid === 0 && !confirmPending) {
+      return setStatus({ tone: 'error', text: "Enter a payment amount, or check \"Put in Pending\" to confirm this order with no payment collected." });
+    }
+    // Completing with less than the full payable amount leaves a real due
+    // on this customer's account - Customer Dues/Ledger can only ever find
+    // that debt again by looking up orders by customer.phone (see
+    // backend/controllers/customerController.js's getCustomerLedger, which
+    // explicitly skips the walk-in placeholder phone). A due recorded
+    // against "Dine-In Customer" / 03000000000 is therefore permanently
+    // untrackable and unreachable for a reminder the moment this modal
+    // closes - so a real name + phone are required before this is allowed
+    // to leave anything unpaid. A full payment never leaves a due, so
+    // walk-ins can still check out with no customer details exactly as
+    // before.
+    if (paid < payable) {
+      if (!hasCustomerPhone(selectedOrder) || !selectedOrder.customer.name?.trim()) {
+        return setStatus({ tone: 'error', text: "Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against. Edit the order first, or pay in full instead." });
+      }
+    }
     // `paid` here is the FULL amount actually collected right now - this
     // order's own bill plus whatever of the customer's other outstanding
     // dues (Previous Dues, above) the cashier chose to collect alongside
@@ -460,14 +583,25 @@ export default function SalesPage() {
     // applies what's left to this order - see orderController.updateOrder.
     const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, discount: discountForOrder });
     if (!updated) return;
-    await sendCompletedReceiptOnWhatsApp(updated);
+    // Fire-and-forget: the order is already durably saved locally by
+    // saveUpdate above, and this is a PDF render (Electron IPC) plus a
+    // WhatsApp cloud send - a couple of seconds combined that the cashier
+    // shouldn't have to stare at a still-open modal for. It has its own
+    // try/catch (see below) and reports a status message if it fails, same
+    // as before - it just no longer blocks the modal from closing.
+    void sendCompletedReceiptOnWhatsApp(updated);
     setShowPayment(false);
     setPaymentAmount('');
+    setConfirmPending(false);
     setDiscountAmountInput('');
     setDiscountPercentInput('');
+    // Local-first (see saveUpdate above) means this can't run the real
+    // cross-order dues cascade itself - it shows this order as paid right
+    // away, and settles whatever else the customer owes moments later once
+    // this syncs (near-instant if actually online, or once back online).
     setStatus(
-      isDesktopApp() && !isOnline
-        ? { tone: 'info', text: `Order ${updated.id} marked completed offline - will sync (and settle any other outstanding dues) once back online.` }
+      isDesktopApp()
+        ? { tone: 'success', text: `Order ${updated.id} completed. ${isOnline ? 'Settling any other outstanding dues now...' : 'Will settle any other outstanding dues once back online.'}` }
         : { tone: 'success', text: `Order ${updated.id} completed successfully.` },
     );
   }
@@ -524,8 +658,8 @@ export default function SalesPage() {
     if (!updated) return;
     setShowAddItems(false);
     setStatus(
-      isDesktopApp() && !isOnline
-        ? { tone: 'info', text: `Added ${items.length} item(s) to ${updated.id} offline - will sync once back online.` }
+      isDesktopApp()
+        ? { tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}` }
         : { tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}.` },
     );
   }
@@ -572,10 +706,10 @@ export default function SalesPage() {
       {/* Fixed 4-up grid (not auto-fit) so these always sit in a single
           compact row instead of wrapping to 2 across on narrower windows. */}
       <div className="grid grid-cols-4 gap-2">
-        <StatCard label="Pending Orders" value={String(visibleOrders.filter((order) => order.status === 'pending').length)} />
-        <StatCard label="Completed" value={String(visibleOrders.filter((order) => order.status === 'completed').length)} />
-        <StatCard label="Cancelled" value={String(visibleOrders.filter((order) => order.status === 'cancelled').length)} />
-        <StatCard label="Open Value" value={`Rs ${visibleOrders.filter((order) => order.status === 'pending').reduce((sum, order) => sum + order.total, 0)}`} />
+        <StatCard label="Pending Orders" value={String(visibleOrders.length)} />
+        <StatCard label="Completed" value={String(filteredOrders.filter((order) => order.status === 'completed').length)} />
+        <StatCard label="Cancelled" value={String(filteredOrders.filter((order) => order.status === 'cancelled').length)} />
+        <StatCard label="Open Value" value={`Rs ${visibleOrders.reduce((sum, order) => sum + order.total, 0)}`} />
       </div>
 
       {/* Order detail must always sit to the right of the order list, at
@@ -624,7 +758,7 @@ export default function SalesPage() {
                     <p className="truncate text-[9px] font-black uppercase tracking-[0.14em] text-gray-400">{age(order.createdAt)}</p>
                     <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-black uppercase ${order.status === 'pending' ? 'bg-amber-100 text-amber-700' : order.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{order.status}</span>
                   </div>
-                  <h3 className="mt-2 break-words text-sm font-black text-gray-900">Order #{orderNumber(order)}</h3>
+                  <h3 className="mt-2 break-words text-sm font-black text-gray-900">{cardHeading(order)}</h3>
                   <p className="mt-0.5 truncate text-[10px] font-semibold text-gray-500">{formatOrderDateTime(order.createdAt)}</p>
                   <div className="mt-2 space-y-0.5 text-[11px] text-gray-600">
                     <Line icon={<UserRound size={11} />} text={label(order)} />
@@ -654,7 +788,7 @@ export default function SalesPage() {
             <div className="flex flex-col">
               <div className="shrink-0 border-b border-gray-100 p-6">
                 <div className="flex items-start justify-between gap-4">
-                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p><h2 className="mt-2 text-2xl font-black text-gray-900">Order #{orderNumber(selectedOrder)}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p></div>
+                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p><h2 className="mt-2 text-2xl font-black text-gray-900">{cardHeading(selectedOrder)}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p></div>
                   <div className="flex flex-wrap justify-end gap-2">
                     {selectedOrder.customer.phone && selectedOrder.customer.phone !== '03000000000' && (
                       <button disabled={isSendingWA} type="button" onClick={() => void handleSendWhatsAppReciept(selectedOrder)} className="rounded-2xl bg-emerald-500 px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white disabled:opacity-50">
@@ -663,13 +797,24 @@ export default function SalesPage() {
                     )}
                     <button type="button" onClick={() => {
                       const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
-                      if (isElectron && settings && settings.kitchenPrinter) {
+                      if (isElectron && settings && (settings.kitchenPrinter || settings.counterPrinter)) {
                         try {
                           const electronRequire = (window as ElectronWindow).require;
                           const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
                           if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
                           const printLogo = localStorage.getItem('preferred-print-logo');
-                          ipcRenderer.invoke('print-kitchen-receipt-data', selectedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+                          const categoryLookup = buildCategoryLookup(products);
+                          void dispatchKitchenPrints(
+                            selectedOrder.items,
+                            categoryLookup,
+                            settings,
+                            (groupItems, printerName, label) =>
+                              reportPrintOutcome(
+                                ipcRenderer.invoke('print-kitchen-receipt-data', { ...selectedOrder, items: groupItems }, printerName, printLogo, settings),
+                                label,
+                                toast,
+                              ),
+                          );
                         } catch {
                           setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=kitchen`);
                         }
@@ -677,6 +822,37 @@ export default function SalesPage() {
                         setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=kitchen`);
                       }
                     }} className="rounded-2xl bg-black px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white">Send to Kitchen</button>
+                    <button type="button" onClick={() => {
+                      // Same direct-IPC-else-fallback-page pattern as Send to
+                      // Kitchen above - prints immediately on this till's own
+                      // counter printer with no dependency on the internet,
+                      // rather than only ever being reachable through the
+                      // generic Manual Print Center page (the plain printer
+                      // icon link just below).
+                      const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+                      if (isElectron && settings && settings.counterPrinter) {
+                        try {
+                          const electronRequire = (window as ElectronWindow).require;
+                          const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
+                          if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
+                          const printLogo = localStorage.getItem('preferred-print-logo');
+                          // customerDue mirrors the "Previous Dues" figure
+                          // shown on screen, same as every other cashier
+                          // receipt print in this file, so the printed
+                          // receipt always matches what the cashier saw.
+                          const receiptData = { ...selectedOrder, previousDues: customerDue };
+                          reportPrintOutcome(
+                            ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
+                            'Customer receipt',
+                            toast,
+                          );
+                        } catch {
+                          setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=cashier`);
+                        }
+                      } else {
+                        setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=cashier`);
+                      }
+                    }} className="rounded-2xl bg-[#F6F7FB] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700">Print Receipt</button>
                     <Link to={`/dashboard/sales/print/${selectedOrder.id}`} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><Printer size={16} /></Link>
                     <button type="button" onClick={() => void refreshOne(selectedOrder.id)} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><RefreshCcw size={16} /></button>
                     {selectedOrder.status === 'pending' ? (
@@ -686,6 +862,20 @@ export default function SalesPage() {
                     )}
                   </div>
                 </div>
+                {selectedOrder.status === 'pending' ? (
+                  <div className="mt-4 grid gap-2">
+                    <button type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setPaymentAmount(''); setConfirmPending(false); setShowPayment(true); }} className="rounded-2xl bg-[#E2F33C] px-4 py-2 text-sm font-black text-black">Complete Order</button>
+                    {hasPermission('sales.delete') ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowCancel(true)}
+                        className="rounded-2xl bg-rose-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Lock size={14} className="mr-1.5 inline" />Cancel Order
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="space-y-5 p-6">
@@ -694,6 +884,23 @@ export default function SalesPage() {
                   <Box label="Created At" value={formatOrderDateTime(selectedOrder.createdAt)} />
                   <Box label="Customer" value={label(selectedOrder)} />
                   <Box label={selectedOrder.orderType === 'DineIn' ? 'Waiter' : 'Phone'} value={phoneLabel(selectedOrder)} />
+                  {selectedOrder.orderType === 'DineIn' ? (
+                    selectedOrder.status === 'pending' ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowTableEdit(true)}
+                        className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3 text-left transition hover:bg-gray-100"
+                      >
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Table</p>
+                        <p className="mt-1 flex items-center gap-1.5 break-words text-sm font-bold text-gray-900">
+                          {selectedOrder.table ? `Table ${selectedOrder.table}` : 'Not set'}
+                          <Pencil size={12} className="shrink-0 text-gray-400" />
+                        </p>
+                      </button>
+                    ) : (
+                      <Box label="Table" value={selectedOrder.table ? `Table ${selectedOrder.table}` : 'N/A'} />
+                    )
+                  ) : null}
                   <Box label="Order Type" value={prettyType(selectedOrder)} />
                   <Box label="Address" value={selectedOrder.address || 'N/A'} />
                   <Box label="Previous Dues" value={`Rs ${customerDue}`} />
@@ -727,28 +934,13 @@ export default function SalesPage() {
                   <Row label="Paid" value={`Rs ${selectedOrder.paidAmount ?? 0}`} />
                   <Row label="Grand Total" value={`Rs ${selectedOrder.total + customerDue}`} strong />
                 </div>
-                {selectedOrder.status === 'pending' ? (
-                  <div className="grid gap-2">
-                    <button type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setShowPayment(true); }} className="rounded-[24px] bg-[#E2F33C] px-5 py-4 text-lg font-black text-black">Complete Order</button>
-                    {hasPermission('sales.delete') ? (
-                      <button
-                        type="button"
-                        onClick={() => setShowCancel(true)}
-                        disabled={isDesktopApp() && !isOnline}
-                        title={isDesktopApp() && !isOnline ? "Cancelling requires the shop's Cancel Order Key to be checked online - try again once back online." : undefined}
-                        className="rounded-[24px] bg-rose-600 px-5 py-4 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <Lock size={16} className="mr-2 inline" />Cancel Order
-                      </button>
-                    ) : null}
-                  </div>
-                ) : selectedOrder.status === 'cancelled' ? (
+                {selectedOrder.status === 'cancelled' ? (
                   <div className="space-y-1.5 rounded-[24px] bg-rose-50 px-4 py-4 text-sm font-bold text-rose-700">
                     <p>This order was cancelled and kept for record.</p>
                     {selectedOrder.cancelledBy ? <p className="text-xs font-semibold text-rose-500">Cancelled by {selectedOrder.cancelledBy}{selectedOrder.cancelledAt ? ` · ${formatOrderDateTime(selectedOrder.cancelledAt)}` : ''}</p> : null}
                     {selectedOrder.cancelReason ? <p className="text-xs font-semibold text-rose-500">Reason: {selectedOrder.cancelReason}</p> : null}
                   </div>
-                ) : <div className="rounded-[24px] bg-emerald-50 px-4 py-4 text-sm font-bold text-emerald-700">This order is completed and stored in sales history.</div>}
+                ) : selectedOrder.status !== 'pending' ? <div className="rounded-[24px] bg-emerald-50 px-4 py-4 text-sm font-bold text-emerald-700">This order is completed and stored in sales history.</div> : null}
               </div>
             </div>
           ) : <div className="flex min-h-[680px] flex-col items-center justify-center gap-4 p-6 text-center text-gray-400 lg:min-h-0 lg:h-full"><ShoppingBag size={56} strokeWidth={1.4} /><div><p className="font-bold text-gray-500">Select an order</p><p className="text-sm">Choose any order card from the left.</p></div></div>}
@@ -756,7 +948,7 @@ export default function SalesPage() {
       </div>
 
       {showPayment && selectedOrder ? (
-        <Modal title="Complete Payment" onClose={() => setShowPayment(false)}>
+        <Modal title="Complete Payment" onClose={() => { setShowPayment(false); setConfirmPending(false); }}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-2">
               <div>
@@ -796,8 +988,30 @@ export default function SalesPage() {
             </div>
             <div>
               <label className="mb-1 block text-sm font-semibold text-gray-700">Amount Paid</label>
-              <input value={paymentAmount} onChange={(event) => /^\d*$/.test(event.target.value) && setPaymentAmount(event.target.value)} className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" placeholder={`Up to Rs ${payable}`} />
+              <input
+                value={paymentAmount}
+                onChange={(event) => {
+                  if (!/^\d*$/.test(event.target.value)) return;
+                  setPaymentAmount(event.target.value);
+                  // Typing a real amount supersedes the tick below - only
+                  // relevant while it's still empty.
+                  if (event.target.value) setConfirmPending(false);
+                }}
+                className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
+                placeholder={`Up to Rs ${payable}`}
+              />
             </div>
+            {!paymentAmount ? (
+              <label className="flex cursor-pointer items-start gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">
+                <input
+                  type="checkbox"
+                  checked={confirmPending}
+                  onChange={(event) => setConfirmPending(event.target.checked)}
+                  className="mt-0.5"
+                />
+                Put in Pending - confirm with no payment collected right now (this leaves the full ₨{payable} as a due).
+              </label>
+            ) : null}
             <div className="grid gap-2 sm:grid-cols-2">
               <button type="button" onClick={() => void completeOrder(false)} className="rounded-[20px] bg-black px-4 py-3 text-sm font-black text-white">Confirm Payment</button>
               <button type="button" onClick={() => void completeOrder(true)} className="rounded-[20px] bg-[#E2F33C] px-4 py-3 text-sm font-black text-black">Pay Full</button>
@@ -809,6 +1023,20 @@ export default function SalesPage() {
       {showCancel && selectedOrder ? <CancelOrderModal order={selectedOrder} onClose={() => setShowCancel(false)} onCancelled={handleOrderCancelled} /> : null}
 
       {showAddItems && selectedOrder ? <Modal title="Add Items To Order" onClose={() => setShowAddItems(false)} wide><AddItemsManager products={products} onSaveItems={addItems} onProductsChanged={refreshProducts} /></Modal> : null}
+      {showTableEdit && selectedOrder ? (
+        <TableChangeModal
+          order={selectedOrder}
+          isOnline={isOnline}
+          onClose={() => setShowTableEdit(false)}
+          onSave={async (table) => {
+            const previousTable = selectedOrder.table;
+            const updated = await saveUpdate({ table });
+            if (updated) {
+              toast.success(previousTable ? `Table changed from ${previousTable} to ${table}.` : `Table set to ${table}.`);
+            }
+          }}
+        />
+      ) : null}
       {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
     </div>
   );
@@ -819,6 +1047,14 @@ function phoneLabel(order: SavedOrder) { return order.orderType === 'DineIn' ? (
 function prettyType(order: SavedOrder) { return order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery'; }
 function age(createdAt: string) { const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000); return mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} hr ${mins % 60} min ago`; }
 function orderNumber(order: SavedOrder) { return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, '0'); }
+// The prominent heading on the order card / order detail panel - a DineIn
+// order is far more usefully identified by which table it's sitting at
+// than by an arbitrary ticket number (a waiter working the floor thinks
+// "Table 5", not "Order #042"). TakeAway/Delivery have no table at all, so
+// they keep showing the order number as before. The full order number is
+// still always available in the "Order Number" Box further down the detail
+// panel either way - this only changes the big headline.
+function cardHeading(order: SavedOrder) { return order.orderType === 'DineIn' && order.table ? `Table ${order.table}` : `Order #${orderNumber(order)}`; }
 function hasCustomerPhone(order: SavedOrder) { return Boolean(order.customer.phone && order.customer.phone !== '03000000000'); }
 function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 
@@ -829,3 +1065,136 @@ function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return 
 function Box({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3"><p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{label}</p><p className="mt-1 break-words text-sm font-bold text-gray-900">{value}</p></div>; }
 function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) { return <div className={`flex items-center justify-between py-1.5 ${strong ? 'text-lg font-black text-gray-900' : 'text-sm text-gray-500'}`}><span>{label}</span><span>{value}</span></div>; }
 function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) { return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm sm:p-6"><div className={`flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] bg-white shadow-2xl transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-gray-100 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-3 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>; }
+
+// Lets a cashier move a DineIn order to a different table (a customer
+// asked to switch seats, or the table was mis-picked at placement) without
+// going through the full Edit Order page - just a field patch, same as
+// note/waiter (see saveUpdate's plain `{ table }` call, which
+// applyOrderPatch/updateQueuedOrder already both support - see
+// orderController.js/localOrders.js). The occupied-tables check here is a
+// UX aid only, not the real backstop - POSPage.tsx's own occupied-table
+// list is what actually prevents a NEW order from double-booking a table;
+// this modal just tries to steer the cashier away from an obvious
+// collision while picking, using the same unbounded-by-date source (see
+// fetchOccupiedDineInTables).
+function TableChangeModal({
+  order,
+  isOnline,
+  onClose,
+  onSave,
+}: {
+  order: SavedOrder;
+  isOnline: boolean;
+  onClose: () => void;
+  onSave: (table: string) => Promise<void>;
+}) {
+  const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
+  const [loadingOccupied, setLoadingOccupied] = useState(true);
+  const [selected, setSelected] = useState(order.table || '');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // Same online/offline split as POSPage.tsx's own loadOccupiedTables
+        // - previously this only ever tried the live endpoint, so offline
+        // it silently fell back to "nothing greyed out" every time instead
+        // of using the same cache this till already keeps warm for exactly
+        // this purpose.
+        let tables: string[];
+        if (isDesktopApp() && isOnline) {
+          tables = (await fetchOccupiedDineInTables()) ?? [];
+          void pushOccupiedTablesCache(tables).catch(() => {});
+        } else if (isDesktopApp()) {
+          const [cached, localOrders] = await Promise.all([
+            getOccupiedTablesCache().catch(() => ({ updatedAt: null, tables: [] as string[] })),
+            loadOrdersFromLocalHub().catch(() => []),
+          ]);
+          const occupied = new Set(cached.tables);
+          localOrders
+            .filter((candidate) => candidate.orderType === 'DineIn' && candidate.status === 'pending' && candidate.table)
+            .forEach((candidate) => occupied.add(candidate.table));
+          tables = Array.from(occupied);
+        } else {
+          tables = (await fetchOccupiedDineInTables()) ?? [];
+        }
+        if (!cancelled) setOccupiedTables(new Set(tables));
+      } catch {
+        // Best-effort - if this fails, nothing shows as greyed out; the
+        // save itself still works fine either way (see the header comment
+        // above - this is a UX aid, not the real guard).
+      } finally {
+        if (!cancelled) setLoadingOccupied(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline]);
+
+  async function submit() {
+    if (!selected) {
+      setError('Select a table.');
+      return;
+    }
+    if (selected === order.table) {
+      onClose();
+      return;
+    }
+    setSubmitting(true);
+    setError('');
+    try {
+      await onSave(selected);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to change table.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title={`Change Table - Order #${orderNumber(order)}`} onClose={onClose}>
+      <p className="text-sm text-gray-500">
+        Currently {order.table ? <span className="font-bold text-gray-900">Table {order.table}</span> : 'no table set'}. Pick the new table below.
+      </p>
+      {loadingOccupied ? <p className="mt-3 text-xs font-bold text-gray-400">Checking which tables are free...</p> : null}
+      <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-5">
+        {Array.from({ length: 20 }).map((_, index) => {
+          const tableNumber = String(index + 1);
+          const isOccupied = occupiedTables.has(tableNumber) && tableNumber !== order.table;
+          const isSelected = selected === tableNumber;
+          return (
+            <button
+              key={tableNumber}
+              type="button"
+              disabled={isOccupied}
+              onClick={() => setSelected(tableNumber)}
+              title={isOccupied ? `Table ${tableNumber} already has a pending order` : undefined}
+              className={`rounded-xl border py-2.5 text-sm font-black transition ${
+                isSelected
+                  ? 'border-black bg-black text-white'
+                  : isOccupied
+                    ? 'cursor-not-allowed border-gray-100 bg-gray-50 text-gray-300'
+                    : 'border-gray-200 bg-white text-gray-700 hover:border-gray-400'
+              }`}
+            >
+              {tableNumber}
+            </button>
+          );
+        })}
+      </div>
+      {error ? <p className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
+      <button
+        type="button"
+        disabled={submitting || !selected}
+        onClick={() => void submit()}
+        className="mt-5 w-full rounded-2xl bg-black py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {submitting ? 'Saving...' : 'Save New Table'}
+      </button>
+    </Modal>
+  );
+}

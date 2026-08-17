@@ -95,6 +95,8 @@ export interface ShopSession {
 export interface ShopSessionStatus {
   isOpen: boolean;
   session: ShopSession | null;
+  /** Shop-lifetime, never-resetting order count (backend/models/Shop.js's orderSequenceCounter) - printed on receipts as "Tr#". Present regardless of whether the shop is currently open, unlike session.orderCounter. Used to keep the Local Hub's own lifetime counter in step - see local-hub-api.ts's syncLifetimeCounter. */
+  shopSequenceCounter?: number;
 }
 
 export interface UnresolvedOrder {
@@ -145,12 +147,20 @@ export interface OrderPayload {
   orderId?: string;
   clientSyncId?: string;
   dailyOrderNumber?: number;
+  // Shop-lifetime, never-resetting order count - printed on receipts as
+  // "Tr#" (see backend/models/Order.js's shopSequenceNumber). Unlike
+  // dailyOrderNumber, this is never reassigned/reset by a new shop-open.
+  shopSequenceNumber?: number;
   // Set by POSPage.tsx when placing an order straight online with a Local
   // Hub available - see local-hub-api.ts's reserveLocalOrderNumber and
   // orderController.js's createOrder. Never set for a plain browser tab
   // (no Local Hub to reserve from) or pos-mobile's own direct online
   // orders - those still get a fresh cloud-assigned number as before.
   requestedDailyOrderNumber?: number;
+  // Same idea as requestedDailyOrderNumber above, but for the shop-lifetime
+  // Tr# counter (backend/models/Shop.js's orderSequenceCounter) - see
+  // local-hub-api.ts's reserveLifetimeOrderNumber.
+  requestedShopSequenceNumber?: number;
   items: Array<{
     name: string;
     price: number;

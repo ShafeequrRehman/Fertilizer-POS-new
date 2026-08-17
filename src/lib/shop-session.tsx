@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { fetchShopSessionStatus } from "@/lib/pos-api";
 import { ShopSession } from "@/lib/pos-types";
 import { isDesktopApp } from "@/lib/api";
-import { syncOrderCounter, resetLocalOrderCounter } from "@/lib/local-hub-api";
+import { syncOrderCounter, resetLocalOrderCounter, syncLifetimeCounter } from "@/lib/local-hub-api";
 
 // Shared "is the shop open" state for everything under the shop dashboard -
 // the Open/Close Shop button in DashboardShell's topbar and the POS screen
@@ -96,6 +96,14 @@ export function ShopSessionProvider({ children }: { children: ReactNode }) {
     try {
       const result = await fetchShopSessionStatus();
       if (result) {
+        // Tr# / shopSequenceNumber's counter - unlike orderCounter below,
+        // this is present in the response regardless of isOpen (it lives on
+        // the Shop document, not the session), and never resets, so it's
+        // reconciled here unconditionally rather than only in the isOpen
+        // branch. See local-hub-api.ts's syncLifetimeCounter.
+        if (isDesktopApp()) {
+          void syncLifetimeCounter(result.shopSequenceCounter ?? 0);
+        }
         if (result.isOpen) {
           // Cloud confirms open - whether from a normal online Open Shop
           // or because offline-sync.ts already reconciled a pending local

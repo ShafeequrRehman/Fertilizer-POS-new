@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { ApiError, checkPendingOrder, claimKitchenPrint, claimReceiptPrint, createOrder, fetchCustomerSearch, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOccupiedDineInTables, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
 import { getProductImageUrl } from '@/lib/asset-path';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -10,7 +10,10 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOccupiedTablesCache, pushOccupiedTablesCache } from '@/lib/local-hub-api';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -50,6 +53,12 @@ export default function POSPage() {
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
   const [waiters, setWaiters] = useState<Waiter[]>([]);
+  // Table numbers currently tied to a still-pending DineIn order - see
+  // loadOccupiedTables below. Used both to grey out/disable those options
+  // in the Table Number dropdown and as a final guard in
+  // validateOrderForm, so a table can't be double-booked into two
+  // simultaneous open orders.
+  const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -146,6 +155,10 @@ export default function POSPage() {
           products: productResponse?.products || [],
           customers: [],
           staff: waiterResponse,
+          // `roles` deliberately omitted (not sent as []) - this call site
+          // only ever refreshes products/waiters; referenceData.js's set()
+          // preserves whatever roles offline-sync.ts's own less-frequent
+          // full push last put there instead of wiping it out.
         }).catch(() => {});
       }
     }
@@ -188,8 +201,74 @@ export default function POSPage() {
       }
     }
     void loadProducts();
+  }, [isOnline]);
+
+  // A DineIn table shouldn't be selectable for a brand-new order while an
+  // earlier order at that same table is still open (pending) - otherwise
+  // two separate tickets could both claim "Table 5" at once, and whoever
+  // completes the older one would also unknowingly settle the newer one's
+  // items (or the kitchen just gets two confusing "Table 5" tickets at the
+  // same time). This deliberately has NO date bound - a table that's been
+  // sitting on an old, never-completed pending order from days ago must
+  // still show as occupied, not just ones from the last 24h (see
+  // fetchOccupiedDineInTables/getOccupiedTablesCache's own comments) -
+  // this only ever needs to be "recent enough", not perfectly live, since
+  // validateOrderForm below is the real backstop right before an order is
+  // actually saved.
+  async function loadOccupiedTables() {
+    try {
+      let occupied: Set<string>;
+      if (isDesktopApp() && isOnline) {
+        // Online: the live, unbounded endpoint directly - also keep the
+        // Local Hub's own copy fresh (best-effort) so this same list is
+        // still available the instant this till goes offline.
+        const tables = (await fetchOccupiedDineInTables()) ?? [];
+        occupied = new Set(tables);
+        void pushOccupiedTablesCache(tables).catch(() => {});
+      } else if (isDesktopApp()) {
+        // Offline: the Local Hub's last-synced copy of the unbounded list
+        // (covers an old pending order this till already knew about before
+        // going offline) merged with whatever's still queued locally right
+        // now (covers a DineIn order placed on THIS till while offline,
+        // which the cache above could never have seen yet either way).
+        const [cached, localOrders] = await Promise.all([
+          getOccupiedTablesCache().catch(() => ({ updatedAt: null, tables: [] as string[] })),
+          loadOrdersFromLocalHub().catch(() => []),
+        ]);
+        occupied = new Set(cached.tables);
+        localOrders
+          .filter((order) => order.orderType === 'DineIn' && order.status === 'pending' && order.table)
+          .forEach((order) => occupied.add(order.table));
+      } else {
+        // Plain browser tab - no Local Hub, no offline story at all.
+        const tables = (await fetchOccupiedDineInTables()) ?? [];
+        occupied = new Set(tables);
+      }
+      setOccupiedTables(occupied);
+    } catch {
+      // Best-effort - if this fails, the dropdown just isn't restricted
+      // this particular moment; validateOrderForm's own check (and the
+      // cashier's own judgment) still apply.
+    }
+  }
+
+  useEffect(() => {
+    void loadOccupiedTables();
+    // Polled rather than fully live - good enough to catch another
+    // till/paired phone freeing up or occupying a table without a
+    // dedicated push channel for it. Re-runs immediately on every
+    // connectivity flip too (isOnline dependency), same as loadProducts.
+    const intervalId = window.setInterval(() => void loadOccupiedTables(), 15000);
+    return () => window.clearInterval(intervalId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline]);
+
+  // The hidden auto-print iframe (see printReadyUrl below) loads
+  // PrintOrderPage.tsx in its own separate React tree - a toast shown from
+  // inside it would render invisibly in that hidden iframe. It posts a
+  // message up here instead once it's actually called window.print(); this
+  // is what shows the popup for real, on screen. See print-notify.ts.
+  useEffect(() => listenForPrintSentMessages(shopToast), [shopToast]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -327,7 +406,27 @@ export default function POSPage() {
     setSearchQuery(query);
 
     try {
-      const result = await fetchCustomerSearch(query, searchBy);
+      let result: Customer[];
+      if (isDesktopApp() && !isOnline) {
+        // Offline: filter the Local Hub's cached customer list (kept
+        // fresh in the background by offline-sync.ts's periodic
+        // pushCurrentReferenceData) client-side instead of a live cloud
+        // search - same instant, no-network-required story as the
+        // product grid above, instead of this autocomplete just failing
+        // outright with nothing to fall back to.
+        const snapshot = await getReferenceData();
+        const cached = (snapshot.customers || []) as Customer[];
+        const q = query.trim().toLowerCase();
+        result = cached
+          .filter((customer) => {
+            const matchesName = searchBy !== 'phone' && (customer.name || '').toLowerCase().includes(q);
+            const matchesPhone = searchBy !== 'name' && (customer.phone || '').toLowerCase().includes(q);
+            return matchesName || matchesPhone;
+          })
+          .slice(0, 20);
+      } else {
+        result = await fetchCustomerSearch(query, searchBy);
+      }
       if (result.length > 0) {
         setSuggestions(result);
         setShowNewCustomerPrompt(false);
@@ -425,14 +524,21 @@ export default function POSPage() {
 
     if (orderFormData.orderType === 'DineIn') {
       if (!orderFormData.table) return showMessage('error', 'Table number is required for dine-in orders.'), false;
+      if (occupiedTables.has(orderFormData.table)) return showMessage('error', `Table ${orderFormData.table} already has a pending order - complete or cancel it first.`), false;
       if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX, or leave it empty for dine-in.'), false;
       if (orderFormData.phone && !orderFormData.customer.trim()) return showMessage('error', 'Customer name is required when a dine-in phone number is entered.'), false;
       return true;
     }
 
-    if (!orderFormData.customer.trim()) return showMessage('error', 'Customer name is required for takeaway and delivery orders.'), false;
-    if (!/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX for takeaway and delivery orders.'), false;
-    if (orderFormData.orderType === 'Delivery' && !orderFormData.address.trim()) return showMessage('error', 'Address is required for delivery orders.'), false;
+    // TakeAway and Delivery: name, phone, and address are all optional now -
+    // a walk-in counter customer or a quick phone order can check out with
+    // none of them, same as DineIn already allowed. If a phone IS entered
+    // though, it still has to be a real, valid number, and a name is
+    // required alongside it - a phone with no name (or an invalid one) is
+    // more likely a typo than a deliberate walk-in, and a due left on a
+    // phone-but-no-name order can't reliably be found again later.
+    if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX, or leave it empty.'), false;
+    if (orderFormData.phone && !orderFormData.customer.trim()) return showMessage('error', 'Customer name is required when a phone number is entered.'), false;
     return true;
   }
 
@@ -443,39 +549,64 @@ export default function POSPage() {
     setIsSavingOrder(true);
     setStatusMessage(null);
 
+    // Guards the background pending-bill toast below (see checkPendingOrder
+    // call) from overwriting the real "Order saved" confirmation if that
+    // cloud lookup happens to resolve after the order itself already went
+    // through - the order finishing is always the more important message.
+    let orderFinalized = false;
+
     try {
       // Both of these are cloud lookups/writes - skipped entirely while
       // offline (the till has no way to reach them, and neither is
-      // essential to actually ringing up the order) rather than letting a
-      // failed network call here block the whole offline order from
-      // saving to the Local Hub below.
-      if (isDesktopApp() && !isOnline) {
-        // no-op: see the branch below, which builds orderPayload and then
-        // queues it locally instead of touching the network at all.
-      } else {
-        await updateExistingCustomerIfNeeded();
-      }
+      // essential to actually ringing up the order), and now fire-and-
+      // forget even while online. Neither one feeds into orderPayload
+      // below (the order embeds the customer's name/phone/address exactly
+      // as typed, not a re-fetched record, and the pending-bill check is
+      // purely an informational toast) - so there's nothing for the
+      // cashier to gain by waiting on either cloud round trip before the
+      // order itself gets built and saved. Previously these were awaited
+      // in sequence, which meant a slow or flaky connection to the remote
+      // backend added its full round-trip time (or, worse, a thrown error
+      // from updateCustomer) to every single online checkout - up to and
+      // including silently failing to place the order at all. Now both
+      // just run in the background; if either fails, it's logged and
+      // otherwise ignored.
+      if (!(isDesktopApp() && !isOnline)) {
+        void updateExistingCustomerIfNeeded().catch((err) => {
+          console.error('Background customer profile update failed (order still proceeds):', err);
+        });
 
-      // A customer is allowed to place a new order even while an older one
-      // of theirs is still pending - the old order stays exactly as-is
-      // (its own line in the order history / kitchen queue) and the
-      // outstanding amount on it is folded into "Previous Dues" the next
-      // time any of their bills is paid (see Sales page's Complete
-      // Payment panel), instead of blocking checkout outright like before.
-      if (orderFormData.phone && !(isDesktopApp() && !isOnline)) {
-        try {
-          const pendingOrder = await checkPendingOrder(orderFormData.phone);
-          if (pendingOrder.exists) {
-            showMessage('info', 'Note: this customer has an earlier pending bill. It will be added to their next payment.');
-          }
-        } catch {
-          // Non-blocking - if this lookup fails for any reason, still let
-          // the order go through.
+        // A customer is allowed to place a new order even while an older
+        // one of theirs is still pending - the old order stays exactly
+        // as-is (its own line in the order history / kitchen queue) and
+        // the outstanding amount on it is folded into "Previous Dues" the
+        // next time any of their bills is paid (see Sales page's Complete
+        // Payment panel), instead of blocking checkout outright like
+        // before.
+        if (orderFormData.phone) {
+          void checkPendingOrder(orderFormData.phone)
+            .then((pendingOrder) => {
+              if (pendingOrder?.exists && !orderFinalized) {
+                showMessage('info', 'Note: this customer has an earlier pending bill. It will be added to their next payment.');
+              }
+            })
+            .catch(() => {
+              // Non-blocking - if this lookup fails for any reason, the
+              // order has already gone through regardless.
+            });
         }
       }
 
-      const customerName = orderFormData.orderType === 'DineIn' && !orderFormData.customer.trim() ? 'Dine-In Customer' : orderFormData.customer.trim();
-      const customerPhone = orderFormData.orderType === 'DineIn' && !orderFormData.phone ? '03000000000' : orderFormData.phone;
+      // Name/phone/address are optional for every order type now (see
+      // validateOrderForm above) - an empty name falls back to the same
+      // placeholder every other page in this app already uses to display a
+      // nameless order ('Dine-In Customer' for DineIn, 'Walk-in Customer'
+      // otherwise - see RecordPage.tsx/SalesPage.tsx's own label()
+      // functions), and an empty phone falls back to the walk-in
+      // placeholder number (03000000000) that Customer Dues/Ledger already
+      // knows to exclude from tracking.
+      const customerName = orderFormData.customer.trim() || (orderFormData.orderType === 'DineIn' ? 'Dine-In Customer' : 'Walk-in Customer');
+      const customerPhone = orderFormData.phone || '03000000000';
       const now = new Date().toISOString();
       const clientSyncId = crypto.randomUUID();
 
@@ -518,15 +649,33 @@ export default function POSPage() {
         // this same order a second time the moment it syncs.
         const printSettings = getStoreSettings();
         const isElectronNow = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+        // receipt is always false here now - every order type, TakeAway
+        // included, only ever prints its kitchen ticket at placement (see
+        // this function's own header comment below and the removed
+        // TakeAway-specific block further down this file). The customer
+        // receipt prints once, at Complete Order, same as DineIn/Delivery.
+        // Either printer counts here ONLY for Urban Crunch (the one shop
+        // with category-based counter routing enabled - see
+        // kitchen-print-routing.ts) - its orders might route entirely to
+        // the counter printer (Ice Cream/Drinks/Shwarma) with no kitchen-
+        // printer item at all, but the till still handles all of this
+        // order's kitchen-side printing itself at placement below, so the
+        // background watcher must stay hands-off either way. Every other
+        // shop still only ever prints to kitchenPrinter, so only that flag
+        // should count for them.
         const printFlags = {
-          kitchen: isElectronNow && !!printSettings.kitchenPrinter,
-          receipt: isElectronNow && orderPayload.orderType === 'TakeAway' && !!printSettings.counterPrinter,
+          kitchen: isElectronNow && !!(printSettings.kitchenPrinter || (isCategoryPrintRoutingEnabled() && printSettings.counterPrinter)),
+          receipt: false,
         };
         const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username }, printFlags);
         return {
           ...orderPayload,
           id: `local-${localRecord.id}`,
           dailyOrderNumber: localRecord.localOrderNumber,
+          // Tr# - assigned automatically by queueOrder alongside
+          // localOrderNumber above, so it's ready to print on the receipt
+          // immediately, same as dailyOrderNumber.
+          shopSequenceNumber: localRecord.shopSequenceNumber,
         } as SavedOrder;
       }
 
@@ -567,12 +716,21 @@ export default function POSPage() {
         // so the cloud honors it instead of handing out its own. If the
         // Local Hub can't be reached for some reason, orderPayload simply
         // goes without one and the cloud falls back to its own counter,
-        // same as before this existed.
-        try {
-          orderPayload.requestedDailyOrderNumber = await reserveLocalOrderNumber();
-        } catch {
-          // Local Hub unreachable - fall through without a reserved
-          // number; not a reason to block the order.
+        // same as before this existed. These are two completely
+        // independent counters (see reserveLifetimeOrderNumber's own
+        // comment), so there's no reason to reserve them one after the
+        // other and pay for two sequential LAN round trips - running them
+        // together via Promise.allSettled halves the time this step adds
+        // before the cloud-create race below even starts.
+        const [dailyNumberResult, lifetimeNumberResult] = await Promise.allSettled([
+          reserveLocalOrderNumber(),
+          reserveLifetimeOrderNumber(),
+        ]);
+        if (dailyNumberResult.status === 'fulfilled') {
+          orderPayload.requestedDailyOrderNumber = dailyNumberResult.value;
+        }
+        if (lifetimeNumberResult.status === 'fulfilled') {
+          orderPayload.requestedShopSequenceNumber = lifetimeNumberResult.value;
         }
 
         // isOnline only re-checks every 5s (see network-status.ts) and can
@@ -611,9 +769,20 @@ export default function POSPage() {
       if (isDesktopApp() && !isOfflineOrder && shopSession?.id && typeof savedOrder.dailyOrderNumber === 'number') {
         void syncOrderCounter(shopSession.id, savedOrder.dailyOrderNumber);
       }
+      // Same best-effort reconciliation for Tr# - see local-hub-api.ts's
+      // syncLifetimeCounter.
+      if (isDesktopApp() && !isOfflineOrder && typeof savedOrder.shopSequenceNumber === 'number') {
+        void syncLifetimeCounter(savedOrder.shopSequenceNumber);
+      }
 
       setCart([]);
       resetOrderForm();
+      // This order's table (if DineIn) is now occupied - refresh
+      // immediately rather than waiting up to 15s for the next poll, so
+      // the very next order typed in right after doesn't briefly show
+      // that same table as available.
+      void loadOccupiedTables();
+      orderFinalized = true;
       if (isOfflineOrder) {
         showMessage('success', `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.`);
       } else if (savedOrder.customerSyncWarning) {
@@ -635,16 +804,31 @@ export default function POSPage() {
           // other till/process can even see it until it syncs), so this
           // till just prints straight away instead of claiming first.
           const claimKitchen = isOfflineOrder ? Promise.resolve() : claimKitchenPrint(savedOrder.id);
-          const claimReceipt = isOfflineOrder ? Promise.resolve() : claimReceiptPrint(savedOrder.id);
 
-          if (settings.kitchenPrinter) {
+          if (settings.kitchenPrinter || settings.counterPrinter) {
             // Claim before printing, same rule the background poll follows
             // (see DashboardShell.tsx) - guarantees this order can never
             // get printed twice even if this till's own immediate-print
             // path and the poll loop somehow race on the same order.
             claimKitchen
               .then(() => {
-                ipcRenderer.invoke('print-kitchen-receipt-data', savedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+                // Ice Cream/Drinks and Shwarma items print on the counter
+                // printer (Ice Cream+Drinks combined on one slip, Shwarma
+                // on its own separate slip) - everything else still prints
+                // on the kitchen printer, same as before this split
+                // existed. See kitchen-print-routing.ts.
+                const categoryLookup = buildCategoryLookup(products);
+                void dispatchKitchenPrints(
+                  savedOrder.items,
+                  categoryLookup,
+                  settings,
+                  (groupItems, printerName, label) =>
+                    reportPrintOutcome(
+                      ipcRenderer.invoke('print-kitchen-receipt-data', { ...savedOrder, items: groupItems }, printerName, printLogo, settings),
+                      label,
+                      shopToast,
+                    ),
+                );
               })
               .catch((err) => {
                 // 409 just means something else already claimed it (the
@@ -658,37 +842,17 @@ export default function POSPage() {
             console.warn("No kitchen printer configured in settings.");
           }
 
-          // TakeAway customers pay and collect right away, so their
-          // receipt (with the order number) prints now instead of waiting
-          // for Complete Payment on the Sales page - same claim-before-
-          // print rule as the kitchen ticket above, and DashboardShell.tsx's
-          // ReceiptPrintWatcher covers this same claim for TakeAway orders
-          // placed from a phone via pos-mobile. SalesPage.tsx checks
-          // customerReceiptPrintedAt before its own completion-time print
-          // so this order never gets a second copy.
-          if (savedOrder.orderType === 'TakeAway') {
-            if (settings.counterPrinter) {
-              claimReceipt
-                .then(async () => {
-                  // Small order-number-only slip first, then the full
-                  // customer receipt - so the customer has something short
-                  // to hold up at the counter when their order is ready.
-                  try {
-                    await ipcRenderer.invoke('print-order-token-data', savedOrder, settings.counterPrinter, printLogo, settings);
-                  } catch (err) {
-                    console.error(err);
-                  }
-                  ipcRenderer.invoke('print-cashier-receipt-data', savedOrder, settings.counterPrinter, printLogo, settings).catch(console.error);
-                })
-                .catch((err) => {
-                  if (!(err instanceof ApiError) || err.status !== 409) {
-                    console.error('Receipt print claim failed:', err);
-                  }
-                });
-            } else {
-              console.warn("No counter/customer printer configured in settings.");
-            }
-          }
+          // Every order type - TakeAway included - only ever prints its
+          // kitchen ticket right here at placement now. The customer/
+          // cashier receipt (and, previously, a small order-number token
+          // alongside it) used to print immediately for TakeAway on the
+          // reasoning that "they pay and collect right away" - in
+          // practice that meant an extra token slip AND a full receipt
+          // came out before the order was even paid for. It now prints
+          // exactly once, for every order type alike, at Complete Order on
+          // the Sales page (or via DashboardShell.tsx's ReceiptPrintWatcher
+          // for an order completed from a phone with no printer of its
+          // own) - see orderController.js's getUnprintedReceiptOrders.
 
           // WhatsApp needs the cloud (the session lives on the server) and
           // a real order id to link to - skipped for offline orders; the
@@ -888,6 +1052,9 @@ export default function POSPage() {
                 <Trash2 size={16} />
               </button>
             </div>
+            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="mt-3 w-full rounded-[20px] bg-[#E2F33C] px-5 py-3 text-base font-black text-black shadow-lg shadow-yellow-200/60 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
+              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
+            </button>
           </div>
 
           <div className="space-y-3 border-b border-gray-100 bg-[#F8F9FB] p-4">
@@ -899,10 +1066,10 @@ export default function POSPage() {
 
             <div className="relative space-y-3">
               <FormField label="Phone Number">
-                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Phone (optional, 03XXXXXXXXX)" className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
               </FormField>
               <FormField label="Customer Name">
-                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Customer name (optional)" className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
               </FormField>
 
               {showSuggestions && (suggestions.length > 0 || showNewCustomerPrompt) ? (
@@ -934,7 +1101,7 @@ export default function POSPage() {
             </div>
 
             <FormField label="Address">
-              <input name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+              <input name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder="Customer address (optional)" className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
             </FormField>
             <FormField label="Order Note">
               <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
@@ -950,7 +1117,21 @@ export default function POSPage() {
                 <FormField label="Table Number">
                   <select name="table" value={orderFormData.table} onChange={handleFormChange} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none">
                     <option value="">Select table</option>
-                    {Array.from({ length: 20 }).map((_, index) => <option key={index + 1} value={String(index + 1)}>Table {index + 1}</option>)}
+                    {Array.from({ length: 20 }).map((_, index) => {
+                      const tableNumber = String(index + 1);
+                      // Still selectable if it's already this exact order
+                      // form's own current value - only blocks it for a
+                      // BRAND NEW selection, not the one already chosen
+                      // (relevant if this table just filled up in the
+                      // background between opening the dropdown and
+                      // re-picking the same one).
+                      const isOccupied = occupiedTables.has(tableNumber) && orderFormData.table !== tableNumber;
+                      return (
+                        <option key={tableNumber} value={tableNumber} disabled={isOccupied}>
+                          Table {tableNumber}{isOccupied ? ' (Occupied)' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </FormField>
               </>
@@ -1009,9 +1190,6 @@ export default function POSPage() {
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
               <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
-            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] bg-[#E2F33C] px-5 py-3 text-base font-black text-black shadow-lg shadow-yellow-200/60 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
-              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
-            </button>
           </div>
         </aside>
       </div>

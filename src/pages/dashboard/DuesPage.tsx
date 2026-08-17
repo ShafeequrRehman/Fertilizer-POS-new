@@ -1,19 +1,32 @@
 
 import React, { useState, useEffect } from 'react';
-import { fetchAllCustomers, createCustomer, updateCustomerDues, sendWhatsappMessage, fetchWhatsappStatus } from '@/lib/pos-api';
-import { Customer } from '@/lib/pos-types';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw } from 'lucide-react';
+import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, fetchWhatsappStatus } from '@/lib/pos-api';
+import { LedgerCustomer } from '@/lib/pos-types';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 
+// This page used to source its list from fetchAllCustomers(), which only
+// ever carries the OLD, manually-set lump-sum Customer.previousDues field -
+// a customer who owes money purely because they have an unpaid/partially
+// paid ORDER (the normal, everyday case - see SalesPage.tsx's Complete
+// Payment) never had previousDues touched at all, so they silently never
+// showed up here as "owing" anything even though Sales/Ledger both agreed
+// they did. fetchCustomerLedger() (same aggregation Ledger already uses -
+// see backend/controllers/customerController.js's getCustomerLedger) is
+// the one true "how much does this customer actually owe right now" figure
+// - every unpaid order's remainingAmount, plus that legacy lump-sum, added
+// together as totalDue. That's what "Pending Dues" is now filtered and
+// displayed by.
 export default function CustomerDuesPage() {
   const { toast } = useToast();
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customers, setCustomers] = useState<LedgerCustomer[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '', previousDues: 0 });
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
   // Each grid (Pending Dues, All Other Customers) paginates independently -
   // 10 shown, "Load More" grows just that grid's own count by 10.
   const [visiblePendingCount, setVisiblePendingCount] = useState(10);
@@ -45,7 +58,7 @@ export default function CustomerDuesPage() {
     setLoading(true);
     setErrorMessage(null);
     try {
-      const data = await fetchAllCustomers();
+      const data = await fetchCustomerLedger();
       if (data) {
         setCustomers(data);
       }
@@ -70,41 +83,94 @@ export default function CustomerDuesPage() {
       toast.error('Name and phone are required.');
       return;
     }
-    const created = await createCustomer(newCustomer);
-    if (created) {
-      setCustomers(prev => [...prev, created]);
+    try {
+      const created = await createCustomer(newCustomer);
+      if (!created) {
+        toast.error('Could not add customer.');
+        return;
+      }
       setShowAddCustomer(false);
       setNewCustomer({ name: '', phone: '', address: '', previousDues: 0 });
       toast.success(`"${created.name}" added.`);
+      // createCustomer only ever returns the raw Customer record, not a
+      // full ledger entry (order history/totals) - reload from the ledger
+      // so the new customer shows up with correctly computed totals
+      // (0 orders, totalDue === whatever previousDues they were given).
+      await loadCustomers();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not add customer.');
     }
   };
 
-  const handleUpdateDues = async (phone: string, amount: number, type: 'add' | 'subtract' | 'null') => {
+  // "+ Add Dues" only ever adds to the manual previousDues lump-sum (the
+  // one thing PATCH /customers/dues/:phone can touch) - it's for charging
+  // something not tied to any order (a manual note-of-hand, a damaged-item
+  // charge, whatever). It deliberately can't touch order balances - there's
+  // no order underneath a manual charge to reduce. Returns whether it
+  // actually succeeded - CustomerCard awaits this so it only clears its
+  // amount field on a real success, and surfaces a toast either way
+  // instead of silently doing nothing on failure (updateCustomerDues
+  // throws on any HTTP error).
+  const handleAddManualDue = async (phone: string, amount: number): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
-    if (!customer) return;
+    if (!customer || amount <= 0) return false;
 
-    let newDues = customer.previousDues || 0;
-    if (type === 'add') newDues += amount;
-    else if (type === 'subtract') newDues = Math.max(0, newDues - amount);
-    else if (type === 'null') newDues = 0;
-
-    const updated = await updateCustomerDues(phone, newDues);
-    if (updated) {
-      setCustomers(prev => prev.map(c => c.phone === phone ? updated : c));
+    try {
+      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount);
+      if (!updated) {
+        toast.error('Could not update dues.');
+        return false;
+      }
+      await loadCustomers();
+      toast.success('Dues updated.');
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not update dues.');
+      return false;
     }
   };
 
-  const handleSendReminder = async (customer: Customer) => {
+  // "- Pay Dues" / "Clear" are a real payment actually collected from the
+  // customer - unlike Add Dues above, this has to be able to reach
+  // whichever unpaid ORDERS make up the rest of totalDue, not just the
+  // manual lump-sum, or a cash payment for an order-based due would have
+  // nowhere to go (that used to be exactly this bug - see
+  // customerController.settleCustomerDues for the same oldest-debt-first
+  // distribution completeAndSettle's cascade already uses elsewhere).
+  // amount is capped at totalDue before this is ever called (see
+  // CustomerCard) - defensively re-checked here too.
+  const handleSettlePayment = async (phone: string, amount: number): Promise<boolean> => {
+    const customer = customers.find(c => c.phone === phone);
+    if (!customer) return false;
+    const cappedAmount = Math.min(amount, customer.totalDue || 0);
+    if (cappedAmount <= 0) return false;
+
+    try {
+      const result = await settleCustomerDues(phone, cappedAmount);
+      if (!result) {
+        toast.error('Could not record payment.');
+        return false;
+      }
+      await loadCustomers();
+      toast.success(`₨${result.appliedAmount} recorded.`);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not record payment.');
+      return false;
+    }
+  };
+
+  const handleSendReminder = async (customer: LedgerCustomer) => {
     if (!whatsappConnected) {
       toast.error('WhatsApp is not connected. Please connect it in the WhatsApp settings first.');
       return;
     }
-    if (!customer.previousDues || customer.previousDues <= 0) {
+    if (!customer.totalDue || customer.totalDue <= 0) {
       toast.info('Customer has no dues.');
       return;
     }
 
-    const message = `Hello ${customer.name},\nThis is a gentle reminder that you have pending dues of ₨${customer.previousDues}. Please clear them at your earliest convenience.\nThank you!`;
+    const message = `Hello ${customer.name},\nThis is a gentle reminder that you have pending dues of ₨${customer.totalDue}. Please clear them at your earliest convenience.\nThank you!`;
     const response = await sendWhatsappMessage(customer.phone, message);
     if (response?.success) {
       toast.success('Reminder sent successfully!');
@@ -113,16 +179,35 @@ export default function CustomerDuesPage() {
     }
   };
 
-  const customersWithDues = customers.filter(c => (c.previousDues || 0) > 0);
-  const customersWithoutDues = customers.filter(c => !(c.previousDues || 0));
+  const query = searchQuery.trim().toLowerCase();
+  const searchedCustomers = query
+    ? customers.filter(c =>
+        (c.name || '').toLowerCase().includes(query) ||
+        (c.phone || '').toLowerCase().includes(query)
+      )
+    : customers;
 
-  // Restart both grids at 10 whenever the underlying customer list changes
-  // (add/update/refresh), so "Load More" never leaves a stale/inconsistent
-  // slice showing.
+  // Newest activity first - a customer who just ran up a due today is more
+  // useful to see than one who's owed the same amount for months.
+  // lastOrderAt is the freshest signal we have (a manually-added lump-sum
+  // dues customer with no orders sinks to the bottom, which is fine - they
+  // aren't "recent" by any real measure).
+  const byRecent = (a: LedgerCustomer, b: LedgerCustomer) => {
+    const at = a.lastOrderAt ? new Date(a.lastOrderAt).getTime() : 0;
+    const bt = b.lastOrderAt ? new Date(b.lastOrderAt).getTime() : 0;
+    return bt - at;
+  };
+
+  const customersWithDues = searchedCustomers.filter(c => (c.totalDue || 0) > 0).sort(byRecent);
+  const customersWithoutDues = searchedCustomers.filter(c => !(c.totalDue || 0)).sort(byRecent);
+
+  // Restart both grids at 10 whenever the underlying customer list or search
+  // changes (add/update/refresh/search), so "Load More" never leaves a
+  // stale/inconsistent slice showing.
   useEffect(() => {
     setVisiblePendingCount(10);
     setVisibleOtherCount(10);
-  }, [customers]);
+  }, [customers, searchQuery]);
 
   const visiblePending = customersWithDues.slice(0, visiblePendingCount);
   const visibleOther = customersWithoutDues.slice(0, visibleOtherCount);
@@ -152,6 +237,27 @@ export default function CustomerDuesPage() {
             <Plus size={18} /> Add Customer
           </button>
         </div>
+      </div>
+
+      <div className="relative">
+        <Search size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Search customers by name or phone..."
+          className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-11 pr-10 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500"
+        />
+        {searchQuery ? (
+          <button
+            type="button"
+            onClick={() => setSearchQuery('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+            title="Clear search"
+          >
+            <X size={16} />
+          </button>
+        ) : null}
       </div>
 
       {!whatsappConnected && (
@@ -216,12 +322,15 @@ export default function CustomerDuesPage() {
                 <CustomerCard
                   key={c.id}
                   customer={c}
-                  onUpdate={handleUpdateDues}
+                  onAddManual={handleAddManualDue}
+                  onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
                 />
               ))}
               {customersWithDues.length === 0 && (
-                <p className="text-slate-400 font-bold col-span-full">No customers have pending dues. Great!</p>
+                <p className="text-slate-400 font-bold col-span-full">
+                  {query ? 'No matching customers with pending dues.' : 'No customers have pending dues. Great!'}
+                </p>
               )}
             </div>
             {customersWithDues.length > visiblePending.length ? (
@@ -246,7 +355,8 @@ export default function CustomerDuesPage() {
                 <CustomerCard
                   key={c.id}
                   customer={c}
-                  onUpdate={handleUpdateDues}
+                  onAddManual={handleAddManualDue}
+                  onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
                 />
               ))}
@@ -269,11 +379,16 @@ export default function CustomerDuesPage() {
   );
 }
 
-function CustomerCard({ customer, onUpdate, onRemind }: { customer: Customer, onUpdate: (phone: string, amount: number, type: 'add'|'subtract'|'null') => void, onRemind: () => void }) {
+function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number) => Promise<boolean>, onSettlePayment: (phone: string, amount: number) => Promise<boolean>, onRemind: () => void }) {
   const { confirm } = useToast();
   const [amount, setAmount] = useState<string>('');
+  const [saving, setSaving] = useState(false);
 
-  const isPending = (customer.previousDues || 0) > 0;
+  const isPending = (customer.totalDue || 0) > 0;
+  const fromOrders = customer.totalOrderBalance || 0;
+  const fromLumpSum = customer.previousDues || 0;
+  const totalDue = customer.totalDue || 0;
+  const amountValue = Number(amount) || 0;
 
   return (
     <div className={`p-6 rounded-[28px] border ${isPending ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 bg-white'} shadow-sm flex flex-col gap-4`}>
@@ -281,13 +396,18 @@ function CustomerCard({ customer, onUpdate, onRemind }: { customer: Customer, on
         <h3 className="font-black text-lg text-slate-900">{customer.name}</h3>
         <p className="text-sm font-bold text-slate-500 flex items-center gap-1 mt-1"><Phone size={14} /> {customer.phone}</p>
       </div>
-      
+
       <div className="flex justify-between items-end border-y border-slate-100 py-3">
         <div>
           <p className="text-xs font-black uppercase text-slate-400 tracking-wider">Current Dues</p>
           <p className={`text-2xl font-black ${isPending ? 'text-amber-600' : 'text-slate-800'}`}>
-            ₨{customer.previousDues || 0}
+            ₨{customer.totalDue || 0}
           </p>
+          {isPending && fromOrders > 0 ? (
+            <p className="text-[11px] font-bold text-amber-600/80 mt-1">
+              ₨{fromOrders} from unpaid orders{fromLumpSum > 0 ? ` + ₨${fromLumpSum} manual` : ''}
+            </p>
+          ) : null}
         </div>
         {isPending && (
           <button 
@@ -300,37 +420,57 @@ function CustomerCard({ customer, onUpdate, onRemind }: { customer: Customer, on
       </div>
 
       <div className="space-y-2 pt-2">
-        <input 
-          type="number" 
-          placeholder="Enter amount..." 
+        {isPending ? (
+          <p className="text-[11px] font-bold text-slate-400 leading-snug">
+            "+ Add Dues" charges something new. "- Pay Dues" / "Clear" record an actual payment - it settles the manual balance first, then any unpaid orders, and marks an order paid off if it covers one fully.
+          </p>
+        ) : null}
+        <input
+          type="number"
+          placeholder="Enter amount..."
           value={amount}
           onChange={e => setAmount(e.target.value)}
           className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500"
         />
         <div className="flex gap-2">
-          <button 
-            onClick={() => { onUpdate(customer.phone, Number(amount), 'add'); setAmount(''); }}
-            disabled={!amount || Number(amount) <= 0}
+          <button
+            onClick={async () => {
+              setSaving(true);
+              const ok = await onAddManual(customer.phone, amountValue);
+              setSaving(false);
+              if (ok) setAmount('');
+            }}
+            disabled={saving || amountValue <= 0}
             className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
           >
-            + Add Dues
-          </button>
-          <button 
-            onClick={() => { onUpdate(customer.phone, Number(amount), 'subtract'); setAmount(''); }}
-            disabled={!amount || Number(amount) <= 0}
-            className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
-          >
-            - Pay Dues
+            {saving ? 'Saving...' : '+ Add Dues'}
           </button>
           <button
             onClick={async () => {
-              const confirmed = await confirm('Clear all dues for this customer?', { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
-              if (confirmed) onUpdate(customer.phone, 0, 'null');
+              setSaving(true);
+              const ok = await onSettlePayment(customer.phone, amountValue);
+              setSaving(false);
+              if (ok) setAmount('');
             }}
-            className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors"
-            title="Clear all dues"
+            disabled={saving || amountValue <= 0 || amountValue > totalDue}
+            className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
+            title={amountValue > totalDue ? `Can't exceed the ₨${totalDue} owed` : 'Record a payment against everything owed'}
           >
-            Clear
+            {saving ? 'Saving...' : '- Pay Dues'}
+          </button>
+          <button
+            onClick={async () => {
+              const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
+              if (!confirmed) return;
+              setSaving(true);
+              await onSettlePayment(customer.phone, totalDue);
+              setSaving(false);
+            }}
+            disabled={saving || totalDue <= 0}
+            className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Record a full payment, clearing everything this customer owes"
+          >
+            {saving ? '...' : 'Clear'}
           </button>
         </div>
       </div>

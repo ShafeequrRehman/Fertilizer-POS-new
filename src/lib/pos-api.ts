@@ -156,6 +156,22 @@ export async function updateCustomerDues(phone: string, previousDues: number) {
   }
 }
 
+// A real payment collected against everything a customer owes - the
+// manual previousDues lump-sum AND their unpaid orders, oldest-first (same
+// distribution backend/controllers/orderController.js's completeAndSettle
+// cascade already uses when a payment collected on one order pays down
+// others too). Unlike updateCustomerDues above, this can mark an order
+// "completed" if the payment fully covers it - see
+// customerController.settleCustomerDues for the full reasoning.
+export async function settleCustomerDues(phone: string, amount: number) {
+  try {
+    const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, { amount });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // A customer can now have more than one order open at once (the old "one
 // pending order at a time" block was removed from POSPage.tsx), so this is
 // what tells the Sales page's Complete Payment panel the customer's real
@@ -227,10 +243,25 @@ export async function createOrder(payload: OrderPayload) {
   }
 }
 
-export async function fetchOrders(params?: { date?: string; since?: string }) {
+export async function fetchOrders(params?: { date?: string; since?: string; status?: SavedOrder['status'] }) {
   try {
     const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params });
     return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Every table currently tied to a still-pending DineIn order, shop-wide,
+// with NO date bound - see orderController.js's getOccupiedDineInTables
+// for why this is safe to leave unbounded (the result set is capped by the
+// shop's physical table count, not by order history size). Used by
+// POSPage.tsx to block re-selecting a table that already has an open
+// order, even one placed days ago that just never got completed.
+export async function fetchOccupiedDineInTables() {
+  try {
+    const response = await api.get<{ tables: string[] }>('/orders/dinein/occupied-tables');
+    return response.data.tables || [];
   } catch (error) {
     handleApiError(error);
   }

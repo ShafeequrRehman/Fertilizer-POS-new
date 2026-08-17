@@ -31,8 +31,67 @@ hub.interceptors.request.use((config) => {
   return config;
 });
 
+// A pairing key cached in this renderer's localStorage can go stale without
+// ever being cleared - e.g. the Local Hub's own storage got reset/migrated,
+// or the key was rotated from the Offline Sync page in a different window -
+// while `getCachedPairingKey()` above still happily returns the old value,
+// so every one of getOrCreatePairingKey's callers above skip re-fetching it
+// (they only fetch when NOTHING is cached, not when what's cached is
+// wrong). Left alone, that's every Local Hub call 401ing forever until the
+// user manually clears localStorage. On a 401 here (and only here - a 401
+// is never a legitimate response from any of these routes), drop the stale
+// key, ask the hub for its current one via the loopback-only /pairing-info,
+// and replay the original request exactly once with it.
+let pairingRefresh: Promise<string> | null = null;
+
+async function refreshPairingKeyOnce(): Promise<string> {
+  if (!pairingRefresh) {
+    pairingRefresh = hub
+      .get<PairingInfo>('/pairing-info')
+      .then((response) => {
+        setCachedPairingKey(response.data.pairingKey);
+        return response.data.pairingKey;
+      })
+      .finally(() => {
+        pairingRefresh = null;
+      });
+  }
+  return pairingRefresh;
+}
+
+hub.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const status = error?.response?.status;
+    const config = error?.config as (typeof error.config & { _retriedAfterKeyRefresh?: boolean }) | undefined;
+    const isPairingInfoCall = String(config?.url || '').includes('/pairing-info');
+
+    if (status === 401 && config && !config._retriedAfterKeyRefresh && !isPairingInfoCall) {
+      config._retriedAfterKeyRefresh = true;
+      try {
+        const freshKey = await refreshPairingKeyOnce();
+        config.headers = config.headers ?? {};
+        (config.headers as Record<string, string>)['X-Pairing-Key'] = freshKey;
+        return hub.request(config);
+      } catch {
+        // Hub itself is unreachable or refusing /pairing-info too - fall
+        // through to the original 401, nothing more to try here.
+      }
+    }
+
+    return Promise.reject(error);
+  },
+);
+
 export interface PairingInfo {
   ips: string[];
+  // address -> adapter name (e.g. "Wi-Fi", "vEthernet (WSL)") - see
+  // server.js's listLanAddresses for why a bare IP list isn't enough to
+  // tell a real WiFi adapter apart from a virtual one (Docker/WSL/Hyper-V/
+  // VPN) that a phone on the same physical WiFi can never actually reach.
+  // Optional only so an old cached hub build (pre-upgrade, before a
+  // restart picks up the new server.js) doesn't break this type.
+  interfaceNames?: Record<string, string>;
   port: number;
   pairingKey: string;
 }
@@ -40,6 +99,12 @@ export interface PairingInfo {
 export interface LocalOrderRecord {
   id: string;
   localOrderNumber: number;
+  // Shop-lifetime, never-resetting "Tr#" counter - see localOrders.js's
+  // nextLifetimeNumber. Assigned automatically by queueOrder, unlike
+  // localOrderNumber's cousin on the cloud side (requestedDailyOrderNumber),
+  // there's no separate reserve step needed for the OFFLINE path since
+  // queueOrder always reserves both numbers together in one call.
+  shopSequenceNumber: number;
   payload: Record<string, unknown>;
   actor: { name?: string; deviceLabel?: string } | null;
   status: 'pending' | 'synced' | 'failed';
@@ -60,6 +125,17 @@ export interface SyncStatus {
   totalQueued: number;
   pendingEditCount?: number;
   failedEditCount?: number;
+  // Offline Manage Staff - see localStaff.js / server.js's /sync/status.
+  pendingStaffCount?: number;
+  failedStaffCount?: number;
+  pendingStaffEditCount?: number;
+  failedStaffEditCount?: number;
+  pendingStaffDeleteCount?: number;
+  failedStaffDeleteCount?: number;
+  // Offline Cancel Order - see localOrders.js's "Cancelling an ALREADY-
+  // SYNCED order while offline" section / server.js's /sync/status.
+  pendingCancellationCount?: number;
+  failedCancellationCount?: number;
 }
 
 // Loopback-only calls (the till talking to its own hub) - fetches and
@@ -108,6 +184,10 @@ export interface ReferenceDataSnapshot {
   products: unknown[];
   customers: unknown[];
   staff: unknown[];
+  // Role catalog ({_id, name, permissions}) - see referenceData.js. Lets
+  // EmployeesPage.tsx's staff form populate its Role dropdown while
+  // offline.
+  roles: unknown[];
 }
 
 export async function pushReferenceData(data: {
@@ -115,6 +195,11 @@ export async function pushReferenceData(data: {
   products: unknown[];
   customers: unknown[];
   staff: unknown[];
+  // Optional and omittable on purpose - see referenceData.js's set(). A
+  // caller that doesn't have a fresh roles list handy (e.g. POSPage.tsx's
+  // frequent products/waiters-only push) can leave this out entirely
+  // rather than being forced to explicitly wipe it with [].
+  roles?: unknown[];
 }) {
   // Make sure the key is cached before this runs at least once per app
   // session - harmless if already cached (getPairingInfo is idempotent).
@@ -200,6 +285,16 @@ export async function reserveLocalOrderNumber(): Promise<number> {
   return response.data.number;
 }
 
+// Same idea as reserveLocalOrderNumber above, but for the shop-lifetime
+// Tr# counter (backend/models/Shop.js's orderSequenceCounter) - see
+// localOrders.js's reserveNextLifetimeNumber. Also throws on failure; the
+// caller falls back to letting the cloud assign its own number.
+export async function reserveLifetimeOrderNumber(): Promise<number> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<{ number: number }>('/orders/reserve-lifetime-number');
+  return response.data.number;
+}
+
 // --- Editing an order while offline -------------------------------------
 // See backend/localHub/localOrders.js's "Editing an order while offline"
 // section for the full split between these two cases (still-local order
@@ -220,14 +315,21 @@ export interface LocalOrderEditRecord {
   // delta items the instant it was queued - see offline-order-helpers.ts's
   // computeKitchenPrintDelta and orderController.js's importOfflineOrderUpdates.
   kitchenPrinted?: boolean;
+  // Same idea, for the customer/cashier receipt - set when this edit is a
+  // completeAndSettle that already printed the receipt offline (DineIn/
+  // Delivery orders print their receipt at completion, not placement - see
+  // SalesPage.tsx's saveUpdate).
+  receiptPrinted?: boolean;
 }
 
 // Mutates a still-unsynced local order's own queued payload directly -
 // localId is the order's Local Hub id with the "local-" prefix already
-// stripped off (see SalesPage.tsx's localOrderToSavedOrder).
-export async function updateQueuedLocalOrder(localId: string, payload: object): Promise<LocalOrderRecord> {
+// stripped off (see SalesPage.tsx's localOrderToSavedOrder). receiptPrinted
+// mirrors queueOrderEdit's own param below - see localOrders.js's
+// updateQueuedOrder.
+export async function updateQueuedLocalOrder(localId: string, payload: object, receiptPrinted = false): Promise<LocalOrderRecord> {
   if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.patch<LocalOrderRecord>(`/orders/local/${localId}`, { payload });
+  const response = await hub.patch<LocalOrderRecord>(`/orders/local/${localId}`, { payload, receiptPrinted });
   return response.data;
 }
 
@@ -239,9 +341,10 @@ export async function queueOrderEdit(
   payload: object,
   actor?: { name?: string; deviceLabel?: string },
   kitchenPrinted = false,
+  receiptPrinted = false,
 ): Promise<LocalOrderEditRecord> {
   if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor, kitchenPrinted });
+  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor, kitchenPrinted, receiptPrinted });
   return response.data;
 }
 
@@ -258,6 +361,54 @@ export async function ackOrderEdits(ids: string[]) {
 
 export async function markOrderEditFailed(id: string, error: string) {
   await hub.post(`/orders/edits/${id}/fail`, { error });
+}
+
+// --- Cancelling an ALREADY-SYNCED order while offline ---------------------
+// See backend/localHub/localOrders.js's own "Cancelling an ALREADY-SYNCED
+// order while offline" section - a completely separate queue from
+// queueOrderEdit above, since a cancellation has to be replayed against
+// the real, bcrypt-gated cancelOrder logic (POST /orders/import-offline-
+// cancellations), not applyOrderPatch. CancelOrderModal.tsx picks between
+// this and a plain updateQueuedLocalOrder({status:'cancelled', ...}) call
+// the same way saveUpdate() already does for edits - based on whether the
+// order's id starts with "local-".
+
+export interface LocalOrderCancellationRecord {
+  id: string;
+  orderId: string;
+  key: string | null;
+  reason: string;
+  actor: { name?: string; deviceLabel?: string } | null;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+export async function queueOrderCancellation(
+  orderId: string,
+  key: string,
+  reason?: string,
+  actor?: { name?: string; deviceLabel?: string },
+): Promise<LocalOrderCancellationRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalOrderCancellationRecord>(`/orders/${orderId}/cancellations`, { key, reason, actor });
+  return response.data;
+}
+
+export async function getPendingOrderCancellations(): Promise<LocalOrderCancellationRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalOrderCancellationRecord[]>('/orders/cancellations/pending');
+  return response.data;
+}
+
+export async function ackOrderCancellations(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/orders/cancellations/ack', { ids });
+}
+
+export async function markOrderCancellationFailed(id: string, error: string) {
+  await hub.post(`/orders/cancellations/${id}/fail`, { error });
 }
 
 // --- Keeping the local order counter in step with the cloud's real
@@ -294,4 +445,171 @@ export async function resetLocalOrderCounter(): Promise<void> {
   } catch {
     // Best-effort, same reasoning as syncOrderCounter above.
   }
+}
+
+// Same idea as syncOrderCounter above, for the shop-lifetime Tr# counter -
+// see localOrders.js's syncLifetimeCounter. No reset equivalent - this
+// counter is never reset on shop open, only ever reconciled upward.
+export async function syncLifetimeCounter(shopSequenceCounter: number): Promise<void> {
+  if (!isDesktopApp()) return;
+  try {
+    if (!getCachedPairingKey()) await getPairingInfo();
+    await hub.post('/lifetime-counter-sync', { value: shopSequenceCounter });
+  } catch {
+    // Best-effort, same reasoning as syncOrderCounter above.
+  }
+}
+
+// --- Manage Staff's own full employee-list cache (see employeesCache.js) -
+// EmployeesPage.tsx's cache-first counterpart to getOrdersCache/
+// pushOrdersCache above. Separate from getReferenceData's `staff` field on
+// purpose - see employeesCache.js's header comment.
+
+export interface EmployeesCacheSnapshot {
+  updatedAt: string | null;
+  employees: unknown[];
+}
+
+export async function pushEmployeesCache(employees: unknown[]) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/employees-cache', { employees });
+}
+
+export async function getEmployeesCache(): Promise<EmployeesCacheSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<EmployeesCacheSnapshot>('/employees-cache');
+  return response.data;
+}
+
+// --- Offline Manage Staff (see backend/localHub/localStaff.js for the
+// full design) ------------------------------------------------------------
+
+export interface LocalEmployeeRecord {
+  id: string;
+  payload: Record<string, unknown>;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+export interface LocalEmployeeEditRecord {
+  id: string;
+  employeeId: string;
+  payload: Record<string, unknown>;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+export interface LocalEmployeeDeleteRecord {
+  id: string;
+  employeeId: string;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+// Queues a brand-new staff member - no real cloud _id exists yet.
+export async function queueEmployeeCreate(payload: object): Promise<LocalEmployeeRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalEmployeeRecord>('/employees', { payload });
+  return response.data;
+}
+
+export async function getPendingEmployeeCreates(): Promise<LocalEmployeeRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalEmployeeRecord[]>('/employees/pending');
+  return response.data;
+}
+
+export async function ackEmployeeCreates(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/employees/ack', { ids });
+}
+
+export async function markEmployeeCreateFailed(id: string, error: string) {
+  await hub.post(`/employees/${id}/fail`, { error });
+}
+
+// Mutates a still-unsynced queued create's own payload directly - localId
+// is the record's own id (with any "local-" display prefix already
+// stripped by the caller, mirroring updateQueuedLocalOrder above).
+export async function updateQueuedLocalEmployee(localId: string, payload: object): Promise<LocalEmployeeRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.patch<LocalEmployeeRecord>(`/employees/local/${localId}`, { payload });
+  return response.data;
+}
+
+export async function deleteQueuedLocalEmployee(localId: string): Promise<void> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.delete(`/employees/local/${localId}`);
+}
+
+// Queues an edit/delete against a staff member that already has a real
+// cloud _id, to be replayed by the sync engine once back online.
+export async function queueEmployeeEdit(employeeId: string, payload: object): Promise<LocalEmployeeEditRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalEmployeeEditRecord>(`/employees/${employeeId}/edits`, { payload });
+  return response.data;
+}
+
+export async function getPendingEmployeeEdits(): Promise<LocalEmployeeEditRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalEmployeeEditRecord[]>('/employees/edits/pending');
+  return response.data;
+}
+
+export async function ackEmployeeEdits(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/employees/edits/ack', { ids });
+}
+
+export async function markEmployeeEditFailed(id: string, error: string) {
+  await hub.post(`/employees/edits/${id}/fail`, { error });
+}
+
+export async function queueEmployeeDelete(employeeId: string): Promise<LocalEmployeeDeleteRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalEmployeeDeleteRecord>(`/employees/${employeeId}/delete`, {});
+  return response.data;
+}
+
+export async function getPendingEmployeeDeletes(): Promise<LocalEmployeeDeleteRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalEmployeeDeleteRecord[]>('/employees/deletes/pending');
+  return response.data;
+}
+
+export async function ackEmployeeDeletes(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/employees/deletes/ack', { ids });
+}
+
+export async function markEmployeeDeleteFailed(id: string, error: string) {
+  await hub.post(`/employees/deletes/${id}/fail`, { error });
+}
+
+// --- DineIn table-occupancy cache (see backend/localHub/occupiedTablesCache.js)
+// - deliberately separate from, and never bounded the way, getOrdersCache
+// above is (14 days) - an old pending DineIn order must keep marking its
+// table occupied for as long as it stays open, however many days ago it
+// was placed. See POSPage.tsx's loadOccupiedTables.
+
+export interface OccupiedTablesSnapshot {
+  updatedAt: string | null;
+  tables: string[];
+}
+
+export async function pushOccupiedTablesCache(tables: string[]) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/occupied-tables-cache', { tables });
+}
+
+export async function getOccupiedTablesCache(): Promise<OccupiedTablesSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<OccupiedTablesSnapshot>('/occupied-tables-cache');
+  return response.data;
 }

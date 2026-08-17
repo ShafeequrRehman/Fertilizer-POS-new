@@ -5,6 +5,7 @@ const os = require("os");
 const pdfPrinter = require("pdf-to-printer");
 const React = require("react");
 const ReactPDF = require("@react-pdf/renderer");
+const { autoUpdater } = require("electron-updater");
 
 const { Document, Page, StyleSheet, Text, View, Image } = ReactPDF;
 
@@ -180,6 +181,17 @@ if (!gotTheLock) {
   // a path relative to the (possibly read-only, inside an asar) install
   // directory.
   process.env.POS_LOCAL_HUB_DATA_DIR = path.join(app.getPath("userData"), "local-hub");
+
+  // Same reasoning as POS_LOCAL_HUB_DATA_DIR above - the embedded backend
+  // (backend/config/db.js) runs in-process inside this same Electron main
+  // process, so its own console.log/console.error calls (Mongo connect/
+  // disconnect/retry messages) have nowhere visible to go in a packaged
+  // app - there's no terminal attached to a double-clicked .exe. Pointing
+  // it at this same desktop.log file (already written by logRuntime below)
+  // means a shop owner - or anyone helping them remotely - can actually see
+  // *why* the app is timing out ("MongoDB Connection Error: ...") without
+  // needing to run the app from a terminal first.
+  process.env.POS_RUNTIME_LOG_FILE = runtimeLogFile;
 
   function logRuntime(message, error) {
     const line = `[${new Date().toISOString()}] ${message}${error ? `\n${error.stack || error.message || String(error)}` : ""}\n`;
@@ -368,6 +380,84 @@ if (!gotTheLock) {
     }
     localHubStarted = false;
   }
+
+  // Auto-update via electron-updater, checking GitHub Releases on the
+  // (private) haider7c/pos-web-new repo - see package.json's `build.publish`
+  // config, and `npm run electron:publish` for how a new release actually
+  // gets uploaded there. Private-repo access needs a `GH_TOKEN` env var
+  // (a GitHub personal access token with read access to this repo) present
+  // at runtime - it's loaded the same way as everything else in `.env`
+  // above, and `.env` is bundled into the packaged app via `extraResources`,
+  // so adding `GH_TOKEN=...` to `pos-web/.env` before building is enough;
+  // no separate wiring needed here.
+  //
+  // Never runs for `npm run dev`/`npm run electron` (unpackaged) - there's
+  // nothing published for those, and it would just log noisy failed-check
+  // errors every run.
+  let updateAlreadyDownloaded = false;
+
+  function setupAutoUpdater() {
+    if (dev) {
+      logRuntime("Skipping auto-update check - not a packaged build.");
+      return;
+    }
+
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on("checking-for-update", () => {
+      logRuntime("Checking for app update...");
+    });
+    autoUpdater.on("update-available", (info) => {
+      logRuntime(`App update available: ${info.version}`);
+      mainWindow?.webContents.send("app-update-available", { version: info.version });
+    });
+    autoUpdater.on("update-not-available", () => {
+      logRuntime("App is up to date.");
+    });
+    autoUpdater.on("error", (error) => {
+      // Never fatal - the till should keep working normally even if the
+      // update check itself fails (no internet, GitHub unreachable, bad
+      // token, etc).
+      logRuntime("Auto-update check failed", error);
+    });
+    autoUpdater.on("download-progress", (progress) => {
+      mainWindow?.webContents.send("app-update-progress", { percent: progress.percent });
+    });
+    autoUpdater.on("update-downloaded", (info) => {
+      updateAlreadyDownloaded = true;
+      logRuntime(`App update downloaded: ${info.version} - ready to install.`);
+      mainWindow?.webContents.send("app-update-downloaded", { version: info.version });
+    });
+
+    autoUpdater.checkForUpdates().catch((error) => logRuntime("Initial update check failed", error));
+
+    // A till can stay open for days without ever restarting, so checking
+    // only once at launch could miss a same-day release entirely. Every 4
+    // hours is frequent enough to notice a new release quickly without
+    // hammering GitHub's API.
+    setInterval(() => {
+      autoUpdater.checkForUpdates().catch((error) => logRuntime("Periodic update check failed", error));
+    }, 4 * 60 * 60 * 1000);
+  }
+
+  ipcMain.handle("check-for-app-updates", async () => {
+    if (dev) return { success: false, error: "Not available in dev mode." };
+    try {
+      const result = await autoUpdater.checkForUpdates();
+      return { success: true, version: result?.updateInfo?.version };
+    } catch (error) {
+      return { success: false, error: error.toString() };
+    }
+  });
+
+  ipcMain.on("install-app-update-now", () => {
+    if (!updateAlreadyDownloaded) return;
+    // isSilent=true, isForceRunAfter=true - installs without showing the
+    // NSIS wizard again (this till was already installed once) and
+    // relaunches the app automatically afterward.
+    autoUpdater.quitAndInstall(true, true);
+  });
 
   async function loadApp(explicitUrl) {
     if (!mainWindow) {
@@ -575,6 +665,9 @@ if (!gotTheLock) {
 
     h += 45; // Date, Time, Type
     if (orderData?.customer?.name) h += 15;
+    const cashierCustomerShown = type === "cashier" && orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer";
+    if (cashierCustomerShown && orderData.customer.phone && orderData.customer.phone !== "03000000000") h += 15;
+    if (type === "cashier" && orderData?.customer?.address) h += 15;
     if (orderData?.table) h += 15;
     if (orderData?.waiter) h += 15;
     h += 25; // Dashed rule + "Items:" label
@@ -784,6 +877,22 @@ if (!gotTheLock) {
           h(Text, null, `TIME: ${formatReceiptTime(orderData?.createdAt)}`),
           h(Text, null, `TYPE: ${String(orderData?.orderType || "").toUpperCase()}`),
           orderData?.customer?.name ? h(Text, null, `CUSTOMER: ${String(orderData.customer.name).toUpperCase()}`) : null,
+          // Phone/address only belong on the customer's own copy, not the
+          // kitchen ticket - see estimateReceiptHeightPt above for the
+          // matching height budget. Same "Walk-in Customer" gate as the
+          // on-screen ThermalReceipt.tsx uses for its own Customer line
+          // (TakeAway/Delivery orders can now be placed with no name at
+          // all - see POSPage.tsx's validateOrderForm - and fall back to
+          // that exact placeholder, so this print path has to recognize it
+          // too or it'd print "PHONE:"/"ADDRESS:" lines with nothing real
+          // behind them). Walk-in placeholder phone (03000000000) excluded
+          // the same way, since it was never a real number the customer
+          // gave. ADDRESS is deliberately NOT gated on name being present -
+          // a Delivery order can be placed with an address but no typed
+          // name, and the address is exactly what the delivery needs, so it
+          // still has to print even then.
+          type === "cashier" && orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" && orderData.customer.phone && orderData.customer.phone !== "03000000000" ? h(Text, null, `PHONE: ${orderData.customer.phone}`) : null,
+          type === "cashier" && orderData?.customer?.address ? h(Text, null, `ADDRESS: ${orderData.customer.address}`) : null,
           orderData?.table ? h(Text, null, `TABLE: ${orderData.table}`) : null,
           orderData?.waiter ? h(Text, null, `WAITER: ${String(orderData.waiter).toUpperCase()}`) : null
         ),
@@ -931,6 +1040,12 @@ if (!gotTheLock) {
     },
     col3: { flexGrow: 3, flexShrink: 1 },
     col1Right: { flexGrow: 1, flexShrink: 0, textAlign: "right", fontSize: 8.5 },
+    // Applied to each individual line inside the meta block (Tr#, Date,
+    // M/S, Order#, Waiter, etc.) so they have breathing room from each
+    // other - react-pdf has no space-y equivalent, this is the per-row
+    // substitute (Tailwind's space-y-2 is the web-preview counterpart, see
+    // KitchenKotReceipt.tsx/ItemizedBillReceipt.tsx).
+    metaRow: { marginBottom: 6 },
   });
 
   // Customer-facing "Bill" template - see ItemizedBillReceipt.tsx (renderer
@@ -960,15 +1075,23 @@ if (!gotTheLock) {
         h(View, { style: altReceiptStyles.boxedType },
           h(Text, { style: altReceiptStyles.boxedTypeText }, String(orderData?.orderType || "").toUpperCase())
         ),
-        h(View, { style: receiptStyles.meta },
-          h(View, { style: receiptStyles.row },
+        h(View, { style: [receiptStyles.meta, { marginTop: 8, marginBottom: 8 }] },
+          h(View, { style: [receiptStyles.row, altReceiptStyles.metaRow] },
             h(Text, null, `Order#: ${orderNumber}`),
             h(Text, null, `${formatReceiptDate(orderData?.createdAt)} ${formatReceiptTime(orderData?.createdAt)}`)
           ),
-          orderData?.orderType === "DineIn" && orderData?.table ? h(Text, null, `Table: ${orderData.table}`) : null,
-          h(Text, null, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
-          orderData?.waiter ? h(Text, null, `Waiter: ${orderData.waiter}`) : null,
-          orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" ? h(Text, null, `Customer: ${orderData.customer.name}`) : null
+          orderData?.orderType === "DineIn" && orderData?.table ? h(Text, { style: altReceiptStyles.metaRow }, `Table: ${orderData.table}`) : null,
+          h(Text, { style: altReceiptStyles.metaRow }, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
+          orderData?.waiter ? h(Text, { style: altReceiptStyles.metaRow }, `Waiter: ${orderData.waiter}`) : null,
+          orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" ? h(Text, { style: altReceiptStyles.metaRow }, `Customer: ${orderData.customer.name}`) : null,
+          // Same customer/Walk-in gate as the name line above - walk-in
+          // placeholder phone (03000000000) excluded since it was never a
+          // real number the customer gave. Address is deliberately NOT
+          // gated on name being present - a Delivery order can be placed
+          // with an address but no typed name, and the address is exactly
+          // what the delivery needs, so it still has to print even then.
+          orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" && orderData.customer.phone && orderData.customer.phone !== "03000000000" ? h(Text, { style: altReceiptStyles.metaRow }, `Phone: ${orderData.customer.phone}`) : null,
+          orderData?.customer?.address ? h(Text, { style: altReceiptStyles.metaRow }, `Address: ${orderData.customer.address}`) : null
         ),
         h(View, { style: receiptStyles.dashedRule }),
         h(View, { style: altReceiptStyles.tableHeaderRow },
@@ -1025,8 +1148,15 @@ if (!gotTheLock) {
     const items = orderData?.items || [];
     const orderNumber = getOrderNumber(orderData);
     const totalQty = items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    // Shop-lifetime, never-resetting order count (backend/models/Order.js's
+    // shopSequenceNumber) - starts at 1 on this shop's very first order
+    // ever and keeps counting up forever, unlike Order# above which resets
+    // every shift. Falls back to the old id-derived value only for orders
+    // placed before this field existed (won't have shopSequenceNumber set).
     const rawId = String(orderData?.id || orderData?._id || "");
-    const trNumber = rawId.replace(/[^0-9a-z]/gi, "").slice(-6).toUpperCase();
+    const trNumber = orderData?.shopSequenceNumber
+      ? String(orderData.shopSequenceNumber).padStart(6, "0")
+      : rawId.replace(/[^0-9a-z]/gi, "").slice(-6).toUpperCase();
     const pageHeight = estimateKitchenKotHeightPt(orderData);
 
     return h(Document, null,
@@ -1038,25 +1168,25 @@ if (!gotTheLock) {
         h(View, { style: altReceiptStyles.boxedType },
           h(Text, { style: altReceiptStyles.boxedTypeText }, String(orderData?.orderType || "").toUpperCase())
         ),
-        h(View, { style: receiptStyles.meta },
-          h(Text, null, `Tr#: ${trNumber}`),
-          h(View, { style: receiptStyles.row },
+        h(View, { style: [receiptStyles.meta, { marginTop: 8, marginBottom: 8 }] },
+          h(Text, { style: altReceiptStyles.metaRow }, `Tr#: ${trNumber}`),
+          h(View, { style: [receiptStyles.row, altReceiptStyles.metaRow] },
             h(Text, null, `DATE: ${formatReceiptDate(orderData?.createdAt)}`),
             h(Text, null, formatReceiptTime(orderData?.createdAt))
           ),
-          h(Text, null, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
-          h(View, { style: receiptStyles.row },
+          h(Text, { style: altReceiptStyles.metaRow }, `M/S: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
+          h(View, { style: [receiptStyles.row, altReceiptStyles.metaRow] },
             h(Text, null, `Order#: ${orderNumber}`),
             orderData?.orderType === "DineIn" && orderData?.table ? h(Text, null, `Table: ${orderData.table}`) : null
           ),
-          orderData?.waiter ? h(Text, null, `Waiter: ${orderData.waiter}`) : null
+          orderData?.waiter ? h(Text, { style: altReceiptStyles.metaRow }, `Waiter: ${orderData.waiter}`) : null
         ),
         h(View, { style: receiptStyles.rule }),
         h(Text, { style: receiptStyles.ticketLabel }, "*** KOT ***"),
         h(View, { style: altReceiptStyles.tableHeaderRow },
-          h(Text, { style: [{ width: 16 }, altReceiptStyles.headerBold] }, "#"),
-          h(Text, { style: [{ flexGrow: 1 }, altReceiptStyles.headerBold] }, "Item Detail"),
-          h(Text, { style: [{ width: 30, textAlign: "right" }, altReceiptStyles.headerBold] }, "Qty")
+          h(Text, { style: [{ width: 16, flexShrink: 0 }, altReceiptStyles.headerBold] }, "#"),
+          h(Text, { style: [{ flexGrow: 1, flexShrink: 1, width: 0 }, altReceiptStyles.headerBold] }, "Item Detail"),
+          h(Text, { style: [{ width: 30, flexShrink: 0, textAlign: "right" }, altReceiptStyles.headerBold] }, "Qty")
         ),
         h(View, null,
           items.map((item, index) => {
@@ -1064,9 +1194,15 @@ if (!gotTheLock) {
             const name = String(item.name || "").toUpperCase();
             return h(View, { key: `${name}-${index}`, style: { marginBottom: 4 } },
               h(View, { style: receiptStyles.row },
-                h(Text, { style: { width: 16 } }, String(index + 1)),
-                h(Text, { style: { flexGrow: 1 } }, item.variation ? `${name} (${String(item.variation).toUpperCase()})` : name),
-                h(Text, { style: [receiptStyles.bold, { width: 30, textAlign: "right" }] }, String(quantity))
+                h(Text, { style: { width: 16, flexShrink: 0 } }, String(index + 1)),
+                // flexShrink: 1 + width: 0 forces this cell to wrap/shrink to
+                // its allotted space instead of growing past it - react-pdf's
+                // layout engine (Yoga) defaults flexShrink to 0, unlike web
+                // CSS flexbox, so a long unbroken item name (no spaces to
+                // wrap at) would otherwise overflow straight through the Qty
+                // column instead of wrapping onto its own line.
+                h(Text, { style: { flexGrow: 1, flexShrink: 1, width: 0 } }, item.variation ? `${name} (${String(item.variation).toUpperCase()})` : name),
+                h(Text, { style: [receiptStyles.bold, { width: 30, flexShrink: 0, textAlign: "right" }] }, String(quantity))
               )
             );
           })
@@ -1089,7 +1225,10 @@ if (!gotTheLock) {
     if (hasLogo) h += 100;
     h += 55; // store name/sub/address/contact
     h += 25; // "Bill" title + boxed type
-    h += 45; // meta block (order#/date, table, M/S, waiter, customer)
+    h += 45 + 16 + 24; // meta block (order#/date, table, M/S, waiter, customer) + its extra top/bottom margin + per-row spacing
+    const billCustomerShown = orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer";
+    if (billCustomerShown && orderData?.customer?.phone && orderData.customer.phone !== "03000000000") h += 14;
+    if (orderData?.customer?.address) h += 14;
     h += 20; // dashed rule + table header
     const items = orderData?.items || [];
     items.forEach((item) => {
@@ -1112,7 +1251,7 @@ if (!gotTheLock) {
     let h = 55;
     h += 35; // header
     h += 25; // boxed order type
-    h += 70; // meta (Tr#, date/time, M/S, order#/table, waiter)
+    h += 70 + 16 + 24; // meta (Tr#, date/time, M/S, order#/table, waiter) + its extra top/bottom margin + per-row spacing
     h += 25; // rule + KOT label
     h += 20; // table header
     const items = orderData?.items || [];
@@ -1476,6 +1615,8 @@ if (!gotTheLock) {
     } catch (error) {
       reportFatal("Initialization Error", error);
     }
+
+    setupAutoUpdater();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

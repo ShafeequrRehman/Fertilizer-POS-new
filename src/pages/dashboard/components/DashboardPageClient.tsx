@@ -48,12 +48,27 @@ export default function DashboardPageClient() {
   const { session: cachedShopSession } = useShopSession();
 
   useEffect(() => {
-    setChartsReady(true);
+    // Two animation frames, not a plain "run once after mount" - this page
+    // can be reached mid route-transition, so on the very first paint its
+    // own chart containers can still be mid-layout (computed width/height
+    // briefly 0), which is exactly what produces Recharts' "width(-1)
+    // height(-1)" console warning below. One rAF lands right after the
+    // first real paint; the second guards against that same paint still
+    // being mid-layout on slower machines.
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setChartsReady(true));
+    });
 
     const timer = setInterval(() => {
       setCurrentTime(new Date());
     }, 60000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      clearInterval(timer);
+    };
   }, []);
 
   // "Today's" numbers on this dashboard are defined purely by the Open
@@ -189,7 +204,7 @@ export default function DashboardPageClient() {
       }
     });
 
-    return data.map(({ start, end, ...bucket }) => bucket);
+    return data.map(({ start: _start, end: _end, ...bucket }) => bucket);
   }, [businessOrders, businessWindow]);
 
   const topEmployees = useMemo<EmployeeStat[]>(() => {

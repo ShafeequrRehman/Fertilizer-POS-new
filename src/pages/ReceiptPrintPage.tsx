@@ -103,6 +103,7 @@ export default function StandaloneReceiptPrintPage() {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
+    if (!params.id) return;
     void fetchOrder(params.id).then(setOrder);
   }, [params.id]);
 

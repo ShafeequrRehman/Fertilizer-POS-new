@@ -23,7 +23,14 @@ export default function KitchenKotReceipt({ order }: { order: SavedOrder }) {
     ? date.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit' }).toLowerCase()
     : '--:--';
   const orderNumber = String(order.dailyOrderNumber ?? order.id.slice(-3)).padStart(3, '0');
-  const trNumber = order.id.replace(/[^0-9a-z]/gi, '').slice(-6).toUpperCase();
+  // Shop-lifetime, never-resetting order count (backend/models/Order.js's
+  // shopSequenceNumber) - starts at 1 on this shop's very first order ever
+  // and keeps counting up forever, unlike Order# above which resets every
+  // shift. Falls back to the old id-derived value only for orders placed
+  // before this field existed.
+  const trNumber = order.shopSequenceNumber
+    ? String(order.shopSequenceNumber).padStart(6, '0')
+    : order.id.replace(/[^0-9a-z]/gi, '').slice(-6).toUpperCase();
   const totalQty = order.items.reduce((sum, item) => sum + item.quantity, 0);
   const cashierName = getAuthUser()?.name || getAuthUser()?.username || '';
 
@@ -49,8 +56,11 @@ export default function KitchenKotReceipt({ order }: { order: SavedOrder }) {
         <span className="font-bold uppercase tracking-widest">{order.orderType}</span>
       </div>
 
-      {/* Metadata */}
-      <div className="mb-2 space-y-0.5">
+      {/* Metadata - space-y-2 gives each individual line (Tr#, Date, M/S,
+          Order#, Waiter) breathing room from the one above/below it, on
+          top of the block's own margin from the boxed order type above and
+          the KOT rule below. */}
+      <div className="mt-3 mb-3 space-y-2">
         <p>Tr#: {trNumber}</p>
         <div className="flex justify-between"><span>DATE: {dateString}</span><span>{timeString}</span></div>
         <p>M/S: {(order.paymentMethod || 'Cash').toUpperCase()}</p>
@@ -68,16 +78,16 @@ export default function KitchenKotReceipt({ order }: { order: SavedOrder }) {
       {/* Items */}
       <div>
         <div className="flex justify-between font-bold border-b border-black pb-0.5 mb-1">
-          <span className="w-5">#</span>
-          <span className="flex-1">Item Detail</span>
-          <span className="w-10 text-right">Qty</span>
+          <span className="w-5 shrink-0">#</span>
+          <span className="min-w-0 flex-1">Item Detail</span>
+          <span className="w-10 shrink-0 text-right">Qty</span>
         </div>
         {order.items.map((item, idx) => (
           <div key={idx} className="mb-1.5">
             <div className="flex justify-between">
-              <span className="w-5">{idx + 1}</span>
-              <span className="flex-1 pr-1 uppercase">{item.name}{item.variation ? ` (${item.variation})` : ''}</span>
-              <span className="w-10 text-right font-bold">{item.quantity}</span>
+              <span className="w-5 shrink-0">{idx + 1}</span>
+              <span className="min-w-0 flex-1 break-words pr-1 uppercase">{item.name}{item.variation ? ` (${item.variation})` : ''}</span>
+              <span className="w-10 shrink-0 text-right font-bold">{item.quantity}</span>
             </div>
           </div>
         ))}

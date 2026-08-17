@@ -4,7 +4,6 @@ import { clearAuthSession, getAuthToken, getRefreshToken, updateTokens, type Log
 const DATA_API_BASE_KEY = "api_base_url";
 const CLOUD_API_BASE_KEY = "cloud_api_base_url";
 const LOCAL_API_BASE = "http://localhost:5000/api";
-const IN_APP_POS_API_BASE = "/api/pos";
 const IN_APP_SYSTEM_API_BASE = "/api/system";
 const AXIOS_REQUEST_TIMEOUT_MS = 8000;
 
@@ -25,10 +24,6 @@ function unique(values: string[]) {
 
 function isNonEmptyString(value: string | undefined): value is string {
   return Boolean(value);
-}
-
-function isLocalHostname(hostname: string) {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 export function isDesktopApp() {
@@ -70,7 +65,7 @@ export function getStoredApiBaseUrl() {
   return getRuntimeCloudApiBaseCandidates()[0];
 }
 
-export function setStoredApiBaseUrl(baseUrl: string) {
+export function setStoredApiBaseUrl(_baseUrl: string) {
   // Disabled: we strictly use the local backend now.
   return;
 }
@@ -83,7 +78,7 @@ export function getStoredCloudApiBaseUrl() {
   return getRuntimeCloudApiBaseCandidates()[0];
 }
 
-export function setStoredCloudApiBaseUrl(baseUrl: string) {
+export function setStoredCloudApiBaseUrl(_baseUrl: string) {
   // Disabled: we strictly use the local backend now.
   return;
 }

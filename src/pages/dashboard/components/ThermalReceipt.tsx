@@ -101,6 +101,22 @@ export default function ThermalReceipt({
         {order.customer && order.customer.name && order.customer.name !== 'Walk-in Customer' && (
           <p>CUSTOMER: {order.customer.name.toUpperCase()}</p>
         )}
+        {/* Phone/address only belong on the customer's own copy, not the
+            kitchen ticket. Phone stays gated on a real (non-Walk-in) name -
+            validateOrderForm in POSPage.tsx never lets a phone through
+            without a name alongside it, so this is always consistent - plus
+            the walk-in placeholder phone (03000000000) is excluded since it
+            was never a real number the customer gave. Address is
+            DELIBERATELY NOT gated on name being present: a Delivery order
+            can be placed with an address but no typed name (name/phone are
+            optional there too), and the address is exactly the information
+            the delivery needs - it must still print even then. */}
+        {type === 'cashier' && order.customer && order.customer.name && order.customer.name !== 'Walk-in Customer' && order.customer.phone && order.customer.phone !== '03000000000' && (
+          <p>PHONE: {order.customer.phone}</p>
+        )}
+        {type === 'cashier' && order.customer?.address && (
+          <p>ADDRESS: {order.customer.address}</p>
+        )}
       </div>
 
       {/* Dashed Separator */}

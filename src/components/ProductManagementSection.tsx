@@ -52,6 +52,18 @@ export function ProductManagementSection({
   // General Form states
   const [formType, setFormType] = useState<"Product" | "Deal">("Product");
   const [editingId, setEditingId] = useState<string | number | null>(null);
+  // Editing an entire product GROUP at once (name/category/image shared by
+  // every variation, plus each variation's own name/price/qty) - distinct
+  // from editingId above, which only ever edits ONE Product document (one
+  // size/variation). Triggered by the Edit button on a multi-variation
+  // group's main row (see handleEditGroupClick) - editingId stays null the
+  // whole time, since there's no single product id this represents.
+  const [isEditingGroup, setIsEditingGroup] = useState(false);
+  // The real backend ids of the group's variations at the moment editing
+  // started - used at save time to tell "this row already exists, update
+  // it" apart from "this is a newly added row, create it", and to know
+  // which ones were removed from the list entirely (deleted).
+  const [originalGroupVariationIds, setOriginalGroupVariationIds] = useState<Set<string>>(new Set());
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
@@ -104,6 +116,8 @@ export function ProductManagementSection({
 
   function resetForm() {
     setEditingId(null);
+    setIsEditingGroup(false);
+    setOriginalGroupVariationIds(new Set());
     setName("");
     setPrice("");
     setQty("");
@@ -186,8 +200,51 @@ export function ProductManagementSection({
 
     try {
       setIsSaving(true);
-      
-      if (editingId) {
+
+      if (isEditingGroup) {
+        // Full group edit - reconciles the form's variationsData rows
+        // against what the group originally had: a row whose id is one of
+        // originalGroupVariationIds is an existing Product document, so it
+        // gets updateProduct'd (carrying the possibly-changed shared
+        // name/category/image plus its own price/stock/variation name); a
+        // row with any other id was added via "Add Pattern" just now, so
+        // it gets createProduct'd; anything from the original set that's
+        // no longer present in the list was removed via the row's Trash2
+        // button, so it gets deleted for real.
+        const basePayload = getBasePayload();
+        const keptIds = new Set<string>();
+        const savedProducts: Product[] = [];
+
+        for (const v of variationsData) {
+          const variationName = v.name.trim();
+          const payload = {
+            ...basePayload,
+            price: Number(v.price),
+            stock: v.qty ? Number(v.qty) : 0,
+            variation: variationName,
+          };
+          if (originalGroupVariationIds.has(v.id)) {
+            keptIds.add(v.id);
+            const updated = await updateProduct(v.id, payload);
+            if (updated) savedProducts.push(updated);
+          } else {
+            const created = await createProduct(payload);
+            if (created) savedProducts.push(created);
+          }
+        }
+
+        const removedIds = [...originalGroupVariationIds].filter((id) => !keptIds.has(id));
+        for (const id of removedIds) {
+          await deleteProduct(id);
+        }
+
+        setProducts((prev) => [
+          ...prev.filter((p) => !originalGroupVariationIds.has(String(p.id))),
+          ...savedProducts,
+        ]);
+        setStatusMessage({ tone: "success", text: `"${name}" updated successfully.` });
+        resetForm();
+      } else if (editingId) {
         const payload = {
           ...getBasePayload(),
           price: Number(price),
@@ -243,6 +300,8 @@ export function ProductManagementSection({
 
   function handleEditClick(product: Product) {
     setEditingId(product.id);
+    setIsEditingGroup(false);
+    setOriginalGroupVariationIds(new Set());
     setName(product.name);
     setPrice(product.price.toString());
     setQty(product.stock > 0 ? product.stock.toString() : "");
@@ -285,6 +344,32 @@ export function ProductManagementSection({
     } catch (error) {
       setStatusMessage({ tone: "error", text: error instanceof Error ? error.message : "Failed to delete product." });
     }
+  }
+
+  // Full edit of an entire product group at once - the name/category/icon
+  // shared by every variation, plus each variation's own name/price/stock,
+  // all in the same form used to add a brand new product (same "Add
+  // Pattern"/remove-row/preset controls). See isEditingGroup's own comment
+  // above for how this differs from handleEditClick (which only ever edits
+  // one variation/Product document at a time).
+  function handleEditGroupClick(group: ProductGroup) {
+    resetForm();
+    setFormType(group.isDeal ? "Deal" : "Product");
+    setIsEditingGroup(true);
+    setName(group.name);
+    setCategory(group.category);
+    setImage(group.image || "");
+    setHasVariations(true);
+    setOriginalGroupVariationIds(new Set(group.variations.map((v) => String(v.id))));
+    setVariationsData(
+      group.variations.map((v) => ({
+        id: String(v.id),
+        name: v.variation && v.variation !== "Standard" ? v.variation : "Standard",
+        price: v.price.toString(),
+        qty: v.stock > 0 ? v.stock.toString() : "",
+      }))
+    );
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   // Prefills the top form to add another variation to an existing product
@@ -376,7 +461,7 @@ export function ProductManagementSection({
       <div className="rounded-[32px] border border-slate-100 bg-slate-50 p-6 space-y-6 shadow-sm">
         
         {/* Toggle Form Type */}
-        {!editingId && (
+        {!editingId && !isEditingGroup && (
           <div className="flex bg-slate-200/40 p-1.5 rounded-[20px] mb-2">
             <button
               type="button"
@@ -393,9 +478,9 @@ export function ProductManagementSection({
           </div>
         )}
 
-        {editingId && (
+        {(editingId || isEditingGroup) && (
           <h4 className="text-sm font-black uppercase text-indigo-600 tracking-wider flex items-center gap-2 border-b border-indigo-100 pb-3">
-            <Edit size={16} /> Edit {formType}
+            <Edit size={16} /> {isEditingGroup ? `Edit ${formType} (all variations)` : `Edit ${formType}`}
           </h4>
         )}
         
@@ -686,11 +771,11 @@ export function ProductManagementSection({
             disabled={isSaving}
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5"
           >
-            {editingId ? <Edit size={16} /> : <Plus size={16} />}
-            {isSaving ? "Saving..." : (editingId ? `Update ${formType}` : `Publish ${formType}`)}
+            {(editingId || isEditingGroup) ? <Edit size={16} /> : <Plus size={16} />}
+            {isSaving ? "Saving..." : ((editingId || isEditingGroup) ? `Update ${formType}` : `Publish ${formType}`)}
           </button>
-          
-          {editingId && (
+
+          {(editingId || isEditingGroup) && (
             <button
               type="button"
               onClick={resetForm}
@@ -797,14 +882,24 @@ export function ProductManagementSection({
                     </div>
                     {hasMultiple ? (
                       !group.isDeal && (
-                        <button
-                          type="button"
-                          onClick={() => handleAddVariationClick(group)}
-                          title="Add another variation"
-                          className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm shrink-0"
-                        >
-                          <Plus size={14} /> Add
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleEditGroupClick(group)}
+                            title="Edit this product (name, image, category, and all its variations)"
+                            className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-sm"
+                          >
+                            <Edit size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddVariationClick(group)}
+                            title="Add another variation"
+                            className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm shrink-0"
+                          >
+                            <Plus size={14} /> Add
+                          </button>
+                        </div>
                       )
                     ) : (
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">

@@ -1,6 +1,9 @@
 type IpcRendererLike = {
   invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
   sendSync: (channel: string, ...args: unknown[]) => unknown;
+  send: (channel: string, ...args: unknown[]) => void;
+  on: (channel: string, listener: (event: unknown, ...args: unknown[]) => void) => void;
+  removeListener: (channel: string, listener: (event: unknown, ...args: unknown[]) => void) => void;
 };
 
 type ElectronRequire = (moduleName: 'electron') => { ipcRenderer: IpcRendererLike };

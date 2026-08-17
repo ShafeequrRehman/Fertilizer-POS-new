@@ -1,8 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil } from "lucide-react";
+import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil, WifiOff } from "lucide-react";
 import { shopApi, type EmployeeSummary, type RoleSummary, type PermissionDef } from "@/lib/shop-api";
 import { STAFF_DESIGNATIONS } from "@/lib/staff-designations";
 import { useToast } from "@/lib/toast";
+import { isDesktopApp } from "@/lib/api";
+import { useNetworkStatus } from "@/lib/network-status";
+import { getReferenceData, queueEmployeeCreate, pushEmployeesCache } from "@/lib/local-hub-api";
+import { loadEmployeesFromLocalHub, saveEmployeeEditOffline, deleteEmployeeOffline } from "@/lib/offline-staff-helpers";
 
 // Shop Owner-only page (see App.tsx route guard) for managing staff -
 // login accounts (Employees tab) and the roles that control what they
@@ -19,6 +23,7 @@ import { useToast } from "@/lib/toast";
 // separate waiter list to manage anymore (see SettingsPage.tsx).
 export default function EmployeesPage() {
   const { toast, confirm } = useToast();
+  const { isOnline } = useNetworkStatus();
   const [tab, setTab] = useState<"employees" | "roles">("employees");
   const [employees, setEmployees] = useState<EmployeeSummary[]>([]);
   const [roles, setRoles] = useState<RoleSummary[]>([]);
@@ -29,14 +34,64 @@ export default function EmployeesPage() {
   const [showRoleEditor, setShowRoleEditor] = useState<RoleSummary | "new" | null>(null);
   const [resetTarget, setResetTarget] = useState<EmployeeSummary | null>(null);
 
-  const load = () => {
-    setLoading(true);
-    Promise.all([shopApi.listEmployees(), shopApi.listRoles(), shopApi.listPermissions()])
-      .then(([e, r, p]) => { setEmployees(e); setRoles(r); setPermissions(p); })
-      .finally(() => setLoading(false));
+  // Desktop + genuinely offline (the network-status hook does a real
+  // backend round-trip, not just navigator.onLine - see network-status.ts)
+  // is when staff create/edit/delete get queued through the Local Hub
+  // instead of calling shopApi directly against the cloud. See
+  // offline-staff-helpers.ts / backend/localHub/localStaff.js.
+  const offline = isDesktopApp() && !isOnline;
+
+  // Cache-first-on-failure load: tries the cloud first (so a normal online
+  // session always shows the truest, most current list), and only falls
+  // back to the Local Hub's cached snapshot + pending queue if that fails -
+  // covers both "known offline" and "looked online a second ago but this
+  // particular request still failed" without a separate code path for each.
+  const loadOffline = async () => {
+    try {
+      const reference = await getReferenceData();
+      const cachedRoles = (reference.roles || []) as RoleSummary[];
+      setRoles(cachedRoles);
+      const merged = await loadEmployeesFromLocalHub(cachedRoles);
+      setEmployees(merged);
+    } catch {
+      toast.error("Could not load staff - Local Hub unreachable.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(load, []);
+  const load = () => {
+    setLoading(true);
+    if (offline) {
+      void loadOffline();
+      return;
+    }
+    Promise.all([shopApi.listEmployees(), shopApi.listRoles(), shopApi.listPermissions()])
+      .then(([e, r, p]) => {
+        setEmployees(e);
+        setRoles(r);
+        setPermissions(p);
+        setLoading(false);
+        // Best-effort - keeps Manage Staff's own offline cache current
+        // every time this till successfully loads the list online. Never
+        // blocks or fails the on-screen load if the Local Hub isn't running.
+        if (isDesktopApp()) void pushEmployeesCache(e).catch(() => {});
+      })
+      .catch(() => {
+        // loadOffline() manages its own setLoading(false) once the Local
+        // Hub read actually resolves - not set here too, or the list would
+        // flash "No staff members yet" for a moment while it's still loading.
+        if (isDesktopApp()) void loadOffline();
+        else { toast.error("Failed to load staff."); setLoading(false); }
+      });
+  };
+
+  // Loads on mount, and again any time connectivity flips (either
+  // direction) rather than waiting for the next manual Refresh - e.g. a
+  // staff member queued while offline should disappear from "queued"
+  // display once it actually syncs shortly after reconnecting.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [isOnline]);
 
   const roleName = (emp: EmployeeSummary) => {
     if (emp.employeeRoleId && typeof emp.employeeRoleId === "object") return emp.employeeRoleId.name;
@@ -44,14 +99,22 @@ export default function EmployeesPage() {
   };
 
   const toggleActive = async (emp: EmployeeSummary) => {
-    await shopApi.updateEmployee(emp._id, { isActive: !emp.isActive });
+    if (offline) {
+      await saveEmployeeEditOffline(emp, { isActive: !emp.isActive }, roles);
+    } else {
+      await shopApi.updateEmployee(emp._id, { isActive: !emp.isActive });
+    }
     load();
   };
 
   const removeEmployee = async (emp: EmployeeSummary) => {
     const confirmed = await confirm(`Remove staff member "${emp.name}"?`, { title: "Remove staff member", confirmText: "Remove", tone: "danger" });
     if (!confirmed) return;
-    await shopApi.deleteEmployee(emp._id);
+    if (offline) {
+      await deleteEmployeeOffline(emp);
+    } else {
+      await shopApi.deleteEmployee(emp._id);
+    }
     load();
     toast.success(`"${emp.name}" removed.`);
   };
@@ -72,7 +135,14 @@ export default function EmployeesPage() {
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Manage Staff</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold">Manage Staff</h1>
+            {offline ? (
+              <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-700">
+                <WifiOff size={12} /> Offline — changes will sync automatically
+              </span>
+            ) : null}
+          </div>
           <p className="text-sm text-gray-500">Staff accounts, designations, directory details, and the roles that control what they can see and do.</p>
         </div>
         <div className="flex items-center gap-3">
@@ -183,10 +253,10 @@ export default function EmployeesPage() {
       )}
 
       {showCreateEmployee ? (
-        <StaffFormModal roles={roles} onClose={() => setShowCreateEmployee(false)} onSaved={load} />
+        <StaffFormModal roles={roles} offline={offline} onClose={() => setShowCreateEmployee(false)} onSaved={load} />
       ) : null}
       {editTarget ? (
-        <StaffFormModal roles={roles} employee={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
+        <StaffFormModal roles={roles} offline={offline} employee={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
       ) : null}
       {showRoleEditor ? (
         <RoleEditorModal
@@ -233,11 +303,13 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
 function StaffFormModal({
   roles,
   employee,
+  offline = false,
   onClose,
   onSaved,
 }: {
   roles: RoleSummary[];
   employee?: EmployeeSummary;
+  offline?: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -285,11 +357,26 @@ function StaffFormModal({
     try {
       if (isEdit && employee) {
         if (form.username !== employee.username) payload.username = form.username;
-        await shopApi.updateEmployee(employee._id, payload);
+        if (offline) {
+          await saveEmployeeEditOffline(employee, payload, roles);
+        } else {
+          await shopApi.updateEmployee(employee._id, payload);
+        }
       } else {
         payload.username = form.username;
         payload.password = form.password;
-        await shopApi.createEmployee(payload);
+        if (offline) {
+          // Denormalize the role's name alongside its id purely for
+          // display - the Local Hub queue has no live cloud role lookup to
+          // resolve it from (see offline-staff-helpers.ts's
+          // localEmployeeToSummary). The real roleId is still what actually
+          // gets sent to the cloud once this syncs for real.
+          payload.roleName = roles.find((r) => r._id === form.roleId)?.name || "";
+          payload.isActive = true;
+          await queueEmployeeCreate(payload);
+        } else {
+          await shopApi.createEmployee(payload);
+        }
       }
       onSaved();
       onClose();

@@ -121,18 +121,27 @@ export default function OfflineSyncPage() {
             </p>
 
             {pairingInfo && pairingInfo.ips.length > 1 ? (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {pairingInfo.ips.map((ip) => (
-                  <button
-                    key={ip}
-                    type="button"
-                    onClick={() => setSelectedIp(ip)}
-                    className={`rounded-full px-3 py-1.5 text-xs font-bold ${selectedIp === ip ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}
-                  >
-                    {ip}
-                  </button>
-                ))}
-              </div>
+              <>
+                <p className="mt-4 text-xs font-bold text-amber-600">
+                  This till has more than one network adapter - pick the one labeled Wi-Fi (or matching this till's actual WiFi connection). The others - VPNs, Docker/WSL/Hyper-V's virtual adapters - look identical but a phone on the same WiFi can never reach them, which is the most common reason pairing fails even though both devices are genuinely on the same network.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {pairingInfo.ips.map((ip) => {
+                    const label = pairingInfo.interfaceNames?.[ip];
+                    return (
+                      <button
+                        key={ip}
+                        type="button"
+                        onClick={() => setSelectedIp(ip)}
+                        className={`rounded-full px-3 py-1.5 text-xs font-bold ${selectedIp === ip ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+                        title={label}
+                      >
+                        {ip}{label ? ` (${label})` : ''}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
             ) : null}
 
             <div className="mt-5 flex items-center justify-center rounded-2xl bg-slate-50 p-6">
@@ -213,6 +222,62 @@ export default function OfflineSyncPage() {
             <CheckCircle2 size={14} className="text-emerald-500" />
             Last synced {lastSyncAt.toLocaleTimeString()}
             {lastResult?.error ? ` — ${lastResult.error}` : ''}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Offline Manage Staff - see localStaff.js. Same sync engine/5-minute
+          tick as Offline Orders above, just a separate queue. */}
+      <div className="rounded-[28px] border border-slate-200 bg-white p-6">
+        <div>
+          <h2 className="text-lg font-black text-slate-900">Offline Staff Changes</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Staff members created, edited, or removed on Manage Staff while the internet was down. They sync
+            automatically the same way offline orders do.
+          </p>
+        </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <StatBox label="Pending New" value={status?.pendingStaffCount ?? 0} tone="amber" />
+          <StatBox label="Pending Edits" value={status?.pendingStaffEditCount ?? 0} tone="amber" />
+          <StatBox label="Pending Removals" value={status?.pendingStaffDeleteCount ?? 0} tone="amber" />
+          <StatBox
+            label="Failed"
+            value={(status?.failedStaffCount ?? 0) + (status?.failedStaffEditCount ?? 0) + (status?.failedStaffDeleteCount ?? 0)}
+            tone="rose"
+          />
+        </div>
+
+        {!isOnline && (status?.pendingStaffCount ?? 0) + (status?.pendingStaffEditCount ?? 0) + (status?.pendingStaffDeleteCount ?? 0) > 0 ? (
+          <div className="mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700">
+            <WifiOff size={14} /> Waiting for the internet to come back before these can sync.
+          </div>
+        ) : null}
+      </div>
+
+      {/* Offline Cancel Order - see localOrders.js's "Cancelling an
+          ALREADY-SYNCED order while offline" section. A "Failed" count here
+          almost always means the Cancel Order Key entered offline turned
+          out to be wrong once actually checked against the cloud - that
+          order was NOT really cancelled and needs to be redone (with the
+          correct key) from the Sales or Record page. */}
+      <div className="rounded-[28px] border border-slate-200 bg-white p-6">
+        <div>
+          <h2 className="text-lg font-black text-slate-900">Offline Cancellations</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Orders cancelled while the internet was down. The Cancel Order Key is only actually checked once this
+            syncs - a wrong key shows up here as Failed, meaning that order was NOT really cancelled.
+          </p>
+        </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-2">
+          <StatBox label="Pending" value={status?.pendingCancellationCount ?? 0} tone="amber" />
+          <StatBox label="Failed (wrong key)" value={status?.failedCancellationCount ?? 0} tone="rose" />
+        </div>
+
+        {(status?.failedCancellationCount ?? 0) > 0 ? (
+          <div className="mt-4 flex items-center gap-2 rounded-2xl bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700">
+            <AlertCircle size={14} /> One or more offline cancellations used the wrong key and were not applied - redo them with the correct key.
           </div>
         ) : null}
       </div>

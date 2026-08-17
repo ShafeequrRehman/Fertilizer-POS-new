@@ -4,18 +4,20 @@ import {
   LayoutDashboard, ShoppingCart, BarChart3, Calculator,
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
-  Store, Lock, ClipboardList, Wifi, WifiOff
+  Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, hasPermission, isPageEnabled } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
 import { useOfflineSync } from '@/lib/offline-sync';
 import { isDesktopApp, logoutRequest } from '@/lib/api';
-import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, claimReceiptPrint, closeShopSession, fetchUnprintedKitchenOrders, fetchUnprintedKitchenUpdateOrders, fetchUnprintedReceiptOrders, openShopSession } from '@/lib/pos-api';
+import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, closeShopSession, fetchProducts, fetchUnprintedKitchenOrders, fetchUnprintedKitchenUpdateOrders, openShopSession } from '@/lib/pos-api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
 import { useToast } from '@/lib/toast';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { getIpcRenderer } from '@/lib/electron-bridge';
+import { reportPrintOutcome } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
 
 // Icons keyed by DASHBOARD_PAGES's `key` - kept separate from that shared
 // list since it lives in lib/ and can't hold JSX.
@@ -67,12 +69,30 @@ export default function DashboardShell() {
   // Runs the 5-minute offline sync timer (see lib/offline-sync.ts) for the
   // lifetime of the dashboard session - a no-op outside the Electron app,
   // and harmless to mount even for shops that never use offline mode.
-  useOfflineSync();
+  const { lastResult } = useOfflineSync();
+  const { toast: syncToast } = useToast();
+
+  // A Cancel Order made offline is trusted immediately (see
+  // CancelOrderModal.tsx) and only actually verified against the real
+  // Cancel Order Key once this sync tick replays it - if the key turns out
+  // wrong, the order is still showing "cancelled" on whatever screen
+  // showed it (until that page's next cache refresh corrects it), so this
+  // is the one place that actively flags it instead of leaving it to be
+  // silently discovered later on the Offline Sync page.
+  useEffect(() => {
+    if (lastResult?.wrongKeyOrderIds && lastResult.wrongKeyOrderIds.length > 0) {
+      syncToast.error(
+        lastResult.wrongKeyOrderIds.length === 1
+          ? `An offline cancellation used the wrong Cancel Order Key - order ${lastResult.wrongKeyOrderIds[0]} was NOT cancelled. Redo it with the correct key.`
+          : `${lastResult.wrongKeyOrderIds.length} offline cancellations used the wrong Cancel Order Key and were NOT applied. Redo them with the correct key.`,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastResult]);
 
   return (
     <ShopSessionProvider>
       <KitchenPrintWatcher />
-      <ReceiptPrintWatcher />
       <KitchenUpdateWatcher />
       <div className="flex min-h-screen bg-[#F2F4F7] font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
         <aside className="print:hidden flex w-56 flex-col gap-6 p-4">
@@ -101,6 +121,8 @@ export default function DashboardShell() {
             <div className="flex items-center gap-3">
               <ShopStatusControl />
               <NetworkStatusBadge />
+              <OfflineModeToggle />
+              <UpdateStatusBadge />
             </div>
             <div className="flex items-center gap-3">
               <TopAction icon={<Search size={18} />} />
@@ -152,9 +174,42 @@ export default function DashboardShell() {
 // slightly chattier poll - negligible for a single-shop backend.
 const KITCHEN_POLL_INTERVAL_MS = 1500;
 
+// Both kitchen watchers below need a name->category lookup to route Ice
+// Cream/Drinks/Shwarma items to the counter printer instead of the
+// kitchen printer (see kitchen-print-routing.ts) - refreshed on its own
+// slower interval rather than on every 1.5s poll tick, since the product
+// catalog changes far less often than orders come in. Falls back to
+// whatever was last fetched (or an empty lookup, before the first fetch
+// resolves - everything routes to the kitchen printer either way, the
+// same behavior as before this split existed) if a refresh ever fails.
+const CATEGORY_LOOKUP_REFRESH_MS = 60000;
+
+function useCategoryLookupRef() {
+  const lookupRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const result = await fetchProducts();
+        if (!cancelled) lookupRef.current = buildCategoryLookup(result.products || []);
+      } catch {
+        // Network hiccup - keep using the last-known lookup, next tick retries.
+      }
+    }
+    void refresh();
+    const intervalId = setInterval(() => void refresh(), CATEGORY_LOOKUP_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+  return lookupRef;
+}
+
 function KitchenPrintWatcher() {
   const { toast } = useToast();
   const inFlightRef = useRef<Set<string>>(new Set());
+  const categoryLookupRef = useCategoryLookupRef();
   // ToastProvider rebuilds its `toast` object every render (it's a plain
   // object literal, not memoized), so depending on `toast` directly in the
   // effect below would tear down and restart this poll loop constantly -
@@ -167,12 +222,17 @@ function KitchenPrintWatcher() {
   useEffect(() => {
     const ipcRenderer = getIpcRenderer();
     if (!ipcRenderer) return undefined; // not Electron - nothing to print with
+    // TypeScript's null-narrowing above doesn't survive into the .then()
+    // closures further down (they're not guaranteed to run within the same
+    // synchronous control-flow tsc is analyzing) - rebinding to a new const
+    // here keeps it non-nullable everywhere it's actually used below.
+    const ipc = ipcRenderer;
 
     let cancelled = false;
 
     async function poll() {
       const settings = getStoreSettings();
-      if (!settings.kitchenPrinter) return; // nothing configured to print to
+      if (!settings.kitchenPrinter && !settings.counterPrinter) return; // nothing configured to print to
 
       let orders;
       try {
@@ -191,8 +251,17 @@ function KitchenPrintWatcher() {
 
         claimKitchenPrint(order.id)
           .then(async (claimed) => {
-            await ipcRenderer.invoke('print-kitchen-receipt-data', claimed, settings.kitchenPrinter, printLogo, settings);
-            toastRef.current.info(`New order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)} - printed to kitchen.`);
+            const label = `New order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)}`;
+            await dispatchKitchenPrints(
+              claimed.items,
+              categoryLookupRef.current,
+              settings,
+              async (groupItems, printerName, groupLabel) => {
+                const printPromise = ipc.invoke('print-kitchen-receipt-data', { ...claimed, items: groupItems }, printerName, printLogo, settings);
+                reportPrintOutcome(printPromise, `${label} ${groupLabel.toLowerCase()}`, toastRef.current);
+                await printPromise.catch(() => {});
+              },
+            );
           })
           .catch((err) => {
             // 409 = another till (or this same one, on a previous tick)
@@ -218,86 +287,19 @@ function KitchenPrintWatcher() {
   return null;
 }
 
-// Sibling to KitchenPrintWatcher above, for the customer-receipt side.
-// pos-mobile has no printer of its own, so this is what actually prints a
-// receipt for anything completed/placed from a phone: TakeAway orders
-// placed on a phone (prints immediately, same as POSPage.tsx does for
-// TakeAway orders rung up on this till directly), and ANY order (DineIn,
-// Delivery, or TakeAway) completed from the mobile app's Order Detail
-// screen (prints once it reaches "completed", same as SalesPage.tsx's own
-// Complete Payment does for orders completed here). See
-// getUnprintedReceiptOrders on the backend for exactly which orders that is.
-const RECEIPT_POLL_INTERVAL_MS = 1500; // see KITCHEN_POLL_INTERVAL_MS above
+// A customer receipt (DineIn, TakeAway, or Delivery - no exceptions) is
+// never auto-printed anywhere in this app, including for an order
+// completed from a phone (which has no printer of its own) - it's always
+// a deliberate, on-demand action via the printer icon / Print Receipt
+// button on the order detail card (see SalesPage.tsx/RecordPage.tsx).
+// There used to be a ReceiptPrintWatcher here, sibling to
+// KitchenPrintWatcher above, that polled orderController.js's
+// getUnprintedReceiptOrders and auto-printed - removed entirely, not just
+// disabled, since leaving it running with nothing left to legitimately
+// auto-print would be dead weight (and a latent footgun if that backend
+// route's filters ever changed again).
 
-function ReceiptPrintWatcher() {
-  const { toast } = useToast();
-  const inFlightRef = useRef<Set<string>>(new Set());
-  const toastRef = useRef(toast);
-  toastRef.current = toast;
-
-  useEffect(() => {
-    const ipcRenderer = getIpcRenderer();
-    if (!ipcRenderer) return undefined;
-
-    let cancelled = false;
-
-    async function poll() {
-      const settings = getStoreSettings();
-      if (!settings.counterPrinter) return; // nothing configured to print to
-
-      let orders;
-      try {
-        orders = await fetchUnprintedReceiptOrders();
-      } catch {
-        return; // network hiccup - next tick retries
-      }
-      if (!orders || cancelled) return;
-
-      const printLogo = typeof window !== 'undefined' ? localStorage.getItem('preferred-print-logo') : null;
-
-      for (const order of orders) {
-        if (cancelled) break;
-        if (inFlightRef.current.has(order.id)) continue;
-        inFlightRef.current.add(order.id);
-
-        claimReceiptPrint(order.id)
-          .then(async (claimed) => {
-            // Order-number token slip only applies to TakeAway (see
-            // POSPage.tsx) - a DineIn/Delivery order picked up here because
-            // it was just completed from the mobile app doesn't get one.
-            if (claimed.orderType === 'TakeAway') {
-              try {
-                await ipcRenderer.invoke('print-order-token-data', claimed, settings.counterPrinter, printLogo, settings);
-              } catch (err) {
-                console.error(err);
-              }
-            }
-            await ipcRenderer.invoke('print-cashier-receipt-data', claimed, settings.counterPrinter, printLogo, settings);
-            toastRef.current.info(`Order #${claimed.dailyOrderNumber ?? claimed.id.slice(-4)} (${claimed.orderType}) - receipt printed.`);
-          })
-          .catch((err) => {
-            if (!(err instanceof ApiError) || err.status !== 409) {
-              console.error('Receipt auto-print failed:', err);
-            }
-          })
-          .finally(() => {
-            inFlightRef.current.delete(order.id);
-          });
-      }
-    }
-
-    void poll();
-    const intervalId = setInterval(() => void poll(), RECEIPT_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(intervalId);
-    };
-  }, []);
-
-  return null;
-}
-
-// Sibling to KitchenPrintWatcher/ReceiptPrintWatcher above, for edits made
+// Sibling to KitchenPrintWatcher above, for edits made
 // to an order AFTER its original kitchen ticket already printed -
 // kitchenPrintedAt only ever fires once per order, so an item added or a
 // quantity bumped up later (via EditOrderPage.tsx's stepper/Quick Add, or
@@ -314,18 +316,21 @@ const KITCHEN_UPDATE_POLL_INTERVAL_MS = 1500; // see KITCHEN_POLL_INTERVAL_MS ab
 function KitchenUpdateWatcher() {
   const { toast } = useToast();
   const inFlightRef = useRef<Set<string>>(new Set());
+  const categoryLookupRef = useCategoryLookupRef();
   const toastRef = useRef(toast);
   toastRef.current = toast;
 
   useEffect(() => {
     const ipcRenderer = getIpcRenderer();
     if (!ipcRenderer) return undefined;
+    // Same reasoning as KitchenPrintWatcher above.
+    const ipc = ipcRenderer;
 
     let cancelled = false;
 
     async function poll() {
       const settings = getStoreSettings();
-      if (!settings.kitchenPrinter) return; // nothing configured to print to
+      if (!settings.kitchenPrinter && !settings.counterPrinter) return; // nothing configured to print to
 
       let orders;
       try {
@@ -345,8 +350,17 @@ function KitchenUpdateWatcher() {
         claimKitchenUpdatePrint(order.id)
           .then(async (claimed) => {
             if (!claimed || claimed.items.length === 0) return;
-            await ipcRenderer.invoke('print-kitchen-receipt-data', { ...claimed.order, items: claimed.items }, settings.kitchenPrinter, printLogo, settings);
-            toastRef.current.info(`Order #${claimed.order.dailyOrderNumber ?? claimed.order.id.slice(-4)} - kitchen update printed.`);
+            const label = `Order #${claimed.order.dailyOrderNumber ?? claimed.order.id.slice(-4)}`;
+            await dispatchKitchenPrints(
+              claimed.items,
+              categoryLookupRef.current,
+              settings,
+              async (groupItems, printerName, groupLabel) => {
+                const printPromise = ipc.invoke('print-kitchen-receipt-data', { ...claimed.order, items: groupItems }, printerName, printLogo, settings);
+                reportPrintOutcome(printPromise, `${label} ${groupLabel.toLowerCase()} update`, toastRef.current);
+                await printPromise.catch(() => {});
+              },
+            );
           })
           .catch((err) => {
             if (!(err instanceof ApiError) || err.status !== 409) {
@@ -503,6 +517,105 @@ function NetworkStatusBadge() {
       {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
       <span className={checking ? 'opacity-60' : ''}>{isOnline ? 'Online' : 'Offline'}</span>
     </button>
+  );
+}
+
+// A manual "run this till offline on purpose" switch - deliberately
+// separate from NetworkStatusBadge above, which only ever reports the REAL
+// connection state. Turning WiFi off entirely would be the obvious way to
+// test/force offline mode, but it also kills this till's own LAN, which is
+// exactly what a paired phone needs to reach the Local Hub for offline
+// order-taking/pairing (see backend/localHub/) - so that "fix" breaks the
+// very feature it's meant to test. This toggle fakes just the isOnline
+// signal every page already reads (see network-status.ts's forcedOffline),
+// leaving WiFi, the LAN, and the Local Hub completely untouched - a paired
+// phone keeps working exactly as it would on a genuinely offline till.
+//
+// Desktop-app only: a plain browser tab has no Local Hub to fall back to
+// at all, so forcing it "offline" would just break every page with
+// nothing to show for it.
+function OfflineModeToggle() {
+  const { forcedOffline, toggleForcedOffline } = useNetworkStatus();
+  if (!isDesktopApp()) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={toggleForcedOffline}
+      title={
+        forcedOffline
+          ? 'Offline Mode is ON - this till is treating itself as offline on purpose, even though WiFi/internet may still be connected. Click to go back online.'
+          : "Manually put this till into offline mode without turning off WiFi - keeps phone pairing/the Local Hub working over your LAN while every page behaves as if there's no internet."
+      }
+      className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-bold transition-colors ${
+        forcedOffline
+          ? 'border-amber-300 bg-amber-100 text-amber-800'
+          : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50'
+      }`}
+    >
+      <WifiOff size={16} />
+      {forcedOffline ? 'Offline Mode: ON' : 'Offline Mode'}
+    </button>
+  );
+}
+
+// Listens for main.js's electron-updater events (see setupAutoUpdater there)
+// and surfaces them here - a quiet "Update Downloading..." pill while a new
+// version is fetched in the background, then a "Restart to Update" button
+// once it's ready to install. Renders nothing in a plain browser tab or
+// while no update has been found, so it never clutters the normal topbar.
+function UpdateStatusBadge() {
+  const [status, setStatus] = useState<'idle' | 'downloading' | 'ready'>('idle');
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ipcRenderer = getIpcRenderer();
+    if (!ipcRenderer) return undefined;
+
+    const onAvailable = (_event: unknown, ...args: unknown[]) => {
+      const info = args[0] as { version?: string } | undefined;
+      setStatus('downloading');
+      setVersion(info?.version ?? null);
+    };
+    const onDownloaded = (_event: unknown, ...args: unknown[]) => {
+      const info = args[0] as { version?: string } | undefined;
+      setStatus('ready');
+      setVersion(info?.version ?? null);
+    };
+
+    ipcRenderer.on('app-update-available', onAvailable);
+    ipcRenderer.on('app-update-downloaded', onDownloaded);
+
+    return () => {
+      ipcRenderer.removeListener('app-update-available', onAvailable);
+      ipcRenderer.removeListener('app-update-downloaded', onDownloaded);
+    };
+  }, []);
+
+  if (status === 'idle') return null;
+
+  if (status === 'ready') {
+    return (
+      <button
+        type="button"
+        onClick={() => getIpcRenderer()?.send('install-app-update-now')}
+        title={version ? `Version ${version} is downloaded - click to restart and install.` : 'Update downloaded - click to restart and install.'}
+        className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-700 transition-colors hover:bg-emerald-100"
+      >
+        <RefreshCcw size={16} />
+        Restart to Update
+      </button>
+    );
+  }
+
+  return (
+    <div
+      title={version ? `Downloading update ${version}...` : 'Downloading update...'}
+      className="flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-bold text-sky-700"
+    >
+      <Download size={16} />
+      Update Downloading...
+    </div>
   );
 }
 

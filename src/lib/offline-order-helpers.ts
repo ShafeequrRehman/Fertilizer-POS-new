@@ -3,6 +3,7 @@ import {
   getOrdersCache,
   getPendingLocalOrders,
   getPendingOrderEdits,
+  queueOrderCancellation,
   queueOrderEdit,
   updateQueuedLocalOrder,
   type LocalOrderEditRecord,
@@ -39,6 +40,12 @@ export function localOrderToSavedOrder(record: LocalOrderRecord): SavedOrder {
     status: payload.status ?? 'pending',
     paymentMethod: payload.paymentMethod ?? 'Cash',
     createdAt: payload.createdAt ?? record.queuedAt,
+    // Lets SalesPage.tsx's offline completion-print guard correctly skip a
+    // TakeAway order that already printed its receipt at placement (see
+    // POSPage.tsx's printFlags.receipt) - without this, a still-local
+    // TakeAway order looks identical to a DineIn one that hasn't printed
+    // yet, since neither has a real backend customerReceiptPrintedAt.
+    customerReceiptPrintedAt: record.receiptPrinted ? record.queuedAt : null,
   } as SavedOrder;
 }
 
@@ -173,14 +180,50 @@ export function applyPatchOptimistically(order: SavedOrder, patch: OrderUpdatePa
 // already set when the order was first created (see localOrders.js), since
 // the whole thing syncs as a single finished order via importOfflineOrders,
 // never through the separate pendingKitchenUpdate path at all.
-export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdatePayload, kitchenPrinted = false): Promise<SavedOrder> {
+// `receiptPrinted` - same idea, but for the customer/cashier receipt on a
+// completeAndSettle edit (DineIn/Delivery print their receipt at
+// completion, not placement) - see SalesPage.tsx's saveUpdate. For the
+// still-local path it OR's into the queued record's own flag (see
+// updateQueuedOrder) rather than replacing it, so a TakeAway order's
+// already-true placement-time flag is never lost.
+export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdatePayload, kitchenPrinted = false, receiptPrinted = false): Promise<SavedOrder> {
   if (order.id.startsWith('local-')) {
     const localId = order.id.slice('local-'.length);
-    const record = await updateQueuedLocalOrder(localId, patch);
+    const record = await updateQueuedLocalOrder(localId, patch, receiptPrinted);
     return localOrderToSavedOrder(record);
   }
-  await queueOrderEdit(order.id, patch, undefined, kitchenPrinted);
+  await queueOrderEdit(order.id, patch, undefined, kitchenPrinted, receiptPrinted);
   return applyPatchOptimistically(order, patch);
+}
+
+// Cancelling an order while offline - see CancelOrderModal.tsx and
+// local-hub-api.ts's "Cancelling an ALREADY-SYNCED order while offline"
+// section for the full reasoning. Same still-local-vs-already-synced split
+// as saveOrderEditOffline above, but a still-local order can trust the
+// entered key directly (see localOrders.js's updateQueuedOrder comment -
+// it's never existed anywhere but this till, so there's no shared state a
+// wrong key could put at risk), while an already-synced order's
+// cancellation gets queued for the sync engine to replay against the
+// REAL, bcrypt-gated cancel endpoint - it's only ever shown as cancelled
+// here optimistically in the meantime.
+export async function saveOrderCancelOffline(
+  order: SavedOrder,
+  key: string,
+  reason: string | undefined,
+  actor?: { name?: string; deviceLabel?: string },
+): Promise<SavedOrder> {
+  const cancelledAt = new Date().toISOString();
+  const cancelledBy = actor?.name || '';
+  const cancelReason = reason || 'No reason provided';
+
+  if (order.id.startsWith('local-')) {
+    const localId = order.id.slice('local-'.length);
+    const record = await updateQueuedLocalOrder(localId, { status: 'cancelled', cancelledAt, cancelledBy, cancelReason });
+    return localOrderToSavedOrder(record);
+  }
+
+  await queueOrderCancellation(order.id, key, reason, actor);
+  return { ...order, status: 'cancelled', cancelledAt, cancelledBy, cancelReason };
 }
 
 // Combines the Local Hub's cached cloud snapshot with whatever this till

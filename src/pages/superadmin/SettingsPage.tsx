@@ -29,7 +29,13 @@ export default function SettingsPage() {
     if (!form) return;
     setSaving(true);
     try {
-      await superAdminApi.updateSettings(form);
+      // updateSettings takes a loose Record<string, unknown> (it's a
+      // generic PATCH body) - SettingsForm is a specific, narrower shape
+      // used everywhere else in this file for real key-by-key type safety
+      // (see `update` above), so it has no index signature of its own and
+      // needs an explicit cast here rather than loosening the interface
+      // itself just for this one call.
+      await superAdminApi.updateSettings(form as unknown as Record<string, unknown>);
       setSaved(true);
     } finally {
       setSaving(false);

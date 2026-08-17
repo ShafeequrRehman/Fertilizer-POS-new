@@ -7,8 +7,11 @@ import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { listenForPrintSentMessages } from '@/lib/print-notify';
+import { useToast } from '@/lib/toast';
 
 export default function KitchenPage() {
+  const { toast } = useToast();
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -17,6 +20,13 @@ export default function KitchenPage() {
   const [kitchenPrinter, setKitchenPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-kitchen-printer') ?? ''));
   const [cashierPrinter, setCashierPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-cashier-printer') ?? ''));
   const { isOnline } = useNetworkStatus();
+
+  // This page always prints via the hidden auto-print iframe (see
+  // handlePrint/printReadyUrl below) - it has no direct Electron IPC print
+  // call of its own. That iframe loads PrintOrderPage.tsx in a separate,
+  // invisible React tree, so it posts a message up here once it's actually
+  // called window.print() - see print-notify.ts.
+  useEffect(() => listenForPrintSentMessages(toast), [toast]);
 
   useEffect(() => {
     window.localStorage.setItem('preferred-kitchen-printer', kitchenPrinter);
@@ -55,7 +65,7 @@ export default function KitchenPage() {
       const data = await fetchOrders({ since });
       setOrders(data || []);
       if (isDesktopApp() && data) void pushOrdersCache(data).catch(() => {});
-    } catch (e) {
+    } catch {
       // Suppress polling errors
     } finally {
       setLoading(false);

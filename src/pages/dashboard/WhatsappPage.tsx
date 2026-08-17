@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { fetchWhatsappStatus, fetchWhatsappQR, sendWhatsappMessage, fetchAllCustomers } from '@/lib/pos-api';
 import { Customer } from '@/lib/pos-types';
-import { QrCode, Send, Users, AlertCircle, CheckCircle2, Phone, MessageSquare, Loader2, RefreshCw } from 'lucide-react';
+import { Send, Users, AlertCircle, CheckCircle2, Phone, MessageSquare, Loader2, RefreshCw } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 
 interface WhatsAppStatus {
@@ -104,7 +104,7 @@ export default function WhatsAppManager() {
     for (let i = 0; i < customers.length; i++) {
         try {
             await sendWhatsappMessage(customers[i].phone, promoMessage);
-        } catch (e) {
+        } catch {
             console.error(`Failed to send promo to ${customers[i].phone}`);
         }
         sentCount++;

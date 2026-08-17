@@ -7,7 +7,11 @@ import { getStoreSettings } from '@/lib/pos-settings';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
-import { localOrderToSavedOrder, saveOrderEditOffline, computeKitchenIncreaseDelta } from '@/lib/offline-order-helpers';
+import { localOrderToSavedOrder, saveOrderEditOffline, computeKitchenIncreaseDelta, loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { reportPrintOutcome, type ToastLike } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
+import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { useToast } from '@/lib/toast';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
@@ -24,7 +28,7 @@ type ElectronWindow = Window & typeof globalThis & {
 // CancelOrderModal.tsx's cancel ticket, but scoped to just the removed
 // items (see main.js's "kitchen-remove" receipt type) instead of saying
 // the whole order is cancelled, since it isn't.
-function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[]) {
+function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[], toast: ToastLike, categoryLookup: Map<string, string>) {
   if (removedItems.length === 0) return;
   const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
   if (!isElectron) return;
@@ -36,8 +40,18 @@ function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[]) 
     const settings = getStoreSettings();
     const printLogo = localStorage.getItem('preferred-print-logo');
 
-    if (settings.kitchenPrinter) {
-      ipcRenderer.invoke('print-kitchen-remove-receipt-data', { ...order, items: removedItems }, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+    if (settings.kitchenPrinter || settings.counterPrinter) {
+      void dispatchKitchenPrints(
+        removedItems,
+        categoryLookup,
+        settings,
+        (groupItems, printerName, label) =>
+          reportPrintOutcome(
+            ipcRenderer.invoke('print-kitchen-remove-receipt-data', { ...order, items: groupItems }, printerName, printLogo, settings),
+            `${label} removal`,
+            toast,
+          ),
+      );
     } else {
       console.warn('No kitchen printer configured in settings - removed-items ticket not printed.');
     }
@@ -52,7 +66,7 @@ function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[]) 
 // the exact claimed delta from claimKitchenUpdatePrint (see saveOrder
 // below), never the whole order's item list, so the kitchen is never told
 // to re-make something they already started or finished.
-function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items']) {
+function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items'], toast: ToastLike, categoryLookup: Map<string, string>) {
   if (items.length === 0) return;
   const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
   if (!isElectron) return;
@@ -64,8 +78,18 @@ function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items'])
     const settings = getStoreSettings();
     const printLogo = localStorage.getItem('preferred-print-logo');
 
-    if (settings.kitchenPrinter) {
-      ipcRenderer.invoke('print-kitchen-receipt-data', { ...order, items }, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+    if (settings.kitchenPrinter || settings.counterPrinter) {
+      void dispatchKitchenPrints(
+        items,
+        categoryLookup,
+        settings,
+        (groupItems, printerName, label) =>
+          reportPrintOutcome(
+            ipcRenderer.invoke('print-kitchen-receipt-data', { ...order, items: groupItems }, printerName, printLogo, settings),
+            label,
+            toast,
+          ),
+      );
     } else {
       console.warn('No kitchen printer configured in settings - kitchen update ticket not printed.');
     }
@@ -75,6 +99,7 @@ function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items'])
 }
 
 export default function EditOrderPage() {
+  const { toast } = useToast();
   const params = useParams<{ id: string }>();
   const [order, setOrder] = useState<SavedOrder | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -89,25 +114,28 @@ export default function EditOrderPage() {
   const [status, setStatus] = useState<string>('');
   const [loading, setLoading] = useState(true);
   // Only set when this page couldn't load an order at all because it's
-  // offline and the order isn't one this till can reconstruct locally
-  // (see the load effect below) - distinct from "Order not found" so the
-  // person sees an actionable reason instead of thinking the order itself
-  // is gone.
+  // offline AND the order isn't in this till's local cache either (see the
+  // load effect below) - genuinely rare (older than the 14-day cache
+  // window, or this till has never synced since the order was placed) -
+  // distinct from "Order not found" so the person sees an actionable
+  // reason instead of thinking the order itself is gone.
   const [offlineUnavailable, setOfflineUnavailable] = useState(false);
   const { isOnline } = useNetworkStatus();
 
   useEffect(() => {
     async function load() {
+      if (!params.id) return;
       setOfflineUnavailable(false);
       try {
         if (isDesktopApp() && !isOnline) {
-          // Offline: a still-local (not yet synced) order can be fully
-          // reconstructed from the Local Hub's own queue - anything else
-          // (an order that already existed in the cloud before this
-          // offline stretch) can't be, since this till has no cached copy
-          // of past orders' full detail to fall back to. Use the order
-          // card's Add Items / Complete Payment for those instead (see
-          // SalesPage.tsx's saveUpdate, which handles both cases).
+          // Offline: a still-local (not yet synced) order is reconstructed
+          // straight from the Local Hub's own create queue. An
+          // already-synced order is reconstructed from loadOrdersFromLocalHub
+          // instead - the same cached-cloud-snapshot-plus-pending-edits merge
+          // SalesPage.tsx's order list already relies on (see
+          // offline-order-helpers.ts) - so editing an order that existed
+          // before this till went offline works exactly the same as editing
+          // one placed just now, no internet required either way.
           if (params.id?.startsWith('local-')) {
             const localId = params.id.slice('local-'.length);
             const pending = await getPendingLocalOrders();
@@ -121,8 +149,19 @@ export default function EditOrderPage() {
               setOrder(null);
             }
           } else {
-            setOrder(null);
-            setOfflineUnavailable(true);
+            const merged = await loadOrdersFromLocalHub();
+            const found = merged.find((entry) => entry.id === params.id);
+            if (found) {
+              setOrder(found);
+              setItems(found.items);
+              setRemovedItems([]);
+            } else {
+              // Genuinely never cached - older than the 14-day cache
+              // window, or this till hasn't synced since the order was
+              // placed. The one case still not editable offline.
+              setOrder(null);
+              setOfflineUnavailable(true);
+            }
           }
           try {
             const snapshot = await getReferenceData();
@@ -171,36 +210,43 @@ export default function EditOrderPage() {
       discount: order.discount ?? null,
     };
 
-    if (isDesktopApp() && !isOnline) {
-      // No kitchen-print CLAIM here - that coordinates printing across
-      // devices via the cloud, same reasoning as SalesPage.tsx's
-      // saveUpdate offline branch. The tickets themselves still print
-      // immediately below (printKitchenRemoveTicket/printKitchenUpdateTicket
-      // are already self-contained - no-op if no printer's configured),
-      // same as they would online - nothing else could possibly be racing
-      // to print this same delta while it's still only sitting on this
-      // till, so there's no claim to make first. This page can only ever
-      // reach here for a still-local (not yet synced) order - see the load
-      // effect above - so the removed/added items are still fully recorded
-      // in what gets synced either way.
+    if (isDesktopApp()) {
+      // Always local-first, online or not - queues to the Local Hub and
+      // returns instantly instead of waiting on a live cloud round trip,
+      // same reasoning as SalesPage.tsx's saveUpdate. No kitchen-print
+      // CLAIM here - that coordinates printing ACROSS devices via the
+      // cloud; the tickets themselves still print immediately below
+      // (printKitchenRemoveTicket/printKitchenUpdateTicket are already
+      // self-contained - no-op if no printer's configured), since nothing
+      // else could possibly be racing to print this same delta while it's
+      // still only sitting on this till. Whichever order this targets -
+      // still-local or already-synced (see the load effect above) - gets
+      // replayed for real moments later, once triggerBackgroundSync's
+      // immediate sync attempt lands or, if actually offline, once back
+      // online.
       const kitchenDelta = computeKitchenIncreaseDelta(order.items, items);
+      const categoryLookup = buildCategoryLookup(products);
       try {
         const updated = await saveOrderEditOffline(order, patch, kitchenDelta.length > 0);
-        printKitchenRemoveTicket(updated, removedItems);
+        printKitchenRemoveTicket(updated, removedItems, toast, categoryLookup);
         if (kitchenDelta.length > 0) {
-          printKitchenUpdateTicket(updated, kitchenDelta);
+          printKitchenUpdateTicket(updated, kitchenDelta, toast, categoryLookup);
         }
         setRemovedItems([]);
-        setStatus(`Order ${updated.id} saved offline - will sync once back online.`);
+        triggerBackgroundSync();
+        setStatus(`Order ${updated.id} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
         setOrder(updated);
       } catch (err) {
-        setStatus(err instanceof Error ? err.message : 'Could not save this change offline.');
+        setStatus(err instanceof Error ? err.message : 'Could not save this change.');
       }
       return;
     }
 
+    // Only ever reached from a plain browser tab now (no Local Hub to
+    // queue into).
     const updated = await updateOrder(order.id, patch);
-    printKitchenRemoveTicket(updated, removedItems);
+    const categoryLookup = buildCategoryLookup(products);
+    printKitchenRemoveTicket(updated, removedItems, toast, categoryLookup);
     setRemovedItems([]);
 
     // Claim-before-print, same invariant as everywhere else a kitchen
@@ -213,7 +259,7 @@ export default function EditOrderPage() {
     try {
       const claimed = await claimKitchenUpdatePrint(updated.id);
       if (claimed && claimed.items.length > 0) {
-        printKitchenUpdateTicket(claimed.order, claimed.items);
+        printKitchenUpdateTicket(claimed.order, claimed.items, toast, categoryLookup);
       }
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 409) {
@@ -238,7 +284,7 @@ export default function EditOrderPage() {
     return (
       <div className="rounded-[32px] bg-white p-8 text-sm text-rose-500 shadow-sm">
         {offlineUnavailable
-          ? "This detailed editor needs an internet connection to load an order that already existed before this till went offline. Use the order card's Add Items / Complete Payment instead, or try again once back online."
+          ? "This order isn't in this till's local cache yet (it's either older than the 14-day offline cache window, or this till hasn't synced since it was placed). Use the order card's Add Items / Complete Payment instead, or try again once back online."
           : 'Order not found.'}
       </div>
     );
@@ -250,14 +296,14 @@ export default function EditOrderPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <Link href="/dashboard/sales" className="text-sm font-bold text-gray-500">
+          <Link to="/dashboard/sales" className="text-sm font-bold text-gray-500">
             <ArrowLeft size={16} className="mr-2 inline" />
             Back to Sales
           </Link>
           <h1 className="mt-2 text-3xl font-black text-gray-900">Edit Order #{order.id.slice(-4)}</h1>
         </div>
         <div className="flex gap-2">
-          <Link href={`/dashboard/sales/print/${order.id}`} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">Print Center</Link>
+          <Link to={`/dashboard/sales/print/${order.id}`} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">Print Center</Link>
           <button type="button" onClick={() => void saveOrder()} className="rounded-2xl bg-[#E2F33C] px-4 py-3 text-sm font-black text-black">
             <Save size={16} className="mr-2 inline" />
             Save Changes

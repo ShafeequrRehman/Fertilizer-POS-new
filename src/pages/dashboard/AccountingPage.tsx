@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { 
   BarChart3, PieChart, Receipt, Wallet, 
   ArrowUpCircle, ArrowDownCircle, Scale, 

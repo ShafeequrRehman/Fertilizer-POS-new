@@ -5,6 +5,10 @@ import { fetchOrder, fetchCustomerOutstanding } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
 import ReceiptRenderer from '@/pages/dashboard/components/ReceiptRenderer';
 import { PRINT_LOGO_STORAGE_KEY } from '@/lib/print-logo';
+import { isDesktopApp } from '@/lib/api';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { notifyParentPrintSent } from '@/lib/print-notify';
+import { useToast } from '@/lib/toast';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -58,6 +62,7 @@ async function waitForReceiptLayout() {
 }
 
 export default function PrintOrderPage() {
+  const { toast } = useToast();
   const params = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const autoPrint = searchParams.get('auto') === 'true';
@@ -82,10 +87,56 @@ export default function PrintOrderPage() {
 
   const isSilent = searchParams.get('silent') === 'true';
 
+  // Previously this only ever did a live fetchOrder() call, with no
+  // .catch() - offline (or with a plain network hiccup), that request just
+  // hangs/rejects and `order` stays null forever, leaving this page stuck
+  // on "Loading receipt..." indefinitely. It also could never have worked
+  // for a still-unsynced offline order at all: an id like "local-<uuid>"
+  // (see offline-order-helpers.ts's localOrderToSavedOrder) has no cloud
+  // record for GET /orders/:id to find, online or off.
+  //
+  // Cache-first fixes both: the Local Hub's merged cache/pending-queue
+  // (same source SalesPage.tsx itself reads from) resolves a "local-"
+  // id correctly and works with zero connectivity, painting the receipt
+  // immediately; the live fetch then still runs for a real cloud id (skipped
+  // entirely for a "local-" one, since there's nothing there yet) to pick up
+  // anything the cache might be missing, but never blocks the page if it
+  // fails.
   useEffect(() => {
-    void fetchOrder(params.id).then((fetchedOrder) => {
-      setOrder(fetchedOrder);
-    });
+    if (!params.id) return undefined;
+    let cancelled = false;
+
+    async function load() {
+      const id = params.id as string;
+
+      if (isDesktopApp()) {
+        try {
+          const merged = await loadOrdersFromLocalHub();
+          const localMatch = merged.find((candidate) => candidate.id === id);
+          if (localMatch && !cancelled) setOrder(localMatch);
+        } catch {
+          // Local Hub unreachable - not fatal, the live fetch below still
+          // has a chance (or, offline with no Local Hub either, there's
+          // simply nothing to show, same as before this fix).
+        }
+      }
+
+      if (id.startsWith('local-')) return; // no cloud record exists yet - the cache above is the only source.
+
+      try {
+        const fetched = await fetchOrder(id);
+        if (fetched && !cancelled) setOrder(fetched);
+      } catch {
+        // Offline/unreachable - the cache-first paint above already has us
+        // covered if it found a match; otherwise this page correctly has
+        // nothing to show rather than hanging forever.
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
   }, [params.id]);
 
   useEffect(() => {
@@ -133,10 +184,31 @@ export default function PrintOrderPage() {
         }
       }
 
-      if (autoPrint) window.print();
+      if (autoPrint) {
+        window.print();
+        // window.print() has no reliable "it actually went out" signal
+        // (unlike the direct IPC print handlers - see print-notify.ts),
+        // so this is optimistic: the OS print dialog/spooler was handed
+        // the job, same "sent to printer" meaning used everywhere else.
+        //
+        // This page doubles as the hidden-iframe fallback target (see
+        // POSPage.tsx/SalesPage.tsx's printReadyUrl) - in that case it's
+        // rendered inside a completely separate, invisible React tree, so
+        // a toast shown from here would never actually be seen. Post a
+        // message up to whichever page embedded it instead; if this page
+        // is genuinely being viewed on its own (not inside that iframe),
+        // just show the toast directly.
+        const label = receiptType === 'kitchen' ? 'Kitchen ticket' : 'Customer receipt';
+        if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+          notifyParentPrintSent(label);
+        } else {
+          toast.success(`${label} sent to printer.`);
+        }
+      }
     };
 
     void handlePrintReady();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order, autoPrint, isSilent, receiptType]);
 
   useEffect(() => {
@@ -242,13 +314,20 @@ export default function PrintOrderPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3 no-print">
         <div>
-          <Link href="/dashboard/sales" className="text-sm font-bold text-gray-500">
+          <Link to="/dashboard/sales" className="text-sm font-bold text-gray-500">
             <ArrowLeft size={16} className="mr-2 inline" />
             Back to Sales
           </Link>
           <h1 className="mt-2 text-3xl font-black text-gray-900">Manual Print Center</h1>
         </div>
-        <button type="button" onClick={() => window.print()} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">
+        <button
+          type="button"
+          onClick={() => {
+            window.print();
+            toast.success(`${receiptType === 'kitchen' ? 'Kitchen ticket' : 'Customer receipt'} sent to printer.`);
+          }}
+          className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white"
+        >
           <Printer size={16} className="mr-2 inline" />
           Print Current Receipt
         </button>
