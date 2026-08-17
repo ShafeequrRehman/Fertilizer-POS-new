@@ -156,8 +156,23 @@ exports.getOrders = async (req, res) => {
       }
     }
 
-    const orders = await Order.find(query).sort({ createdAt: -1 });
-    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+    // .lean() skips hydrating every result into a full Mongoose Document
+    // (getters/setters/virtuals, change-tracking machinery) - for a list
+    // endpoint like this that's read-only and just gets serialized straight
+    // back out as JSON, that hydration is pure overhead, and it was the
+    // second half (alongside requireLicenseValid's own DB round trips - see
+    // that middleware's own comment) of what was pushing this past the
+    // frontend's 8-second timeout for busier shops: this route is called
+    // unbounded (no since/date/status filter at all) by RecordPage.tsx's
+    // initial load, so "busier shop" here can mean this shop's ENTIRE
+    // lifetime order history, not just the 14-day window Dashboard/Sales/
+    // Kitchen bound themselves to. .lean() gives back plain JS objects
+    // directly - same fields, same shape, just without the per-document
+    // .toObject() call this used to need (and without n .toObject() calls'
+    // own overhead, which was doing the exact same hydration work a second
+    // time on top of what .find() had already done).
+    const orders = await Order.find(query).sort({ createdAt: -1 }).lean();
+    res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
