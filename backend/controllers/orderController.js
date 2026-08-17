@@ -122,6 +122,14 @@ function buildShopScope(req) {
 }
 
 exports.getOrders = async (req, res) => {
+  // TEMPORARY DEBUG TIMING - see requireLicenseValid.js's matching
+  // instrumentation. Isolates how long the actual Mongo query + response
+  // serialization take here, separate from whatever requireLicenseValid
+  // (which runs before this handler even starts) already logged - together
+  // these two log lines account for the full request lifecycle and pin
+  // down exactly which part of it is eating the frontend's 8-second budget.
+  // Remove once the /api/orders timeout investigation is resolved.
+  const _debugStart = Date.now();
   try {
     const query = buildShopScope(req);
     // Optional status filter, most importantly `status=pending` combined
@@ -171,8 +179,12 @@ exports.getOrders = async (req, res) => {
     // .toObject() call this used to need (and without n .toObject() calls'
     // own overhead, which was doing the exact same hydration work a second
     // time on top of what .find() had already done).
+    const _dbStart = Date.now();
     const orders = await Order.find(query).sort({ createdAt: -1 }).lean();
-    res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
+    const _dbDone = Date.now();
+    const result = orders.map((order) => ({ ...order, id: String(order._id) }));
+    console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -50,6 +50,15 @@ function invalidate(shopId) {
 }
 
 module.exports = async function requireLicenseValid(req, res, next) {
+  // TEMPORARY DEBUG TIMING - see orderController.js's getOrders for the
+  // matching instrumentation. Logs how long this middleware itself takes on
+  // a cache miss (the two-DB-round-trip path) so a slow /api/orders request
+  // can be broken down into "time spent here" vs "time spent in the route's
+  // own query" vs whatever's left over (network, Node event-loop
+  // contention, etc.) - pm2 logs will show this line with the actual
+  // shopId and duration for every real request. Remove once the /api/orders
+  // timeout investigation is resolved.
+  const _debugStart = Date.now();
   try {
     if (!req.user || !req.user.shopId) {
       return res.status(403).json({ message: "No shop associated with this account" });
@@ -58,6 +67,7 @@ module.exports = async function requireLicenseValid(req, res, next) {
     const shopId = String(req.user.shopId);
     const cached = cacheGet(shopId);
     if (cached) {
+      console.log(`[requireLicenseValid][DEBUG] ${req.method} ${req.originalUrl} shop=${shopId} CACHE HIT - ${Date.now() - _debugStart}ms`);
       if (!cached.ok) return res.status(cached.status).json(cached.body);
       req.shop = cached.shop;
       req.license = cached.license;
@@ -68,6 +78,7 @@ module.exports = async function requireLicenseValid(req, res, next) {
       Shop.findById(req.user.shopId),
       License.findOne({ shopId: req.user.shopId }),
     ]);
+    console.log(`[requireLicenseValid][DEBUG] ${req.method} ${req.originalUrl} shop=${shopId} CACHE MISS, DB lookups - ${Date.now() - _debugStart}ms`);
 
     if (!shop) {
       const body = { message: "Shop not found", reason: "shop_not_found" };
