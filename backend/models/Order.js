@@ -118,4 +118,17 @@ const orderSchema = new mongoose.Schema(
 // query actually uses on every Dashboard/Sales/Kitchen page load.
 orderSchema.index({ shopId: 1, createdAt: -1 });
 
+// SalesPage.tsx's refresh() (and RecordPage/POSPage's own equivalents) also
+// run a SECOND, deliberately unbounded query - `status=pending`, no date
+// filter at all - to catch an old still-open DineIn table or Delivery that
+// would otherwise silently vanish once it aged out of the 14-day window the
+// index above was built for (see getOrders' own comment on why that has to
+// stay unbounded). Without status in the index, that query can only use
+// {shopId,createdAt} to narrow to this shop's documents and then has to
+// scan every one of them - fine for a new shop, but exactly what was still
+// timing out Sales/Record/POS on a shop with thousands of lifetime orders
+// even after the fix above. This lets MongoDB jump straight to just this
+// shop's pending documents instead.
+orderSchema.index({ shopId: 1, status: 1, createdAt: -1 });
+
 module.exports = mongoose.model("Order", orderSchema);
