@@ -243,10 +243,38 @@ export async function createOrder(payload: OrderPayload) {
   }
 }
 
-export async function fetchOrders(params?: { date?: string; since?: string; status?: SavedOrder['status'] }) {
+export async function fetchOrders(params?: { date?: string; since?: string; status?: SavedOrder['status']; summary?: boolean }) {
   try {
     const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params });
     return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Same as fetchOrders above but requests the server's lightweight
+// `summary=true` projection (status/total/createdAt/customer.phone/waiter
+// only - see orderController.js's getOrders) instead of full documents.
+// Built for DashboardPageClient.tsx's own 45-second poll, which only ever
+// reads those five fields for its stats/chart - on a shop with a lot of
+// order history, fetching full documents (complete items array, full
+// customer object, etc.) x however many hundred orders is real, measured
+// data-transfer weight, not just a hydration cost (see getOrders' own
+// comment on this). Deliberately a SEPARATE function rather than a
+// `summary: true` call to fetchOrders itself, so nothing accidentally
+// pushes this stripped-down shape into the shared Local Hub order cache
+// that Sales/Kitchen/Record's own offline fallbacks depend on having full
+// order data in - see DashboardPageClient.tsx's own comment on why it
+// never calls pushOrdersCache with this result.
+export type OrderSummary = Pick<SavedOrder, 'id' | 'status' | 'total' | 'createdAt' | 'waiter'> & {
+  customer: { phone: string };
+};
+export async function fetchOrdersSummary(params: { since: string }): Promise<OrderSummary[]> {
+  try {
+    const response = await api.get<Array<Partial<SavedOrder> & { _id?: string }>>('/orders', {
+      params: { ...params, summary: true },
+    });
+    return response.data.map((order) => ({ ...order, id: order.id ?? order._id ?? '' })) as OrderSummary[];
   } catch (error) {
     handleApiError(error);
   }

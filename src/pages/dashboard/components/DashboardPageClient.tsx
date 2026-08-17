@@ -8,12 +8,11 @@ import {
   Target, Users, CheckCircle2, Clock,
   RotateCcw, XCircle
 } from 'lucide-react';
-import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
+import { fetchOrdersSummary, fetchProducts, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
 import { Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
-import { pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 
 type EmployeeStat = { name: string; sales: number; count: number };
@@ -35,7 +34,11 @@ type ServiceStats = {
 };
 
 export default function DashboardPageClient() {
-  const [orders, setOrders] = useState<SavedOrder[]>([]);
+  // SavedOrder from the Local Hub cache-first paint, or the narrower
+  // OrderSummary shape from the live cloud poll below - stats/chart code in
+  // this file only ever reads the fields both shapes have in common
+  // (status/total/createdAt/customer.phone/waiter), so either is fine here.
+  const [orders, setOrders] = useState<(SavedOrder | OrderSummary)[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [chartsReady, setChartsReady] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -130,11 +133,27 @@ export default function DashboardPageClient() {
         // between shifts) keeps this 45-second poll fast regardless of how
         // much order history this shop has accumulated overall. See
         // getOrders' `since` handling in orderController.js.
+        //
+        // fetchOrdersSummary (not fetchOrders) - on a shop with real order
+        // history, "fast regardless of history size" turned out to still
+        // mean 10+ seconds once you're transferring hundreds of FULL order
+        // documents (complete items array, full customer object, etc.)
+        // every 45 seconds, measured via debug timing on a live shop. This
+        // page only ever reads status/total/createdAt/customer.phone/waiter
+        // (see the stats/businessWindowData/topEmployees useMemos below),
+        // so asking the server for just those fields cuts the actual data
+        // transferred by roughly the same ratio full documents were bigger
+        // than that. Deliberately NOT pushed into the shared Local Hub
+        // order cache (pushOrdersCache) the way it used to be - that cache
+        // is what Sales/Kitchen/Record's own offline fallbacks depend on
+        // having full order data in, and this summary shape would silently
+        // strip that down for everyone. offline-sync.ts's own periodic
+        // pushCurrentOrdersCache() (full documents, no summary flag)
+        // already keeps that cache fresh independently of this page.
         const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-        const ordersData = await fetchOrders({ since });
+        const ordersData = await fetchOrdersSummary({ since });
         if (ordersData) {
           setOrders(ordersData);
-          if (isDesktopApp()) void pushOrdersCache(ordersData).catch(() => {});
         }
       } catch (error) {
         console.error('Dashboard orders fetch error', error);

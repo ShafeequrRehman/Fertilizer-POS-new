@@ -159,6 +159,37 @@ function scheduleRetry(onConnected) {
   retryDelayMs = Math.min(retryDelayMs * 1.5, RETRY_DELAY_MAX_MS);
 }
 
+// Runs once per successful connection (including reconnects) to guarantee
+// every index actually declared in the schema files (schema.index(...)
+// calls, e.g. Order.js's { shopId: 1, createdAt: -1 }) really exists on
+// the live database - not just in the code. Mongoose's default autoIndex
+// behavior is supposed to build these automatically on connect, but that's
+// silent and easy to end up without in practice (a collection created
+// before the index existed in the code, autoIndex disabled somewhere, a
+// background build that errored and was never retried, etc.) - and the
+// symptom when it's missing isn't an error, it's just every query on that
+// collection silently falling back to a full collection scan, getting
+// slower as the collection grows. That's exactly what was happening to
+// getOrders (see orderController.js's own debug timing): 1063 documents
+// taking 10+ seconds to fetch, which only makes sense as a COLLSCAN, not
+// an indexed lookup. syncIndexes() is idempotent and cheap when indexes
+// already match the schema - safe to run on every connect, not just once.
+async function ensureCriticalIndexes() {
+  try {
+    const Order = require("../models/Order");
+    const start = Date.now();
+    const dropped = await Order.syncIndexes();
+    const indexes = await Order.collection.indexes();
+    logConnectionEvent(
+      `[db] Order.syncIndexes() done in ${Date.now() - start}ms - ` +
+      `dropped: ${dropped.length ? dropped.join(", ") : "none"} - ` +
+      `current indexes: ${indexes.map((idx) => JSON.stringify(idx.key)).join(", ")}`
+    );
+  } catch (error) {
+    logConnectionEvent(`[db] Order.syncIndexes() failed (non-fatal, queries may stay slow): ${error.message}`);
+  }
+}
+
 async function attemptConnect(onConnected) {
   flushOsDnsCacheBestEffort();
 
@@ -177,6 +208,7 @@ async function attemptConnect(onConnected) {
     });
     logConnectionEvent("✅ MongoDB Atlas Connected");
     retryDelayMs = RETRY_DELAY_START_MS; // reset backoff for any future disconnect
+    void ensureCriticalIndexes();
     if (onConnected) onConnected();
   } catch (error) {
     logConnectionEvent(`❌ MongoDB Connection Error: ${error.message}`);

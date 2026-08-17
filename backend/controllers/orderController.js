@@ -179,11 +179,29 @@ exports.getOrders = async (req, res) => {
     // .toObject() call this used to need (and without n .toObject() calls'
     // own overhead, which was doing the exact same hydration work a second
     // time on top of what .find() had already done).
+    //
+    // ?summary=true - debug timing on a real shop with ~1,000 orders in its
+    // 14-day window showed the bottleneck isn't Node-side hydration (that
+    // was already fixed above) but raw data volume: fetching every full
+    // order document (complete items array, full customer object, etc.) x
+    // ~1000, every 45 seconds for Dashboard's own poll, over a slow link to
+    // Atlas. DashboardPageClient.tsx only ever reads status/total/
+    // createdAt/customer.phone/waiter from each order for its stats and
+    // chart - so when this flag is set, project down to just those fields
+    // instead of transferring everything. Sales/Kitchen/Record still call
+    // this same route with no flag and get full documents, unchanged - this
+    // is additive, not a behavior change for any existing caller.
+    const projection = req.query.summary === "true"
+      ? "status total createdAt customer.phone waiter"
+      : null;
+
     const _dbStart = Date.now();
-    const orders = await Order.find(query).sort({ createdAt: -1 }).lean();
+    let ordersQuery = Order.find(query).sort({ createdAt: -1 });
+    if (projection) ordersQuery = ordersQuery.select(projection);
+    const orders = await ordersQuery.lean();
     const _dbDone = Date.now();
     const result = orders.map((order) => ({ ...order, id: String(order._id) }));
-    console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
+    console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} summary=${!!projection} query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
