@@ -85,6 +85,17 @@ export default function RecordPage() {
   useEffect(() => {
     hasFullHistoryRef.current = hasFullHistory;
   }, [hasFullHistory]);
+  // Bumped on every local, optimistic order edit made on this page
+  // (complete/cancel) - see SalesPage.tsx's identical ref for the full
+  // reasoning. refresh() below is a live cloud round trip that can take
+  // several seconds on a slow connection; if a shift is completed/
+  // cancelled while an earlier refresh() tick is still in flight, that
+  // stale response can land AFTER the optimistic update and blindly
+  // overwrite it back to "pending" via its own setOrders(orderData) - a
+  // visible flicker. Capturing this value before refresh()'s network call
+  // and skipping the overwrite if it changed in the meantime closes that
+  // window.
+  const localEditVersionRef = useRef(0);
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
   const [cancelOrderTarget, setCancelOrderTarget] = useState<SavedOrder | null>(null);
   const [completeOrderTarget, setCompleteOrderTarget] = useState<SavedOrder | null>(null);
@@ -126,9 +137,13 @@ export default function RecordPage() {
   // effect below ever does that, and only once.
   async function refresh(unbounded = false) {
     try {
+      // Captured before the network round trip below - see
+      // localEditVersionRef's own comment.
+      const versionAtStart = localEditVersionRef.current;
       const since = unbounded ? undefined : new Date(Date.now() - RECENT_ORDERS_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
       const [orderData, history] = await Promise.all([fetchOrders(since ? { since } : undefined), fetchShopSessionHistory()]);
-      if (orderData) {
+      const isStale = localEditVersionRef.current !== versionAtStart;
+      if (orderData && !isStale) {
         setOrders(orderData);
         // Bounded (the common case) or unbounded (once a custom range has
         // widened it) - either way this is still the most complete source
@@ -415,6 +430,7 @@ export default function RecordPage() {
   const canCancel = hasPermission('sales.delete');
 
   function handleOrderCancelled(updated: SavedOrder) {
+    localEditVersionRef.current += 1;
     setOrders((previous) => previous.map((order) => (order.id === updated.id ? updated : order)));
     setCancelOrderTarget(null);
     setViewOrder(updated);
@@ -427,6 +443,7 @@ export default function RecordPage() {
   // back up as free the next time it checks - nothing further needed here
   // besides reflecting the change in this page's own list/detail view.
   function handleOrderCompleted(updated: SavedOrder) {
+    localEditVersionRef.current += 1;
     setOrders((previous) => previous.map((order) => (order.id === updated.id ? updated : order)));
     setCompleteOrderTarget(null);
     setViewOrder((current) => (current && current.id === updated.id ? updated : current));

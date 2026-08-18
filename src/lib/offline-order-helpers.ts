@@ -1,8 +1,10 @@
+import { isDesktopApp } from '@/lib/api';
 import type { Discount, OrderPayload, OrderUpdatePayload, SavedOrder } from '@/lib/pos-types';
 import {
   getOrdersCache,
   getPendingLocalOrders,
   getPendingOrderEdits,
+  pushOrdersCache,
   queueOrderCancellation,
   queueOrderEdit,
   updateQueuedLocalOrder,
@@ -193,7 +195,36 @@ export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdate
     return localOrderToSavedOrder(record);
   }
   await queueOrderEdit(order.id, patch, undefined, kitchenPrinted, receiptPrinted);
-  return applyPatchOptimistically(order, patch);
+  const updated = applyPatchOptimistically(order, patch);
+
+  // Patch the Local Hub's orderCache with this order's new state right now,
+  // best-effort - without this, the ONLY thing keeping the edit visible
+  // everywhere is the pending-edit queue entry just queued above
+  // (applyPendingEdits overlays it on every read - see mergeOrdersForDisplay
+  // below). That covers things fine right up until offline-sync.ts's
+  // syncOrderEdits() confirms this edit with the cloud and acks/clears it
+  // out of the queue - at that exact moment, with nothing else updated, a
+  // fresh page load falls straight back to whatever stale pre-edit snapshot
+  // orderCache still has, silently UNDOING an edit that already succeeded
+  // (e.g. a just-completed payment reverting to "pending" again until the
+  // next full cache refresh happens to run). Baking the new state into the
+  // cache immediately closes that window for good, the same way
+  // POSPage.tsx's order-creation flow patches a freshly created order in
+  // the instant it's known.
+  if (isDesktopApp()) {
+    void (async () => {
+      try {
+        const cache = await getOrdersCache();
+        const withoutTarget = (cache.orders as SavedOrder[]).filter((cached) => cached.id !== updated.id);
+        await pushOrdersCache([updated, ...withoutTarget]);
+      } catch {
+        // Best-effort - the pending-edit overlay above still keeps this
+        // correct until the next natural cache refresh either way.
+      }
+    })();
+  }
+
+  return updated;
 }
 
 // Cancelling an order while offline - see CancelOrderModal.tsx and

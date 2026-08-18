@@ -67,6 +67,21 @@ export default function SalesPage() {
   // used in RecordPage.tsx for the same reason.
   const selectedOrderRef = useRef(selectedOrder);
   useEffect(() => { selectedOrderRef.current = selectedOrder; }, [selectedOrder]);
+  // Bumped every time this till makes a LOCAL, optimistic order edit
+  // (saveUpdate/completeOrder, cancellation, etc. - anywhere that calls
+  // setOrders directly outside of refresh()/loadFromCache()). refresh()
+  // below is a several-second round trip to the cloud on a slow
+  // connection; if a cashier completes an order WHILE an earlier refresh()
+  // tick is still in flight, that refresh can resolve with pre-completion
+  // data AFTER the optimistic update already landed, and its own blind
+  // `setOrders(data)` would silently flip the just-completed order back to
+  // "pending" for a moment - a visible flicker (vanish, reappear, vanish
+  // again once the next correct refresh lands). Every local edit captures
+  // the current value and increments it; refresh() captures it before its
+  // network round trip and only applies its result if nothing local
+  // happened in the meantime, so a stale response can never clobber a
+  // fresher local write.
+  const localEditVersionRef = useRef(0);
   const [filter, setFilter] = useState('All');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
@@ -323,6 +338,12 @@ export default function SalesPage() {
       // lean picks fetchOrdersList (items excluded, itemCount instead) vs
       // fetchOrders (full documents) - see loadAny()'s own comment for
       // which callers pass which and why.
+      // Captured before the network round trip below - see
+      // localEditVersionRef's own comment. If a local edit (Complete
+      // Payment, cancellation, etc.) bumps this while the fetch is still in
+      // flight, this refresh's own result is stale by the time it lands and
+      // must not overwrite what the cashier already sees.
+      const versionAtStart = localEditVersionRef.current;
       const fetchList = lean ? fetchOrdersList : fetchOrders;
       const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
       const [recentData, pendingData, history] = await Promise.all([
@@ -333,7 +354,9 @@ export default function SalesPage() {
       const latestSession = history && history.length > 0 ? history[0] : null;
       setShopSession(latestSession);
 
-      if (recentData) {
+      const isStale = localEditVersionRef.current !== versionAtStart;
+
+      if (recentData && !isStale) {
         const merged = new Map(recentData.map((order) => [order.id, order]));
         (pendingData || []).forEach((order) => merged.set(order.id, order));
         const data = Array.from(merged.values());
@@ -510,6 +533,7 @@ export default function SalesPage() {
 
       try {
         const updated = await saveOrderEditOffline(selectedOrder, payload, willPrintKitchen, false);
+        localEditVersionRef.current += 1;
         setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
         setSelectedOrder(updated);
 
@@ -555,6 +579,7 @@ export default function SalesPage() {
     // handles the desktop app, online or not) - a real live cloud call is
     // the only option it has.
     const updated = await updateOrder(selectedOrder.id, payload);
+    localEditVersionRef.current += 1;
     setOrders((previous) => previous.map((order) => order.id === updated.id ? updated : order));
     setSelectedOrder(updated);
 
@@ -749,6 +774,7 @@ export default function SalesPage() {
   }
 
   function handleOrderCancelled(updated: SavedOrder) {
+    localEditVersionRef.current += 1;
     setOrders((previous) => previous.map((order) => (order.id === updated.id ? updated : order)));
     setSelectedOrder(updated);
     setShowCancel(false);
