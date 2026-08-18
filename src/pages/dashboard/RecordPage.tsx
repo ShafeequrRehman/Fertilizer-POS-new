@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
 import { fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory, updateOrder } from '@/lib/pos-api';
@@ -16,6 +16,19 @@ import CancelOrderModal from '@/components/CancelOrderModal';
 
 type StatusFilter = 'All' | 'pending' | 'completed' | 'paid' | 'cancelled';
 type SearchField = 'all' | 'name' | 'phone' | 'orderId';
+
+// This page's own order fetch used to be fully unbounded (no since/date
+// filter at all) purely so the custom Date Range picker/CSV export below
+// could reach ANY past shift - but that meant every single normal page
+// load pulled this shop's ENTIRE lifetime order history (every field, every
+// item, every order ever placed) over the wire, even though the page only
+// ever DISPLAYS the current shift by default. On a shop with real history
+// that's real seconds of wasted load time on every visit for a feature most
+// visits never touch. Bounding the routine load to this window instead, and
+// only widening to the full unbounded fetch the one time someone actually
+// picks a date outside it (see the effect below), keeps the common case
+// fast without removing the ability to look up or export any past date.
+const RECENT_ORDERS_WINDOW_DAYS = 14;
 
 const STATUS_TABS: { key: StatusFilter; label: string }[] = [
   { key: 'All', label: 'All' },
@@ -59,6 +72,19 @@ export default function RecordPage() {
   const [searchField, setSearchField] = useState<SearchField>('all');
   const [rangeFrom, setRangeFrom] = useState('');
   const [rangeTo, setRangeTo] = useState('');
+  // Tracks whether the one-time widen-to-full-history fetch below has
+  // already run, so picking an old date twice doesn't re-fetch the whole
+  // shop's lifetime order history a second time. Mirrored into a ref (kept
+  // in sync just below) because loadAny()'s periodic setInterval closure
+  // (see its own effect, deliberately only re-created on [isOnline]
+  // changes) would otherwise keep seeing whatever this was at mount and
+  // silently re-bound the fetch back down 45s after a custom range widened
+  // it - the ref always reads the current value instead.
+  const [hasFullHistory, setHasFullHistory] = useState(false);
+  const hasFullHistoryRef = useRef(hasFullHistory);
+  useEffect(() => {
+    hasFullHistoryRef.current = hasFullHistory;
+  }, [hasFullHistory]);
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
   const [cancelOrderTarget, setCancelOrderTarget] = useState<SavedOrder | null>(null);
   const [completeOrderTarget, setCompleteOrderTarget] = useState<SavedOrder | null>(null);
@@ -94,20 +120,25 @@ export default function RecordPage() {
   }
 
   // The live cloud refresh - also the only source for sessionHistory (past-
-  // shift browsing, cloud-only, see its own comment above).
-  async function refresh() {
+  // shift browsing, cloud-only, see its own comment above). Bounded to the
+  // last RECENT_ORDERS_WINDOW_DAYS by default (see that const's own
+  // comment) unless `unbounded` is passed - only the widen-to-full-history
+  // effect below ever does that, and only once.
+  async function refresh(unbounded = false) {
     try {
-      const [orderData, history] = await Promise.all([fetchOrders(), fetchShopSessionHistory()]);
+      const since = unbounded ? undefined : new Date(Date.now() - RECENT_ORDERS_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      const [orderData, history] = await Promise.all([fetchOrders(since ? { since } : undefined), fetchShopSessionHistory()]);
       if (orderData) {
         setOrders(orderData);
-        // This page's own fetch above is already unbounded (needed for the
-        // custom date-range picker/CSV export to reach any past shift), so
-        // it's also the most complete source this till ever has - push it
-        // into the Local Hub's shared order cache so Sales/POS's offline
-        // view benefits too, not just this page. Previously only
-        // SalesPage.tsx pushed here, bounded to 14 days - a still-pending
-        // order older than that could go offline-invisible everywhere
-        // until Sales happened to reload while online.
+        // Bounded (the common case) or unbounded (once a custom range has
+        // widened it) - either way this is still the most complete source
+        // this till has right now, so it's still worth pushing into the
+        // Local Hub's shared order cache for Sales/POS's offline view.
+        // Previously only SalesPage.tsx pushed here, also bounded to 14
+        // days - a still-pending order older than that could go
+        // offline-invisible everywhere until Sales happened to reload
+        // while online; same caveat still applies here now, unchanged from
+        // before this page's own fetch was bounded too.
         if (isDesktopApp()) {
           void pushOrdersCache(orderData).catch(() => {});
         }
@@ -126,9 +157,9 @@ export default function RecordPage() {
       // Best-effort, not awaited - the cache-first paint above already
       // gave a usable list; this just refreshes it (and sessionHistory) if
       // the cloud is actually reachable right now.
-      if (isOnline) void refresh();
+      if (isOnline) void refresh(hasFullHistoryRef.current);
     } else {
-      await refresh();
+      await refresh(hasFullHistoryRef.current);
     }
   }
 
@@ -169,6 +200,22 @@ export default function RecordPage() {
   }, []);
 
   const sessionWindow = useMemo(() => getBusinessWindow(shopSession, new Date()), [shopSession]);
+
+  // The one place this page ever pays for its own fetch's default 14-day
+  // bound (see RECENT_ORDERS_WINDOW_DAYS above): if someone actually picks
+  // a Date Range whose start predates that window, the orders already in
+  // memory can't possibly cover it, so widen to a single unbounded fetch to
+  // pull in this shop's full history - once, not on every keystroke/every
+  // 45s poll after that (hasFullHistory latches it).
+  useEffect(() => {
+    if (!rangeFrom || hasFullHistory) return;
+    const cutoff = new Date(Date.now() - RECENT_ORDERS_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const pickedFrom = new Date(`${rangeFrom}T00:00:00.000Z`);
+    if (Number.isNaN(pickedFrom.getTime()) || pickedFrom >= cutoff) return;
+    setHasFullHistory(true);
+    void refresh(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeFrom, hasFullHistory]);
 
   // A picked date range is an explicit, deliberate request to browse PAST
   // days by calendar date - the opposite of "today", which always stays
