@@ -11,7 +11,7 @@ import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOccupiedTablesCache, pushOccupiedTablesCache } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOccupiedTablesCache, pushOccupiedTablesCache, getOrdersCache, pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
@@ -789,6 +789,36 @@ export default function POSPage() {
       // syncLifetimeCounter.
       if (isDesktopApp() && !isOfflineOrder && typeof savedOrder.shopSequenceNumber === 'number') {
         void syncLifetimeCounter(savedOrder.shopSequenceNumber);
+      }
+
+      // An order queued via createLocalOrder (the offline/backlog branches
+      // above) is already instantly visible everywhere - Sales/Dashboard/
+      // Kitchen's own loadOrdersFromLocalHub merges in whatever's still
+      // sitting in the Local Hub's pending-new-orders queue (see
+      // offline-order-helpers.ts's mergeOrdersForDisplay). An order that
+      // went straight to the cloud (this branch) has NO such queue entry -
+      // it exists in MongoDB the instant createOrder() above resolved, but
+      // the Local Hub's own orders CACHE (a separate thing - a snapshot of
+      // recent cloud orders, see orderCache.js) doesn't know about it yet.
+      // That snapshot only otherwise refreshes on Sales/Dashboard's own
+      // 45-second poll or a manual Refresh click - which is exactly the
+      // "I have to wait or refresh again and again" gap: the order is
+      // real and paid-for, just not in the one place every other page
+      // actually reads from yet. Patching it in here, the moment this till
+      // knows the order exists, closes that gap without waiting on
+      // anything - best-effort and never blocks the UI (the cashier's
+      // already been told the order saved by this point).
+      if (isDesktopApp() && !isOfflineOrder) {
+        void (async () => {
+          try {
+            const cache = await getOrdersCache();
+            const withoutDuplicate = cache.orders.filter((cached) => (cached as SavedOrder).id !== savedOrder.id);
+            await pushOrdersCache([savedOrder, ...withoutDuplicate]);
+          } catch {
+            // Best-effort - the next natural cache refresh (any page's
+            // poll, or a manual Refresh) still picks this order up fine.
+          }
+        })();
       }
 
       setCart([]);
