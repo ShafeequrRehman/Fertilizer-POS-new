@@ -243,9 +243,24 @@ export async function createOrder(payload: OrderPayload) {
   }
 }
 
+// This route's real response time on a shop with substantial order history
+// has been measured (server-side debug timing) at 9-10 seconds for a full-
+// document, 14-day-bounded fetch - genuinely slower than ideal (data volume
+// over the connection to the database, not a bug in the query itself - see
+// the matching timing/index work in orderController.js/Order.js), but it
+// DOES reliably complete and return correct data. The shared 8-second
+// AXIOS_REQUEST_TIMEOUT_MS default was written for ordinary requests and
+// was cutting this one off right as it was about to succeed, surfacing a
+// hard failure (and, on Sales/Record, a blank/zeroed page) for a request
+// that was actually fine - just slower than most. Overriding the timeout
+// here specifically (not raised globally, which would make genuinely stuck
+// requests elsewhere hang around longer for no benefit) buys enough room
+// for this one to actually finish.
+const ORDERS_FETCH_TIMEOUT_MS = 25000;
+
 export async function fetchOrders(params?: { date?: string; since?: string; status?: SavedOrder['status']; summary?: boolean }) {
   try {
-    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params });
+    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params, timeout: ORDERS_FETCH_TIMEOUT_MS });
     return response.data.map(normalizeOrder);
   } catch (error) {
     handleApiError(error);
@@ -273,6 +288,11 @@ export async function fetchOrdersSummary(params: { since: string }): Promise<Ord
   try {
     const response = await api.get<Array<Partial<SavedOrder> & { _id?: string }>>('/orders', {
       params: { ...params, summary: true },
+      // Same reasoning as ORDERS_FETCH_TIMEOUT_MS above - this variant is
+      // normally fast (that's the whole point of the summary projection),
+      // but giving it the same headroom costs nothing and protects a
+      // busier shop or a slower moment from a spurious timeout here too.
+      timeout: ORDERS_FETCH_TIMEOUT_MS,
     });
     return response.data.map((order) => ({ ...order, id: order.id ?? order._id ?? '' })) as OrderSummary[];
   } catch (error) {
