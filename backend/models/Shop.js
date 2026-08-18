@@ -58,6 +58,16 @@ const shopSchema = new mongoose.Schema(
     // orderController.createOrder/importOfflineOrders, same pattern as
     // ShopSession.orderCounter.
     orderSequenceCounter: { type: Number, default: 0 },
+    // A shop's own custom table labels for DineIn seating (e.g. ["M1"..
+    // "M8", "FM1".."FM8", "OUT1".."OUT8"] for a shop with Male/Family/
+    // Outdoor sections), in the exact order they should be offered/shown.
+    // Empty (the default, and every shop before this field existed) means
+    // "no custom layout" - POSPage.tsx's Table Number dropdown and
+    // SalesPage.tsx's Change Table grid both fall back to the original
+    // plain "Table 1".."Table 20" numbering in that case (see
+    // src/lib/table-options.ts), so this is purely additive - no shop's
+    // existing behavior changes unless this is explicitly set for them.
+    tables: { type: [String], default: [] },
   },
   { timestamps: true }
 );

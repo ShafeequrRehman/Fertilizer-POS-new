@@ -209,6 +209,15 @@ export interface SavedOrder extends OrderPayload {
   // same receipt. Always null/undefined for DineIn and Delivery orders,
   // which still only print their customer receipt at Complete Payment.
   customerReceiptPrintedAt?: string | null;
+  // Only ever present on objects returned by fetchOrdersList (GET
+  // /api/orders?list=true) - `items` on those is always [] (the whole
+  // point of the lean endpoint is to not transfer it), and itemCount is
+  // the real count computed server-side instead. Anything that fetches a
+  // FULL order (fetchOrder, fetchOrders, or any update response) never
+  // sets this field at all, which is what makes `itemCount !== undefined`
+  // a reliable "this is still the lean placeholder, not the real order"
+  // check - see SalesPage.tsx's isSelectedOrderHydrated.
+  itemCount?: number;
 }
 
 export interface CancelOrderPayload {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOccupiedDineInTables, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOccupiedDineInTables, fetchProducts, fetchShopProfile, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
 import { getProductImageUrl } from '@/lib/asset-path';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -53,6 +54,11 @@ export default function POSPage() {
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
   const [waiters, setWaiters] = useState<Waiter[]>([]);
+  // This shop's custom DineIn table labels (Shop.tables), if configured -
+  // see src/lib/table-options.ts's getTableOptions, which is what actually
+  // decides between this and the default numbered list wherever tables
+  // are rendered below.
+  const [shopTables, setShopTables] = useState<string[]>([]);
   // Table numbers currently tied to a still-pending DineIn order - see
   // loadOccupiedTables below. Used both to grey out/disable those options
   // in the Table Number dropdown and as a final guard in
@@ -125,6 +131,7 @@ export default function POSPage() {
     setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
     setProducts(offlineProducts);
     setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+    setShopTables(snapshot.tables || []);
     if (silent) return;
     if (offlineProducts.length === 0) {
       setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
@@ -140,10 +147,18 @@ export default function POSPage() {
     // is the only path at all for a plain browser tab (no Local Hub cache
     // to have shown a moment ago there).
     async function refreshFromCloud() {
-      const [productResponse, waiterResponse] = await Promise.all([fetchProducts(), fetchWaiters()]);
+      const [productResponse, waiterResponse, shopProfile] = await Promise.all([
+        fetchProducts(),
+        fetchWaiters(),
+        // Best-effort - a shop with no custom table layout (the default)
+        // just keeps using the plain numbered list if this fails, same as
+        // any other network hiccup here.
+        fetchShopProfile().catch(() => null),
+      ]);
       setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
       setProducts(productResponse?.products ?? []);
       setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
+      setShopTables(shopProfile?.tables || []);
       setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
 
       // Best-effort - keeps the Local Hub's offline copy fresh the moment
@@ -155,6 +170,7 @@ export default function POSPage() {
           products: productResponse?.products || [],
           customers: [],
           staff: waiterResponse,
+          tables: shopProfile?.tables || [],
           // `roles` deliberately omitted (not sent as []) - this call site
           // only ever refreshes products/waiters; referenceData.js's set()
           // preserves whatever roles offline-sync.ts's own less-frequent
@@ -524,7 +540,7 @@ export default function POSPage() {
 
     if (orderFormData.orderType === 'DineIn') {
       if (!orderFormData.table) return showMessage('error', 'Table number is required for dine-in orders.'), false;
-      if (occupiedTables.has(orderFormData.table)) return showMessage('error', `Table ${orderFormData.table} already has a pending order - complete or cancel it first.`), false;
+      if (occupiedTables.has(orderFormData.table)) return showMessage('error', `${formatTableLabel(orderFormData.table)} already has a pending order - complete or cancel it first.`), false;
       if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX, or leave it empty for dine-in.'), false;
       if (orderFormData.phone && !orderFormData.customer.trim()) return showMessage('error', 'Customer name is required when a dine-in phone number is entered.'), false;
       return true;
@@ -1117,8 +1133,7 @@ export default function POSPage() {
                 <FormField label="Table Number">
                   <select name="table" value={orderFormData.table} onChange={handleFormChange} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none">
                     <option value="">Select table</option>
-                    {Array.from({ length: 20 }).map((_, index) => {
-                      const tableNumber = String(index + 1);
+                    {getTableOptions(shopTables).map((tableNumber) => {
                       // Still selectable if it's already this exact order
                       // form's own current value - only blocks it for a
                       // BRAND NEW selection, not the one already chosen
@@ -1128,7 +1143,7 @@ export default function POSPage() {
                       const isOccupied = occupiedTables.has(tableNumber) && orderFormData.table !== tableNumber;
                       return (
                         <option key={tableNumber} value={tableNumber} disabled={isOccupied}>
-                          Table {tableNumber}{isOccupied ? ' (Occupied)' : ''}
+                          {formatTableLabel(tableNumber)}{isOccupied ? ' (Occupied)' : ''}
                         </option>
                       );
                     })}

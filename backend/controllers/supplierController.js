@@ -2,7 +2,7 @@ const Supplier = require("../models/Supplier");
 const { shopScope } = require("../middleware/attachShopScope");
 
 exports.getSuppliers = async (req, res) => {
-  const suppliers = await Supplier.find({ ...shopScope(req) }).sort({ name: 1 });
+  const suppliers = await Supplier.find({ ...shopScope(req) }).sort({ name: 1 }).lean();
   res.json(suppliers);
 };
 

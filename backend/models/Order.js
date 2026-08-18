@@ -131,4 +131,25 @@ orderSchema.index({ shopId: 1, createdAt: -1 });
 // shop's pending documents instead.
 orderSchema.index({ shopId: 1, status: 1, createdAt: -1 });
 
+// DashboardShell.tsx's KitchenPrintWatcher and KitchenUpdateWatcher poll
+// getUnprintedKitchenOrders/getUnprintedKitchenUpdateOrders every 1.5
+// SECONDS, continuously, on every open till - by far the most frequent
+// queries in the whole app, more than an order of magnitude more often
+// than any page-load fetch. Both filter on kitchenPrintedAt/
+// pendingKitchenUpdate, and until now NEITHER was covered by an index -
+// same missing-index problem as getOrders' own two indexes above, just
+// undiscovered until now because the filtered RESULT is always small
+// (kitchenPrintedAt only ever goes null -> a real date once, never back;
+// pendingKitchenUpdate is a short-lived queue), which hid the real cost:
+// finding that small result still means scanning every one of this shop's
+// orders without an index, and that scan cost grows with the shop's total
+// order count. Run every 1.5s against a shop with a growing order history,
+// this alone can add up to a real, compounding slowdown over the course of
+// a shift even though no single poll looks slow in isolation - this is the
+// most likely explanation for "the app gets slower as today's order count
+// grows," felt on every page since DashboardShell (and therefore these
+// watchers) wraps the whole dashboard, not just one page.
+orderSchema.index({ shopId: 1, kitchenPrintedAt: 1, createdAt: 1 });
+orderSchema.index({ shopId: 1, "pendingKitchenUpdate.queuedAt": 1 });
+
 module.exports = mongoose.model("Order", orderSchema);

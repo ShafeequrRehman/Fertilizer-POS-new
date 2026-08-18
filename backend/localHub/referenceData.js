@@ -24,6 +24,10 @@ function get() {
     customers: [],
     staff: [],
     roles: [],
+    // This shop's custom DineIn table labels (Shop.tables - see
+    // models/Shop.js) - empty means "no custom layout, use the default
+    // numbered tables". Same omit-to-preserve convention as roles below.
+    tables: [],
   });
 }
 
@@ -42,6 +46,7 @@ function set(data) {
     customers: Array.isArray(data.customers) ? data.customers : previous.customers,
     staff: Array.isArray(data.staff) ? data.staff : previous.staff,
     roles: Array.isArray(data.roles) ? data.roles : previous.roles,
+    tables: Array.isArray(data.tables) ? data.tables : previous.tables,
   };
   store.save(REFERENCE_KEY, snapshot);
   return snapshot;

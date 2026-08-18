@@ -26,7 +26,8 @@
     "export-menu": "node backend/scripts/exportMenuData.js",
     "import-menu": "node backend/scripts/importMenuData.js",
     "set-app-version": "node backend/scripts/setAppVersion.js",
-    "backfill-tr-numbers": "node backend/scripts/backfillShopSequenceNumbers.js"
+    "backfill-tr-numbers": "node backend/scripts/backfillShopSequenceNumbers.js",
+    "set-shop-tables": "node backend/scripts/setShopTables.js"
   },
   "build": {
     "appId": "com.pos.system",
@@ -107,7 +108,7 @@
     "react-redux": "^9.2.0",
     "react-router-dom": "^7.1.1",
     "recharts": "^3.8.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@eslint/js": "^9",

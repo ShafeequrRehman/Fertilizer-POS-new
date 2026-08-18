@@ -2,7 +2,9 @@ const Purchase = require("../models/Purchase");
 const { shopScope } = require("../middleware/attachShopScope");
 
 exports.getPurchases = async (req, res) => {
-  const purchases = await Purchase.find({ ...shopScope(req) }).sort({ purchaseDate: -1 }).populate("supplierId", "name phone");
+  // .lean() - read-only list (Purchase page), same reasoning as
+  // productController.getProducts.
+  const purchases = await Purchase.find({ ...shopScope(req) }).sort({ purchaseDate: -1 }).populate("supplierId", "name phone").lean();
   res.json(purchases);
 };
 

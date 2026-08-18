@@ -48,9 +48,9 @@ This is separate from the till's `.env` - different `PORT`, and no
 
 ```bash
 cat > ~/pos-backend/.env << 'EOF'
-MONGO_URI=mongodb://alihaider:oWEyNc5sKeix5Vld@ac-zsqqrry-shard-00-00.kz4tizq.mongodb.net:27017,ac-zsqqrry-shard-00-01.kz4tizq.mongodb.net:27017,ac-zsqqrry-shard-00-02.kz4tizq.mongodb.net:27017/masterpos?ssl=true&authSource=admin&retryWrites=true&w=majority&appName=Cluster23
+MONGO_URI=<copy the real value from the till's own backend/.env - never paste it into a file that gets committed>
 
-JWT_SECRET=58c1697eed74916f61d7e8702b294617d3fd414272f9b30ff85244a0a860562d5d764b4e964c60e64855aaad9ec172969295a306e80a014ea0ff6377d5d521d8
+JWT_SECRET=<copy the real value from the till's own backend/.env - never paste it into a file that gets committed>
 
 PORT=5001
 EOF
@@ -59,6 +59,20 @@ EOF
 (Same `JWT_SECRET` as the till's `.env` - keeps this a drop-in swap rather
 than invalidating every existing login. Same `MONGO_URI` - same database,
 nothing about the data itself is changing.)
+
+> SECURITY: this file used to have the real `MONGO_URI` (with the Atlas
+> password in plain text) and the real `JWT_SECRET` typed directly into the
+> commands above. Both were committed to git and pushed to GitHub - anyone
+> who ever gets read access to this repo (or already has it) can read them
+> straight out of the commit history even now that the text above has been
+> replaced, since removing a line in a new commit does not erase it from
+> earlier commits. If those are still the live values in production, they
+> need to be rotated (a new Atlas database user/password, and a new
+> JWT_SECRET - see backend/index.js's ensureJwtSecret, or just delete the
+> JWT_SECRET line from every .env and restart so it re-generates one) - not
+> just removed from this file. Copy real secrets by hand between machines
+> (or via your password manager), never by pasting them into a doc that's
+> going to be committed.
 
 ## 4. Start it with pm2
 

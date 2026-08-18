@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchProducts, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
+import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
@@ -53,7 +54,19 @@ export default function SalesPage() {
   // real order and made the filter buttons silently do nothing when
   // clicked) - see BASE_FILTERS above and the filters memo below.
   const [waiters, setWaiters] = useState<Waiter[]>([]);
+  // This shop's custom DineIn table labels (Shop.tables), if configured -
+  // see src/lib/table-options.ts. Passed down to TableChangeModal and used
+  // by this page's own "Table {x}" display spots.
+  const [shopTables, setShopTables] = useState<string[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<SavedOrder | null>(null);
+  // Mirror of selectedOrder for refresh() to read - refresh() itself is
+  // recreated fresh every render, but the 45-second poll's setInterval
+  // (see the mount effect below) closes over whichever copy existed at
+  // mount and never sees later ones, so reading `selectedOrder` directly
+  // in there would always see it as null. Same stale-closure fix already
+  // used in RecordPage.tsx for the same reason.
+  const selectedOrderRef = useRef(selectedOrder);
+  useEffect(() => { selectedOrderRef.current = selectedOrder; }, [selectedOrder]);
   const [filter, setFilter] = useState('All');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
@@ -118,6 +131,7 @@ export default function SalesPage() {
         if (snapshot.products?.length) setProducts(snapshot.products as Product[]);
         const offlineWaiters = (snapshot.staff || []) as Waiter[];
         if (offlineWaiters.length) setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+        if (snapshot.tables?.length) setShopTables(snapshot.tables);
       } catch {
         // Best-effort - only used by the Add Items modal / waiter filter, never blocks the order list above.
       }
@@ -134,10 +148,22 @@ export default function SalesPage() {
       // Best-effort, not awaited - refresh() below updates state (and the
       // Local Hub's cache) with the real cloud data if/when it lands, but
       // the cache-first paint above already gave the cashier something to
-      // work with immediately either way.
-      if (isOnline) void refresh();
+      // work with immediately either way. Deliberately still the FULL
+      // (non-lean) fetch here, not the list=true one browser tabs use
+      // below: loadFromCache() just painted this till with real, complete
+      // order data from the Local Hub, so a lean sync landing moments
+      // later would actually downgrade selectedOrder back into the
+      // "not hydrated yet" placeholder state and grey out its own action
+      // buttons for no reason - there's no slow-network problem to solve
+      // here that loadFromCache() hasn't already solved.
+      if (isOnline) void refresh(false);
     } else {
-      await refresh();
+      // No Local Hub to cache-first paint from (a plain browser tab, not
+      // the Electron till) - this IS the code path that was actually
+      // timing out (see getOrders'/pos-api.ts's own comments), so it gets
+      // the lean list=true fetch, hydrating any order the user actually
+      // opens via selectOrder/refreshOne below.
+      await refresh(true);
     }
   }
 
@@ -255,6 +281,17 @@ export default function SalesPage() {
 
   const pagedOrders = visibleOrders.slice(0, visibleOrderCount);
 
+  // True once selectedOrder is either nothing, or a REAL full order (not
+  // the lean list placeholder - see SavedOrder['itemCount']'s comment).
+  // Every action below that can save a change, print a receipt/ticket, or
+  // build a WhatsApp message ultimately reads selectedOrder.items (directly,
+  // or via saveUpdate -> computeKitchenPrintDelta / applyPatchOptimistically
+  // - see offline-order-helpers.ts) - gating on this stops a fast click
+  // right after selecting a card from ever acting on a still-empty
+  // placeholder items array, which could otherwise print a wrong/blank
+  // kitchen ticket or momentarily corrupt the optimistic offline total.
+  const isSelectedOrderHydrated = !selectedOrder || selectedOrder.itemCount === undefined;
+
   const orderSubtotal = selectedOrder?.subtotal ?? selectedOrder?.total ?? 0;
   const orderTax = selectedOrder?.tax ?? 0;
   const discountAmountValue = Number(discountAmountInput) || 0;
@@ -268,7 +305,7 @@ export default function SalesPage() {
   const adjustedTotal = Math.max(orderSubtotal + orderTax - discountAmount, 0);
   const payable = adjustedTotal + customerDue;
 
-  async function refresh() {
+  async function refresh(lean: boolean) {
     try {
       // Two fetches, merged: the last-14-days window (a generous margin
       // over any realistic gap between shifts, keeps this 45-second poll
@@ -282,10 +319,15 @@ export default function SalesPage() {
       // "pending orders missing" bug this was built to fix. See
       // allPendingOrders above for where the merged result actually gets
       // used.
+      //
+      // lean picks fetchOrdersList (items excluded, itemCount instead) vs
+      // fetchOrders (full documents) - see loadAny()'s own comment for
+      // which callers pass which and why.
+      const fetchList = lean ? fetchOrdersList : fetchOrders;
       const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
       const [recentData, pendingData, history] = await Promise.all([
-        fetchOrders({ since }),
-        fetchOrders({ status: 'pending' }),
+        fetchList({ since }),
+        fetchList({ status: 'pending' }),
         fetchShopSessionHistory(),
       ]);
       const latestSession = history && history.length > 0 ? history[0] : null;
@@ -304,7 +346,42 @@ export default function SalesPage() {
         // made is left alone as long as the order still exists at all.
         const scoped = filterOrdersInBusinessWindow(data, getBusinessWindow(latestSession, new Date()));
 
-        setSelectedOrder((current) => current ? data.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null);
+        // Read via the ref, not the `selectedOrder` closed over by this
+        // function - see selectedOrderRef's own comment for why the 45s
+        // poll's copy of `selectedOrder` would otherwise always be stale.
+        const previouslySelected = selectedOrderRef.current;
+        let nextSelection: SavedOrder | null;
+        if (!previouslySelected) {
+          nextSelection = scoped[0] ?? null;
+        } else {
+          const match = data.find((order) => order.id === previouslySelected.id);
+          if (!match) {
+            nextSelection = scoped[0] ?? null;
+          } else if (lean && previouslySelected.itemCount === undefined) {
+            // A lean poll landing while the cashier already has a fully
+            // hydrated order open must never silently swap it back for the
+            // items-less placeholder mid-transaction - see
+            // isSelectedOrderHydrated's own comment. The next explicit
+            // selectOrder/refreshOne (or a non-lean refresh) still picks up
+            // any real change to it.
+            nextSelection = previouslySelected;
+          } else {
+            nextSelection = match;
+          }
+        }
+        setSelectedOrder(nextSelection);
+        selectedOrderRef.current = nextSelection;
+
+        // This page just auto-picked an order (page load, or the previous
+        // selection disappeared) from lean data with no explicit card
+        // click to trigger selectOrder's own hydrate-in-background call -
+        // do it here instead, so the very first order shown on a plain
+        // browser tab's Sales page still gets its action buttons enabled
+        // as soon as the full order lands, not only once the cashier
+        // clicks something else first.
+        if (lean && nextSelection && nextSelection.itemCount !== undefined && nextSelection.id !== previouslySelected?.id) {
+          void refreshOne(nextSelection.id);
+        }
 
         // Keeps the Local Hub's order cache fresh the moment this till has
         // real data, instead of only ever updating it on the 5-minute
@@ -327,6 +404,14 @@ export default function SalesPage() {
         if (waiterData) setWaiters(waiterData.filter((waiter) => waiter.isActive));
       } catch {
         // Best-effort - falls back to whatever the offline cache already had.
+      }
+
+      try {
+        const shopProfile = await fetchShopProfile();
+        setShopTables(shopProfile?.tables || []);
+      } catch {
+        // Best-effort - falls back to whatever the offline cache already had
+        // (or the default numbered list if this till has never fetched it).
       }
     } catch (err) {
       console.error('Failed to load orders', err);
@@ -367,6 +452,24 @@ export default function SalesPage() {
       setSelectedOrder(updated);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not refresh this order.');
+    }
+  }
+
+  // Card click handler for the order list. Selects immediately with
+  // whatever data the card already had (instant - no spinner, no blocked
+  // click) so the detail panel's read-only fields (customer, totals,
+  // status, etc, all present even on a lean placeholder) show right away.
+  // If that data came from the lean list=true endpoint (itemCount set,
+  // items empty), it also kicks off refreshOne in the background to fetch
+  // the real full order - see isSelectedOrderHydrated's own comment for
+  // why every action button stays disabled until that lands. A card
+  // that was already full (itemCount undefined - either this page never
+  // went lean at all, or a previous refreshOne/saveUpdate already
+  // hydrated it) skips the extra round trip entirely.
+  function selectOrder(order: SavedOrder) {
+    setSelectedOrder(order);
+    if (order.itemCount !== undefined) {
+      void refreshOne(order.id);
     }
   }
 
@@ -747,7 +850,7 @@ export default function SalesPage() {
             // instead of ever needing a horizontal scrollbar.
             <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-2.5 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
               {pagedOrders.map((order) => (
-                <button key={order.id} type="button" onClick={() => setSelectedOrder(order)} className={`min-w-0 overflow-hidden rounded-[18px] border p-2.5 text-left shadow-sm transition hover:-translate-y-0.5 ${selectedOrder?.id === order.id ? 'border-[#D6E332] bg-[#FBFDEB]' : 'border-transparent bg-white'}`}>
+                <button key={order.id} type="button" onClick={() => selectOrder(order)} className={`min-w-0 overflow-hidden rounded-[18px] border p-2.5 text-left shadow-sm transition hover:-translate-y-0.5 ${selectedOrder?.id === order.id ? 'border-[#D6E332] bg-[#FBFDEB]' : 'border-transparent bg-white'}`}>
                   {/* The order # is the single most important thing on this
                       card - it shares its own full-width line instead of
                       competing with the status badge for space, so it never
@@ -763,7 +866,7 @@ export default function SalesPage() {
                   <div className="mt-2 space-y-0.5 text-[11px] text-gray-600">
                     <Line icon={<UserRound size={11} />} text={label(order)} />
                     <Line icon={<Phone size={11} />} text={phoneLabel(order)} />
-                    <Line icon={<ShoppingBag size={11} />} text={`${prettyType(order)} • ${order.items.length} items`} />
+                    <Line icon={<ShoppingBag size={11} />} text={`${prettyType(order)} • ${order.itemCount ?? order.items.length} items`} />
                   </div>
                   <div className="mt-2 truncate rounded-[12px] bg-[#F8F9FB] px-2.5 py-1.5 text-xs font-black text-gray-900">Rs {order.total}</div>
                 </button>
@@ -788,14 +891,22 @@ export default function SalesPage() {
             <div className="flex flex-col">
               <div className="shrink-0 border-b border-gray-100 p-6">
                 <div className="flex items-start justify-between gap-4">
-                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p><h2 className="mt-2 text-2xl font-black text-gray-900">{cardHeading(selectedOrder)}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p></div>
+                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p><h2 className="mt-2 text-2xl font-black text-gray-900">{cardHeading(selectedOrder)}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p>
+                    {/* isSelectedOrderHydrated is false only right after
+                        picking a card whose data came from the lean
+                        list=true endpoint - a background refreshOne is
+                        already in flight (see selectOrder) and this
+                        clears itself the moment it lands, same fetch a
+                        manual tap of the refresh icon below would do. */}
+                    {!isSelectedOrderHydrated ? <p className="mt-1 text-xs font-bold text-amber-600">Loading full order details...</p> : null}
+                  </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     {selectedOrder.customer.phone && selectedOrder.customer.phone !== '03000000000' && (
-                      <button disabled={isSendingWA} type="button" onClick={() => void handleSendWhatsAppReciept(selectedOrder)} className="rounded-2xl bg-emerald-500 px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white disabled:opacity-50">
+                      <button disabled={isSendingWA || !isSelectedOrderHydrated} type="button" onClick={() => void handleSendWhatsAppReciept(selectedOrder)} className="rounded-2xl bg-emerald-500 px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white disabled:opacity-50">
                         {isSendingWA ? 'Sending...' : 'WhatsApp'}
                       </button>
                     )}
-                    <button type="button" onClick={() => {
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => {
                       const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
                       if (isElectron && settings && (settings.kitchenPrinter || settings.counterPrinter)) {
                         try {
@@ -821,8 +932,8 @@ export default function SalesPage() {
                       } else {
                         setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=kitchen`);
                       }
-                    }} className="rounded-2xl bg-black px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white">Send to Kitchen</button>
-                    <button type="button" onClick={() => {
+                    }} className="rounded-2xl bg-black px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white disabled:opacity-50">Send to Kitchen</button>
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => {
                       // Same direct-IPC-else-fallback-page pattern as Send to
                       // Kitchen above - prints immediately on this till's own
                       // counter printer with no dependency on the internet,
@@ -852,7 +963,7 @@ export default function SalesPage() {
                       } else {
                         setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=cashier`);
                       }
-                    }} className="rounded-2xl bg-[#F6F7FB] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700">Print Receipt</button>
+                    }} className="rounded-2xl bg-[#F6F7FB] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">Print Receipt</button>
                     <Link to={`/dashboard/sales/print/${selectedOrder.id}`} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><Printer size={16} /></Link>
                     <button type="button" onClick={() => void refreshOne(selectedOrder.id)} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><RefreshCcw size={16} /></button>
                     {selectedOrder.status === 'pending' ? (
@@ -864,9 +975,10 @@ export default function SalesPage() {
                 </div>
                 {selectedOrder.status === 'pending' ? (
                   <div className="mt-4 grid gap-2">
-                    <button type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setPaymentAmount(''); setConfirmPending(false); setShowPayment(true); }} className="rounded-2xl bg-[#E2F33C] px-4 py-2 text-sm font-black text-black">Complete Order</button>
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setPaymentAmount(''); setConfirmPending(false); setShowPayment(true); }} className="rounded-2xl bg-[#E2F33C] px-4 py-2 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50">Complete Order</button>
                     {hasPermission('sales.delete') ? (
                       <button
+                        disabled={!isSelectedOrderHydrated}
                         type="button"
                         onClick={() => setShowCancel(true)}
                         className="rounded-2xl bg-rose-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -887,18 +999,19 @@ export default function SalesPage() {
                   {selectedOrder.orderType === 'DineIn' ? (
                     selectedOrder.status === 'pending' ? (
                       <button
+                        disabled={!isSelectedOrderHydrated}
                         type="button"
                         onClick={() => setShowTableEdit(true)}
-                        className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3 text-left transition hover:bg-gray-100"
+                        className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3 text-left transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Table</p>
                         <p className="mt-1 flex items-center gap-1.5 break-words text-sm font-bold text-gray-900">
-                          {selectedOrder.table ? `Table ${selectedOrder.table}` : 'Not set'}
+                          {selectedOrder.table ? formatTableLabel(selectedOrder.table) : 'Not set'}
                           <Pencil size={12} className="shrink-0 text-gray-400" />
                         </p>
                       </button>
                     ) : (
-                      <Box label="Table" value={selectedOrder.table ? `Table ${selectedOrder.table}` : 'N/A'} />
+                      <Box label="Table" value={selectedOrder.table ? formatTableLabel(selectedOrder.table) : 'N/A'} />
                     )
                   ) : null}
                   <Box label="Order Type" value={prettyType(selectedOrder)} />
@@ -911,13 +1024,17 @@ export default function SalesPage() {
                   <div className="mb-3 flex items-center justify-between">
                     <h3 className="text-sm font-black uppercase tracking-[0.18em] text-gray-400">Items</h3>
                     {selectedOrder.status === 'pending' ? (
-                      <button type="button" onClick={() => setShowAddItems(true)} className="rounded-full bg-black px-4 py-2 text-xs font-black text-white"><PackagePlus size={14} className="mr-2 inline" />Add Items</button>
+                      <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => setShowAddItems(true)} className="rounded-full bg-black px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"><PackagePlus size={14} className="mr-2 inline" />Add Items</button>
                     ) : (
                       <span className="rounded-full bg-[#F3F4F6] px-4 py-2 text-xs font-black text-gray-400">Order Locked</span>
                     )}
                   </div>
                   <div className="space-y-3">
-                    {selectedOrder.items.map((item, index) => <div key={`${item.name}-${index}`} className="rounded-[24px] bg-[#FAFBFC] p-4"><div className="flex items-center justify-between gap-3"><div><p className="font-black text-gray-900">{item.name}</p><p className="text-xs text-gray-400">{item.variation}</p></div><div className="text-right"><p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p><p className="text-xs text-gray-400">Qty {item.quantity}</p></div></div></div>)}
+                    {!isSelectedOrderHydrated ? (
+                      <p className="text-sm text-gray-400">Loading items...</p>
+                    ) : (
+                      selectedOrder.items.map((item, index) => <div key={`${item.name}-${index}`} className="rounded-[24px] bg-[#FAFBFC] p-4"><div className="flex items-center justify-between gap-3"><div><p className="font-black text-gray-900">{item.name}</p><p className="text-xs text-gray-400">{item.variation}</p></div><div className="text-right"><p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p><p className="text-xs text-gray-400">Qty {item.quantity}</p></div></div></div>)
+                    )}
                   </div>
                 </div>
               </div>
@@ -1027,6 +1144,7 @@ export default function SalesPage() {
         <TableChangeModal
           order={selectedOrder}
           isOnline={isOnline}
+          tables={shopTables}
           onClose={() => setShowTableEdit(false)}
           onSave={async (table) => {
             const previousTable = selectedOrder.table;
@@ -1042,7 +1160,7 @@ export default function SalesPage() {
   );
 }
 
-function label(order: SavedOrder) { return order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer.name || 'Walk-in Customer'; }
+function label(order: SavedOrder) { return order.orderType === 'DineIn' ? (order.table ? formatTableLabel(order.table) : 'Dine-In Customer') : order.customer.name || 'Walk-in Customer'; }
 function phoneLabel(order: SavedOrder) { return order.orderType === 'DineIn' ? (order.waiter ? `Waiter: ${order.waiter}` : 'Dine In') : order.customer.phone || 'No phone'; }
 function prettyType(order: SavedOrder) { return order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery'; }
 function age(createdAt: string) { const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000); return mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} hr ${mins % 60} min ago`; }
@@ -1054,7 +1172,7 @@ function orderNumber(order: SavedOrder) { return String(order.dailyOrderNumber ?
 // they keep showing the order number as before. The full order number is
 // still always available in the "Order Number" Box further down the detail
 // panel either way - this only changes the big headline.
-function cardHeading(order: SavedOrder) { return order.orderType === 'DineIn' && order.table ? `Table ${order.table}` : `Order #${orderNumber(order)}`; }
+function cardHeading(order: SavedOrder) { return order.orderType === 'DineIn' && order.table ? formatTableLabel(order.table) : `Order #${orderNumber(order)}`; }
 function hasCustomerPhone(order: SavedOrder) { return Boolean(order.customer.phone && order.customer.phone !== '03000000000'); }
 function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 
@@ -1080,11 +1198,16 @@ function Modal({ title, onClose, wide, children }: { title: string; onClose: () 
 function TableChangeModal({
   order,
   isOnline,
+  tables,
   onClose,
   onSave,
 }: {
   order: SavedOrder;
   isOnline: boolean;
+  // This shop's custom DineIn table labels (Shop.tables) - see
+  // src/lib/table-options.ts. Empty means "no custom layout", same
+  // default-numbered fallback as POSPage.tsx's own Table Number dropdown.
+  tables: string[];
   onClose: () => void;
   onSave: (table: string) => Promise<void>;
 }) {
@@ -1158,12 +1281,11 @@ function TableChangeModal({
   return (
     <Modal title={`Change Table - Order #${orderNumber(order)}`} onClose={onClose}>
       <p className="text-sm text-gray-500">
-        Currently {order.table ? <span className="font-bold text-gray-900">Table {order.table}</span> : 'no table set'}. Pick the new table below.
+        Currently {order.table ? <span className="font-bold text-gray-900">{formatTableLabel(order.table)}</span> : 'no table set'}. Pick the new table below.
       </p>
       {loadingOccupied ? <p className="mt-3 text-xs font-bold text-gray-400">Checking which tables are free...</p> : null}
       <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-5">
-        {Array.from({ length: 20 }).map((_, index) => {
-          const tableNumber = String(index + 1);
+        {getTableOptions(tables).map((tableNumber) => {
           const isOccupied = occupiedTables.has(tableNumber) && tableNumber !== order.table;
           const isSelected = selected === tableNumber;
           return (
@@ -1172,7 +1294,7 @@ function TableChangeModal({
               type="button"
               disabled={isOccupied}
               onClick={() => setSelected(tableNumber)}
-              title={isOccupied ? `Table ${tableNumber} already has a pending order` : undefined}
+              title={isOccupied ? `${formatTableLabel(tableNumber)} already has a pending order` : undefined}
               className={`rounded-xl border py-2.5 text-sm font-black transition ${
                 isSelected
                   ? 'border-black bg-black text-white'

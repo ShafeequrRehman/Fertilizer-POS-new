@@ -26,7 +26,9 @@ function validatePermissionKeys(keys) {
 // GET /api/shop/employees
 exports.listEmployees = async (req, res) => {
   try {
-    const employees = await User.find({ shopId: req.user.shopId, role: "employee" }).populate("employeeRoleId", "name permissions").sort({ createdAt: -1 });
+    // .lean() - read-only list; safeUser already handles a plain lean
+    // object as well as a real Document (see its own `user.toObject ?` check).
+    const employees = await User.find({ shopId: req.user.shopId, role: "employee" }).populate("employeeRoleId", "name permissions").sort({ createdAt: -1 }).lean();
     res.json(employees.map(safeUser));
   } catch (error) {
     res.status(500).json({ message: "Failed to load employees", detail: error.message });
@@ -191,11 +193,11 @@ function monthRange(monthParam) {
 exports.listPayroll = async (req, res) => {
   try {
     const { start, end, monthKey } = monthRange(req.query.month);
-    const employees = await User.find({ shopId: req.user.shopId, role: "employee" }).sort({ name: 1 });
+    const employees = await User.find({ shopId: req.user.shopId, role: "employee" }).sort({ name: 1 }).lean();
     const payments = await StaffPayment.find({
       shopId: req.user.shopId,
       date: { $gte: start, $lt: end },
-    });
+    }).lean();
 
     const totalsByEmployee = new Map();
     for (const payment of payments) {
@@ -249,7 +251,7 @@ exports.listPayments = async (req, res) => {
       const { start, end } = monthRange(req.query.month);
       query.date = { $gte: start, $lt: end };
     }
-    const payments = await StaffPayment.find(query).populate("employeeId", "name username").sort({ date: -1 });
+    const payments = await StaffPayment.find(query).populate("employeeId", "name username").sort({ date: -1 }).lean();
     res.json(payments);
   } catch (error) {
     res.status(500).json({ message: "Failed to load payroll payments", detail: error.message });
@@ -300,7 +302,7 @@ exports.deletePayment = async (req, res) => {
 // GET /api/shop/roles
 exports.listRoles = async (req, res) => {
   try {
-    res.json(await Role.find({ shopId: req.user.shopId }).sort({ name: 1 }));
+    res.json(await Role.find({ shopId: req.user.shopId }).sort({ name: 1 }).lean());
   } catch (error) {
     res.status(500).json({ message: "Failed to load roles", detail: error.message });
   }

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
 const { shopScope } = require("../middleware/attachShopScope");
+const { escapeRegex } = require("../utils/escapeRegex");
 
 // Placeholder phone used for walk-in/guest orders (see
 // orderController.createOrder) - these are never upserted into the
@@ -21,22 +22,30 @@ exports.searchCustomers = async (req, res) => {
   const filters = [];
 
   if (searchBy === "name" || searchBy === "both") {
-    filters.push({ name: { $regex: query, $options: "i" } });
+    // escapeRegex - `query` is whatever the cashier typed into the search
+    // box, handed straight to Mongo's regex engine; unescaped, a crafted
+    // pattern can cause catastrophic backtracking (a same-shop denial of
+    // service) - see utils/escapeRegex.js's own comment.
+    filters.push({ name: { $regex: escapeRegex(query), $options: "i" } });
   }
 
   if ((searchBy === "phone" || searchBy === "both") && phoneQuery) {
+    // phoneQuery was already stripped to digits only above, so it can
+    // never contain a regex metacharacter - no escaping needed here.
     filters.push({ phone: { $regex: phoneQuery, $options: "i" } });
   }
 
   const baseQuery = { ...shopScope(req) };
   if (filters.length) baseQuery.$or = filters;
 
-  const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20);
+  const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20).lean();
   res.json(customers);
 };
 
 exports.getAllCustomers = async (req, res) => {
-  const customers = await Customer.find({ ...shopScope(req) }).sort({ name: 1 });
+  // .lean() - read-only list (Ledger/Dues pages, customer lookup while
+  // placing an order), same reasoning as productController.getProducts.
+  const customers = await Customer.find({ ...shopScope(req) }).sort({ name: 1 }).lean();
   res.json(customers);
 };
 

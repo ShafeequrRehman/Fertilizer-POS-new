@@ -188,6 +188,11 @@ export interface ReferenceDataSnapshot {
   // EmployeesPage.tsx's staff form populate its Role dropdown while
   // offline.
   roles: unknown[];
+  // This shop's custom DineIn table labels (Shop.tables), if any - see
+  // src/lib/table-options.ts's getTableOptions for how POSPage.tsx/
+  // SalesPage.tsx fall back to the default numbered list when this is
+  // empty/missing.
+  tables: string[];
 }
 
 export async function pushReferenceData(data: {
@@ -200,6 +205,8 @@ export async function pushReferenceData(data: {
   // frequent products/waiters-only push) can leave this out entirely
   // rather than being forced to explicitly wipe it with [].
   roles?: unknown[];
+  // Same omit-to-preserve convention as roles above.
+  tables?: string[];
 }) {
   // Make sure the key is cached before this runs at least once per app
   // session - harmless if already cached (getPairingInfo is idempotent).

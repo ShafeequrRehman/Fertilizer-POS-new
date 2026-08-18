@@ -191,6 +191,82 @@ exports.getOrders = async (req, res) => {
     // instead of transferring everything. Sales/Kitchen/Record still call
     // this same route with no flag and get full documents, unchanged - this
     // is additive, not a behavior change for any existing caller.
+    //
+    // ?list=true - SalesPage/RecordPage's card-list views need almost every
+    // top-level field (status, totals, customer, table, waiter, discount,
+    // print-claim flags, etc.) to render the list and re-derive things like
+    // "this shift's orders" client-side - unlike summary=true above, they
+    // can't drop down to 5 fields. What they DON'T need until the cashier
+    // actually opens one specific order is that order's full `items` array,
+    // which - same data-volume finding as summary=true's comment above - is
+    // most of each document's bytes on the wire once a shop has real order
+    // history. This mode keeps every field except items, replacing it with
+    // a cheap itemCount (still computed server-side via $size so the list
+    // card can show "3 items" without ever transferring the items
+    // themselves). The frontend is responsible for re-fetching a single
+    // order's full detail (GET /api/orders/:id, unaffected by collection
+    // size) before it lets the cashier act on it - see SalesPage.tsx's
+    // selectOrder/refreshOne and the itemCount-gated "still loading" state
+    // on its action buttons, which exist specifically so a save can never
+    // go out with a stale/empty items array.
+    if (req.query.list === "true") {
+      const _dbStart = Date.now();
+      const matchQuery = { ...query };
+      // Aggregation's $match does NOT get Mongoose's usual auto-casting -
+      // shopId comes from the JWT as a plain string (see tokenService.js),
+      // but the schema field is an ObjectId, so left uncast this would
+      // silently match zero documents instead of erroring loudly. .find()
+      // above never had this problem because Mongoose casts query values
+      // against the schema for you there; aggregate() does not.
+      if (matchQuery.shopId) {
+        matchQuery.shopId = new mongoose.Types.ObjectId(String(matchQuery.shopId));
+      }
+      const orders = await Order.aggregate([
+        { $match: matchQuery },
+        { $sort: { createdAt: -1 } },
+        {
+          $project: {
+            shopId: 1,
+            userId: 1,
+            clientSyncId: 1,
+            dailyOrderNumber: 1,
+            shopSequenceNumber: 1,
+            subtotal: 1,
+            tax: 1,
+            total: 1,
+            orderType: 1,
+            customer: 1,
+            address: 1,
+            note: 1,
+            waiter: 1,
+            table: 1,
+            status: 1,
+            paymentMethod: 1,
+            paidAmount: 1,
+            remainingAmount: 1,
+            cancelledAt: 1,
+            cancelledBy: 1,
+            cancelReason: 1,
+            discount: 1,
+            version: 1,
+            kitchenPrintedAt: 1,
+            customerReceiptPrintedAt: 1,
+            pendingKitchenUpdate: 1,
+            createdOffline: 1,
+            offlineOrderNumber: 1,
+            offlineCreatedAt: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            itemCount: { $size: { $ifNull: ["$items", []] } },
+          },
+        },
+      ]);
+      const _dbDone = Date.now();
+      const result = orders.map((order) => ({ ...order, id: String(order._id), items: [] }));
+      console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} list=true query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
+      return res.json(result);
+    }
+
     const projection = req.query.summary === "true"
       ? "status total createdAt customer.phone waiter"
       : null;
@@ -666,12 +742,19 @@ exports.getOccupiedDineInTables = async (req, res) => {
 
 exports.getUnprintedKitchenOrders = async (req, res) => {
   try {
+    // .lean() + no per-document .toObject() below - this is read-only
+    // (nothing here ever mutates/saves what it fetches), and it's polled
+    // by every till's Kitchen page every 10 seconds all day, so the double
+    // hydration (.find() building real Documents, then .toObject() on each
+    // one converting them right back to plain objects) that was already
+    // found and fixed on getOrders was quietly happening here too, just
+    // more often. Same fix, same reasoning - see getOrders' own comment.
     const orders = await Order.find({
       ...buildShopScope(req),
       kitchenPrintedAt: null,
       status: { $ne: "cancelled" },
-    }).sort({ createdAt: 1 });
-    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+    }).sort({ createdAt: 1 }).lean();
+    res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -721,13 +804,16 @@ exports.claimKitchenPrint = async (req, res) => {
 // lingers here long enough to double-print.
 exports.getUnprintedReceiptOrders = async (req, res) => {
   try {
+    // Same .lean() fix as getUnprintedKitchenOrders above, same reasoning
+    // - this is also a background poll, read-only, never mutates what it
+    // fetches.
     const orders = await Order.find({
       ...buildShopScope(req),
       customerReceiptPrintedAt: null,
       status: "completed",
       orderType: "TakeAway",
-    }).sort({ createdAt: 1 });
-    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+    }).sort({ createdAt: 1 }).lean();
+    res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -772,12 +858,15 @@ exports.claimReceiptPrint = async (req, res) => {
 // else, same as ReceiptPrintWatcher does for customer receipts).
 exports.getUnprintedKitchenUpdateOrders = async (req, res) => {
   try {
+    // Same .lean() fix as getUnprintedKitchenOrders above, same reasoning
+    // - this is also a background poll, read-only, never mutates what it
+    // fetches.
     const orders = await Order.find({
       ...buildShopScope(req),
       pendingKitchenUpdate: { $ne: null },
       status: { $ne: "cancelled" },
-    }).sort({ "pendingKitchenUpdate.queuedAt": 1 });
-    res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
+    }).sort({ "pendingKitchenUpdate.queuedAt": 1 }).lean();
+    res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

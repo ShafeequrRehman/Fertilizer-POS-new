@@ -17,7 +17,7 @@ exports.getWaiters = async (req, res) => {
     ...shopScope(req),
     role: "employee",
     designation: { $in: WAITER_DESIGNATIONS.map((d) => new RegExp(`^${d}$`, "i")) },
-  }).sort({ name: 1 });
+  }).sort({ name: 1 }).lean();
 
   res.json(
     staff.map((member) => ({

@@ -47,10 +47,15 @@ const whatsappRoutes = require("./routes/whatsappRoutes");
 const printerRoutes = require("./routes/printerRoutes");
 const appVersionRoutes = require("./routes/appVersionRoutes");
 
+const sanitizeInput = require("./middleware/sanitizeInput");
+
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+// See sanitizeInput.js - strips Mongo operator keys ($ne, $gt, etc.) out
+// of every request body/query/params before any route handler runs.
+app.use(sanitizeInput);
 
 // Reachability check for the frontend's real online/offline indicator (see
 // src/lib/network-status.ts). The actual continuous checking happens in

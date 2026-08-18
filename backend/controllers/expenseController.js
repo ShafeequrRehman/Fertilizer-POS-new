@@ -2,7 +2,7 @@ const Expense = require("../models/Expense");
 const { shopScope } = require("../middleware/attachShopScope");
 
 exports.getExpenses = async (req, res) => {
-  const expenses = await Expense.find({ ...shopScope(req) }).sort({ date: -1 });
+  const expenses = await Expense.find({ ...shopScope(req) }).sort({ date: -1 }).lean();
   res.json(expenses);
 };
 

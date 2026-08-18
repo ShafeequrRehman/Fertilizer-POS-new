@@ -29,7 +29,7 @@ import {
   markEmployeeDeleteFailed,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, fetchShopProfile, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
 import { shopApi } from '@/lib/shop-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
@@ -460,11 +460,12 @@ export async function pushCurrentReferenceData(): Promise<void> {
   if (!hubUp) return;
 
   try {
-    const [productsResult, customers, waiters, roles] = await Promise.all([
+    const [productsResult, customers, waiters, roles, shopProfile] = await Promise.all([
       fetchProducts(),
       fetchAllCustomers(),
       fetchWaiters(),
       shopApi.listRoles(),
+      fetchShopProfile().catch(() => null),
     ]);
 
     await pushReferenceData({
@@ -473,6 +474,7 @@ export async function pushCurrentReferenceData(): Promise<void> {
       customers: customers || [],
       staff: waiters || [],
       roles: roles || [],
+      tables: shopProfile?.tables || [],
     });
   } catch {
     // Best-effort - the next 5-minute tick will just try again. Nothing

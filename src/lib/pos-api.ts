@@ -300,6 +300,28 @@ export async function fetchOrdersSummary(params: { since: string }): Promise<Ord
   }
 }
 
+// Same as fetchOrders above but requests the server's `list=true`
+// projection (every field EXCEPT items, plus a server-computed itemCount -
+// see orderController.js's getOrders) instead of full documents. Built for
+// SalesPage.tsx/RecordPage.tsx's card-list views, which need almost every
+// field (unlike fetchOrdersSummary's 5-field projection) but not the
+// items array of every order in the list at once - only whichever ONE
+// order the cashier actually opens, fetched full via fetchOrder at that
+// point. Each returned order has items: [] and itemCount set - see
+// SavedOrder['itemCount']'s own comment for why that combination is what
+// callers check to know an entry is still the lean placeholder.
+export async function fetchOrdersList(params?: { date?: string; since?: string; status?: SavedOrder['status'] }) {
+  try {
+    const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', {
+      params: { ...params, list: true },
+      timeout: ORDERS_FETCH_TIMEOUT_MS,
+    });
+    return response.data.map(normalizeOrder);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // Every table currently tied to a still-pending DineIn order, shop-wide,
 // with NO date bound - see orderController.js's getOccupiedDineInTables
 // for why this is safe to leave unbounded (the result set is capped by the
@@ -440,6 +462,9 @@ export interface ShopProfile {
   enabledPages?: string[] | null;
   hasPageVisibilityKey?: boolean;
   hasCancelOrderKey?: boolean;
+  // This shop's custom DineIn table labels (Shop.tables) - see
+  // src/lib/table-options.ts. Empty/absent means no custom layout.
+  tables?: string[];
 }
 
 export async function fetchShopProfile() {

@@ -5,7 +5,19 @@ const DATA_API_BASE_KEY = "api_base_url";
 const CLOUD_API_BASE_KEY = "cloud_api_base_url";
 const LOCAL_API_BASE = "http://localhost:5000/api";
 const IN_APP_SYSTEM_API_BASE = "/api/system";
-const AXIOS_REQUEST_TIMEOUT_MS = 8000;
+// This was 8000 for a long time and worked fine - it started causing real
+// page failures (Sales/Record timing out, then fetchProducts/
+// fetchShopSessionHistory too) once this shop's order history grew enough
+// that queries + the network round trip to the self-hosted PC no longer
+// reliably finished inside 8 seconds. Rather than keep discovering this
+// one endpoint at a time and special-casing each one's own timeout
+// (ORDERS_FETCH_TIMEOUT_MS in pos-api.ts was the first of those, born from
+// exactly this problem), this raises the floor for every single api.*
+// call in the app at once - including ones nobody's hit yet. 20s is well
+// above every measured real request during the /api/orders investigation
+// (worst case seen was ~11s query time) while still failing fast enough
+// that a genuinely offline/down backend doesn't hang the UI forever.
+const AXIOS_REQUEST_TIMEOUT_MS = 20000;
 
 // VITE_API_URL (pos-web/.env, baked in at `npm run build` time) comes
 // first when set - that's how a till gets pointed at a centrally-hosted

@@ -1,16 +1,23 @@
 const Product = require("../models/Product");
 const { shopScope } = require("../middleware/attachShopScope");
+const { escapeRegex } = require("../utils/escapeRegex");
 
 exports.getProducts = async (req, res) => {
   const { search } = req.query;
   const query = { ...shopScope(req) };
   if (search) {
+    // escapeRegex - see customerController.searchCustomers' own comment;
+    // same reasoning applies to this search box.
+    const safeSearch = escapeRegex(search);
     query.$or = [
-      { name: { $regex: search, $options: "i" } },
-      { category: { $regex: search, $options: "i" } },
+      { name: { $regex: safeSearch, $options: "i" } },
+      { category: { $regex: safeSearch, $options: "i" } },
     ];
   }
-  const products = await Product.find(query).sort({ createdAt: -1 });
+  // .lean() - read-only list, fetched on every POS/Sales/Record page load
+  // and every Add Items panel open; same double-hydration overhead already
+  // found and fixed on Order's own list endpoints (see orderController.js).
+  const products = await Product.find(query).sort({ createdAt: -1 }).lean();
   const categories = ["All", ...new Set(products.map((product) => product.category))];
   res.json({ categories, products });
 };
