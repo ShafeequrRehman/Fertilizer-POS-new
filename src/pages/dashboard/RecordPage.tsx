@@ -120,7 +120,11 @@ export default function RecordPage() {
   async function loadFromCache() {
     if (cachedShopSession) setShopSession((current) => current ?? cachedShopSession);
     try {
+      // Same staleness guard as refresh() - see localEditVersionRef's own
+      // comment.
+      const versionAtStart = localEditVersionRef.current;
       const merged = await loadOrdersFromLocalHub();
+      if (localEditVersionRef.current !== versionAtStart) return;
       setOrders(merged);
       setLoadError('');
     } catch {

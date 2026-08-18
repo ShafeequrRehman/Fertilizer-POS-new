@@ -3,11 +3,13 @@ import type { Discount, OrderPayload, OrderUpdatePayload, SavedOrder } from '@/l
 import {
   getOrdersCache,
   getPendingLocalOrders,
+  getPendingOrderCancellations,
   getPendingOrderEdits,
   pushOrdersCache,
   queueOrderCancellation,
   queueOrderEdit,
   updateQueuedLocalOrder,
+  type LocalOrderCancellationRecord,
   type LocalOrderEditRecord,
   type LocalOrderRecord,
 } from '@/lib/local-hub-api';
@@ -254,7 +256,30 @@ export async function saveOrderCancelOffline(
   }
 
   await queueOrderCancellation(order.id, key, reason, actor);
-  return { ...order, status: 'cancelled', cancelledAt, cancelledBy, cancelReason };
+  const updated: SavedOrder = { ...order, status: 'cancelled', cancelledAt, cancelledBy, cancelReason };
+
+  // Patch the orderCache with this order's cancelled state right now,
+  // best-effort - same reasoning as saveOrderEditOffline's own cache patch
+  // above. Without this, the ONLY thing keeping the cancellation visible
+  // is the pending-cancellation queue overlay below (applyPendingCancellations)
+  // - fine right up until offline-sync.ts's syncOrderCancellations()
+  // confirms it with the cloud and acks/clears it out of that queue, at
+  // which point a stale cache with nothing left overlaying it would show
+  // this order as still-pending again.
+  if (isDesktopApp()) {
+    void (async () => {
+      try {
+        const cache = await getOrdersCache();
+        const withoutTarget = (cache.orders as SavedOrder[]).filter((cached) => cached.id !== updated.id);
+        await pushOrdersCache([updated, ...withoutTarget]);
+      } catch {
+        // Best-effort - the pending-cancellation overlay below still keeps
+        // this correct until the next natural cache refresh either way.
+      }
+    })();
+  }
+
+  return updated;
 }
 
 // Combines the Local Hub's cached cloud snapshot with whatever this till
@@ -276,21 +301,49 @@ function applyPendingEdits(cachedOrders: SavedOrder[], pendingEdits: LocalOrderE
   return byId;
 }
 
+// Same overlay idea as applyPendingEdits above, for cancellations - a
+// completely separate Local Hub queue (see local-hub-api.ts's
+// queueOrderCancellation), so it needs its own pass. Applied AFTER edits so
+// a cancellation always wins over any edit still also queued against the
+// same order (cancelling supersedes everything else). Previously this
+// queue had NO overlay at all - a cancelled order relied entirely on the
+// cancelling page's own optimistic setOrders() call, with nothing to fall
+// back on the moment any other load (the 45s poll, another page, a
+// restart) re-read from the Local Hub before the cache patch above landed -
+// exactly what was showing a just-cancelled order back as "pending".
+function applyPendingCancellations(byId: Map<string, SavedOrder>, pendingCancellations: LocalOrderCancellationRecord[]): void {
+  for (const cancellation of pendingCancellations) {
+    const target = byId.get(cancellation.orderId);
+    if (target && target.status !== 'cancelled') {
+      byId.set(cancellation.orderId, {
+        ...target,
+        status: 'cancelled',
+        cancelledAt: cancellation.queuedAt,
+        cancelledBy: cancellation.actor?.name || '',
+        cancelReason: cancellation.reason || 'No reason provided',
+      });
+    }
+  }
+}
+
 // The single place Dashboard.tsx/SalesPage.tsx/KitchenPage.tsx build the
 // order list they show - always from the Local Hub, NEVER a direct live
 // cloud call (see offline-sync.ts's pushCurrentOrdersCache for how the
 // cache snapshot stays fresh in the background). `cachedOrders` is
 // whatever this till last successfully pulled from the cloud;
-// `pendingNewRecords`/`pendingEdits` are this till's own not-yet-synced
-// queue (see getPendingLocalOrders/getPendingOrderEdits) - overlaid on
-// top so an order punched or edited seconds ago shows up immediately,
-// with no dependence on connectivity at all.
+// `pendingNewRecords`/`pendingEdits`/`pendingCancellations` are this till's
+// own not-yet-synced queues (see getPendingLocalOrders/getPendingOrderEdits/
+// getPendingOrderCancellations) - overlaid on top so an order punched,
+// edited, completed, or cancelled seconds ago shows up correctly
+// immediately, with no dependence on connectivity at all.
 export function mergeOrdersForDisplay(
   cachedOrders: SavedOrder[],
   pendingNewRecords: LocalOrderRecord[],
   pendingEdits: LocalOrderEditRecord[],
+  pendingCancellations: LocalOrderCancellationRecord[] = [],
 ): SavedOrder[] {
   const byId = applyPendingEdits(cachedOrders, pendingEdits);
+  applyPendingCancellations(byId, pendingCancellations);
   const knownClientSyncIds = new Set(cachedOrders.map((order) => order.clientSyncId).filter(Boolean));
 
   for (const record of pendingNewRecords) {
@@ -310,13 +363,14 @@ export function mergeOrdersForDisplay(
   );
 }
 
-// Fetches and merges all three sources in one call - what the load
+// Fetches and merges all four sources in one call - what the load
 // effects in Dashboard/Sales/Kitchen actually call.
 export async function loadOrdersFromLocalHub(): Promise<SavedOrder[]> {
-  const [cache, pendingNew, pendingEdits] = await Promise.all([
+  const [cache, pendingNew, pendingEdits, pendingCancellations] = await Promise.all([
     getOrdersCache(),
     getPendingLocalOrders(),
     getPendingOrderEdits(),
+    getPendingOrderCancellations(),
   ]);
-  return mergeOrdersForDisplay(cache.orders as SavedOrder[], pendingNew, pendingEdits);
+  return mergeOrdersForDisplay(cache.orders as SavedOrder[], pendingNew, pendingEdits, pendingCancellations);
 }

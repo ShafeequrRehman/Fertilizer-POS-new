@@ -137,10 +137,17 @@ export default function SalesPage() {
   async function loadFromCache() {
     if (cachedShopSession) setShopSession((current) => current ?? cachedShopSession);
     try {
+      // Same staleness guard as refresh() - loadOrdersFromLocalHub() is
+      // local-only (fast), but a slow render/await tick is still enough to
+      // occasionally lose a race against a local edit that happened while
+      // this was in flight, so it gets the same protection for consistency.
+      const versionAtStart = localEditVersionRef.current;
       const merged = await loadOrdersFromLocalHub();
-      setOrders(merged);
-      const scoped = filterOrdersInBusinessWindow(merged, getBusinessWindow(cachedShopSession, new Date()));
-      setSelectedOrder((current) => (current ? merged.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null));
+      if (localEditVersionRef.current === versionAtStart) {
+        setOrders(merged);
+        const scoped = filterOrdersInBusinessWindow(merged, getBusinessWindow(cachedShopSession, new Date()));
+        setSelectedOrder((current) => (current ? merged.find((order) => order.id === current.id) ?? scoped[0] ?? null : scoped[0] ?? null));
+      }
       try {
         const snapshot = await getReferenceData();
         if (snapshot.products?.length) setProducts(snapshot.products as Product[]);
