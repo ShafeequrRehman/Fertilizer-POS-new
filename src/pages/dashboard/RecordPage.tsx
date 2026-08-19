@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
 import { fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory, updateOrder } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
+import { getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, filterOrdersInBusinessWindows, getSessionDateKey, useShopSession } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
@@ -10,9 +11,46 @@ import { useNetworkStatus } from '@/lib/network-status';
 import { getLocalHubStartDiagnostics, pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub, saveOrderEditOffline } from '@/lib/offline-order-helpers';
 import { triggerBackgroundSync } from '@/lib/offline-sync';
-import { ToastLike } from '@/lib/print-notify';
+import { reportPrintOutcome, ToastLike } from '@/lib/print-notify';
 import { useToast } from '@/lib/toast';
 import CancelOrderModal from '@/components/CancelOrderModal';
+import { downloadExcelWorkbook, ExcelCell, ExcelCellStyle, ExcelSheet } from '@/lib/excel-export';
+
+type ElectronWindow = Window & typeof globalThis & {
+  require?: (moduleName: 'electron') => {
+    ipcRenderer: {
+      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    };
+  };
+};
+
+// Same direct-IPC-else-fallback-page pattern as SalesPage.tsx's own
+// printCustomerReceipt - prints on this till's own counter printer
+// immediately if one's configured, otherwise opens the Manual Print
+// Center page. A free function (not a hook) since CompleteOrderModal is
+// the only place in this file that ever needs it.
+function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: ToastLike, setPrintReadyUrl: (url: string | null) => void) {
+  const settings = getStoreSettings();
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (isElectron && settings && settings.counterPrinter) {
+    try {
+      const electronRequire = (window as ElectronWindow).require;
+      const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
+      if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
+      const printLogo = localStorage.getItem('preferred-print-logo');
+      const receiptData = { ...order, previousDues: customerDue };
+      reportPrintOutcome(
+        ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
+        'Customer receipt',
+        toast,
+      );
+    } catch {
+      setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+    }
+  } else {
+    setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+  }
+}
 
 type StatusFilter = 'All' | 'pending' | 'completed' | 'paid' | 'cancelled';
 type SearchField = 'all' | 'name' | 'phone' | 'orderId';
@@ -58,6 +96,13 @@ export default function RecordPage() {
   const { session: cachedShopSession } = useShopSession();
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
+  // The hidden auto-print iframe for CompleteOrderModal's receipt
+  // auto-print - kept up here (not inside the modal) since the modal
+  // closes itself the instant completion succeeds, which would tear down
+  // the iframe before PrintOrderPage.tsx inside it ever got to actually
+  // call window.print() if it lived there instead. Same pattern as
+  // SalesPage.tsx's own printReadyUrl.
+  const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   // Full shift history (up to the last 60 shifts, per the backend) - needed
   // so the date-range picker can find EVERY shift that opened on a picked
   // date, not just whatever the current/latest shift happens to be. Cloud-
@@ -346,6 +391,182 @@ export default function RecordPage() {
     URL.revokeObjectURL(url);
   }
 
+  // "Beautifully designed" Excel workbook: a colour-coded Summary sheet
+  // (totals + category rollup), one sheet per product category (Pizza,
+  // Drinks, ...) each listing that category's own items, and a full
+  // All Orders sheet - all scoped to the exact same window (current shift,
+  // or the picked date range) that the rest of this page already uses via
+  // dayOrders/filteredOrders. Built on the dependency-free SpreadsheetML
+  // exporter in @/lib/excel-export (see that file's header comment for why
+  // this doesn't just use a library like exceljs).
+  function exportExcel() {
+    const rangeLabel = isCustomRange ? `${rangeFrom} to ${rangeTo}` : 'Current Shift';
+    const MONEY_FORMAT = '"Rs "#,##0';
+
+    const titleStyle: ExcelCellStyle = { bold: true, fontSize: 14 };
+    const subtitleStyle: ExcelCellStyle = { color: '6B7280' };
+    const headerStyle: ExcelCellStyle = { bold: true, bg: '1F2937', color: 'FFFFFF', align: 'Center' };
+    const statLabelStyle: ExcelCellStyle = { bold: true, bg: 'EEF2FF', color: '3730A3' };
+    const subtotalStyle: ExcelCellStyle = { bold: true, bg: 'F3F4F6', borderBottom: true };
+    const moneyStyle: ExcelCellStyle = { format: MONEY_FORMAT, borderBottom: true };
+    const plainStyle: ExcelCellStyle = { borderBottom: true };
+    const moneyBoldStyle: ExcelCellStyle = { format: MONEY_FORMAT, bold: true, bg: 'F3F4F6', borderBottom: true };
+
+    const sheets: ExcelSheet[] = [];
+
+    // Group itemSales by their resolved category once, reused below by both
+    // the Summary sheet's item-wise section and the per-category sheets.
+    // itemSales is already sorted revenue-desc, so each bucket comes out
+    // revenue-desc too (filtering a sorted list preserves relative order) -
+    // no need to re-sort per category.
+    const itemsByCategory = new Map<string, typeof itemSales>();
+    itemSales.forEach((item) => {
+      const category =
+        categoryByItem.get(`${item.name}::${item.variation}`) ||
+        categoryByItem.get(item.name) ||
+        'Uncategorized';
+      if (!itemsByCategory.has(category)) itemsByCategory.set(category, []);
+      itemsByCategory.get(category)!.push(item);
+    });
+
+    // --- Summary sheet: category-wise sale on top, item-wise sale below ---
+    // Category-wise here is a genuine rollup - e.g. "Pizza" is the combined
+    // total of every pizza product (Special Pizza, Supreme Pizza, ...), one
+    // row, not split apart. The item-wise section underneath is where those
+    // individual products are broken out, each tagged with its category so
+    // it's clear they all belong to that one combined total above.
+    const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
+    const totalCategoryRevenue = categorySales.reduce((sum, c) => sum + c.revenue, 0);
+    const summaryRows: ExcelCell[][] = [
+      [{ value: 'Sales Record', style: titleStyle }],
+      [{ value: rangeLabel, style: subtitleStyle }],
+      [],
+      [
+        { value: 'Total Orders', style: statLabelStyle },
+        { value: 'Total Sales', style: statLabelStyle },
+        { value: 'Paid', style: statLabelStyle },
+        { value: 'Remaining', style: statLabelStyle },
+      ],
+      [
+        { value: orderStats.totalOrders },
+        { value: orderStats.totalAmount, style: moneyStyle },
+        { value: orderStats.paidAmount, style: moneyStyle },
+        { value: orderStats.remainingAmount, style: moneyStyle },
+      ],
+      [],
+      [{ value: 'Category-wise Sale', style: titleStyle }],
+      [
+        { value: 'Category', style: headerStyle },
+        { value: 'Qty Sold', style: headerStyle },
+        { value: 'Revenue', style: headerStyle },
+      ],
+      ...categorySales.map((c): ExcelCell[] => [
+        { value: c.category, style: plainStyle },
+        { value: c.qty, style: plainStyle },
+        { value: c.revenue, style: moneyStyle },
+      ]),
+      [
+        { value: 'Grand Total', style: subtotalStyle },
+        { value: totalCategoryQty, style: subtotalStyle },
+        { value: totalCategoryRevenue, style: moneyBoldStyle },
+      ],
+      [],
+      [{ value: 'Item-wise Sale', style: titleStyle }],
+      [
+        { value: 'Category', style: headerStyle },
+        { value: 'Item', style: headerStyle },
+        { value: 'Variation', style: headerStyle },
+        { value: 'Qty Sold', style: headerStyle },
+        { value: 'Revenue', style: headerStyle },
+      ],
+      ...categorySales.flatMap((catSummary): ExcelCell[][] =>
+        (itemsByCategory.get(catSummary.category) || []).map((item): ExcelCell[] => [
+          { value: catSummary.category, style: plainStyle },
+          { value: item.name, style: plainStyle },
+          { value: item.variation || '-', style: plainStyle },
+          { value: item.qty, style: plainStyle },
+          { value: item.revenue, style: moneyStyle },
+        ]),
+      ),
+      [
+        { value: 'Grand Total', style: subtotalStyle },
+        { value: '', style: subtotalStyle },
+        { value: '', style: subtotalStyle },
+        { value: totalCategoryQty, style: subtotalStyle },
+        { value: totalCategoryRevenue, style: moneyBoldStyle },
+      ],
+    ];
+    sheets.push({ name: 'Summary', columnWidths: [140, 180, 100, 80, 100], rows: summaryRows });
+
+    // --- One sheet per category: the combined category total sits at the
+    // top (so it reads as one figure for the whole category, e.g. Pizza),
+    // then every item that rolls up into it is listed below.
+    categorySales.forEach((catSummary) => {
+      const items = itemsByCategory.get(catSummary.category) || [];
+      const rows: ExcelCell[][] = [
+        [{ value: catSummary.category, style: titleStyle }],
+        [],
+        [
+          { value: 'Total Qty Sold', style: statLabelStyle },
+          { value: 'Total Revenue', style: statLabelStyle },
+        ],
+        [
+          { value: catSummary.qty, style: moneyBoldStyle },
+          { value: catSummary.revenue, style: moneyBoldStyle },
+        ],
+        [],
+        [
+          { value: 'Item', style: headerStyle },
+          { value: 'Variation', style: headerStyle },
+          { value: 'Qty Sold', style: headerStyle },
+          { value: 'Revenue', style: headerStyle },
+        ],
+        ...items.map((item): ExcelCell[] => [
+          { value: item.name, style: plainStyle },
+          { value: item.variation || '-', style: plainStyle },
+          { value: item.qty, style: plainStyle },
+          { value: item.revenue, style: moneyStyle },
+        ]),
+      ];
+      sheets.push({ name: catSummary.category, columnWidths: [180, 120, 90, 100], rows });
+    });
+
+    // --- All Orders sheet (mirrors Export CSV's columns) ---
+    const orderRows: ExcelCell[][] = [
+      ['Order ID', 'Date', 'Time', 'Customer', 'Phone', 'Type', 'Status', 'Total', 'Paid', 'Remaining'].map(
+        (h): ExcelCell => ({ value: h, style: headerStyle }),
+      ),
+      ...filteredOrders.map((order): ExcelCell[] => {
+        const createdAt = new Date(order.createdAt);
+        const customerName =
+          order.orderType === 'DineIn'
+            ? order.table
+              ? `Table ${order.table}`
+              : 'Dine-In Customer'
+            : order.customer?.name || 'Walk-in Customer';
+        return [
+          { value: `#${order.dailyOrderNumber ?? order.id.slice(-4)}`, style: plainStyle },
+          { value: createdAt.toLocaleDateString('en-CA'), style: plainStyle },
+          { value: createdAt.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }), style: plainStyle },
+          { value: customerName, style: plainStyle },
+          { value: order.customer?.phone || '', style: plainStyle },
+          { value: order.orderType, style: plainStyle },
+          { value: order.status, style: plainStyle },
+          { value: order.total, style: moneyStyle },
+          { value: order.paidAmount ?? 0, style: moneyStyle },
+          { value: order.remainingAmount ?? 0, style: moneyStyle },
+        ];
+      }),
+    ];
+    sheets.push({
+      name: 'All Orders',
+      columnWidths: [70, 80, 70, 140, 100, 80, 80, 80, 80, 80],
+      rows: orderRows,
+    });
+
+    downloadExcelWorkbook(sheets, `record_${isCustomRange ? `${rangeFrom}_to_${rangeTo}` : 'current-shift'}.xls`);
+  }
+
   const counts = useMemo(() => {
     // Pending is intentionally the unbounded, always-current count (see
     // allPendingOrders above) rather than dayOrders' shift-scoped one - so
@@ -471,14 +692,24 @@ export default function RecordPage() {
                 : 'No shift recorded yet. Open the shop to start today\'s record.'}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={exportCsv}
-          disabled={filteredOrders.length === 0}
-          className="flex items-center gap-2 rounded-full bg-[#D6E332] px-4 py-2 text-xs font-black text-gray-900 shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Download size={14} /> Export CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={exportExcel}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download size={14} /> Export Excel
+          </button>
+          <button
+            type="button"
+            onClick={exportCsv}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-2 rounded-full bg-[#D6E332] px-4 py-2 text-xs font-black text-gray-900 shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download size={14} /> Export CSV
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
@@ -572,9 +803,52 @@ export default function RecordPage() {
 
       <div className="overflow-hidden rounded-[20px] bg-white shadow-sm">
         <div className="border-b border-gray-100 px-5 py-3">
+          <h2 className="text-sm font-black text-gray-900">Category Sales</h2>
+          <p className="text-[11px] font-semibold text-gray-400">
+            Combined quantity and revenue per category (e.g. every Pizza item counted as one Pizza total) for{' '}
+            {isCustomRange ? 'the selected range' : 'this shift'}.
+          </p>
+        </div>
+        {categorySales.length === 0 ? (
+          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
+        ) : (
+          <div>
+            <div className="hidden grid-cols-[1.5fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
+              <span>Category</span>
+              <span>Qty Sold</span>
+              <span>Revenue</span>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {visibleCategorySales.map((entry) => (
+                <div
+                  key={entry.category}
+                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.7fr_0.9fr] sm:items-center"
+                >
+                  <span className="font-bold text-gray-800">{entry.category}</span>
+                  <span className="font-semibold text-gray-700">{entry.qty}</span>
+                  <span className="font-black text-emerald-600">Rs {entry.revenue}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {categorySales.length > visibleCategorySales.length ? (
+          <div className="flex justify-center border-t border-gray-100 py-3">
+            <button
+              type="button"
+              onClick={() => setVisibleCategorySalesCount((previous) => previous + 10)}
+              className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
+            >
+              Load More ({categorySales.length - visibleCategorySales.length} more)
+            </button>
+          </div>
+        ) : null}
+
+        <div className="border-t border-gray-100 px-5 py-3">
           <h2 className="text-sm font-black text-gray-900">Item Sales</h2>
           <p className="text-[11px] font-semibold text-gray-400">
-            Quantity sold and revenue per item for {isCustomRange ? 'the selected range' : 'this shift'}.
+            Quantity sold and revenue per item (the breakdown behind each category total above) for{' '}
+            {isCustomRange ? 'the selected range' : 'this shift'}.
           </p>
         </div>
         {itemSales.length === 0 ? (
@@ -613,47 +887,6 @@ export default function RecordPage() {
             </button>
           </div>
         ) : null}
-
-        <div className="border-t border-gray-100 px-5 py-3">
-          <h2 className="text-sm font-black text-gray-900">Category Sales</h2>
-          <p className="text-[11px] font-semibold text-gray-400">
-            Total quantity and revenue per category for {isCustomRange ? 'the selected range' : 'this shift'}.
-          </p>
-        </div>
-        {categorySales.length === 0 ? (
-          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
-        ) : (
-          <div>
-            <div className="hidden grid-cols-[1.5fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
-              <span>Category</span>
-              <span>Qty Sold</span>
-              <span>Revenue</span>
-            </div>
-            <div className="divide-y divide-gray-100">
-              {visibleCategorySales.map((entry) => (
-                <div
-                  key={entry.category}
-                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.7fr_0.9fr] sm:items-center"
-                >
-                  <span className="font-bold text-gray-800">{entry.category}</span>
-                  <span className="font-semibold text-gray-700">{entry.qty}</span>
-                  <span className="font-black text-emerald-600">Rs {entry.revenue}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {categorySales.length > visibleCategorySales.length ? (
-          <div className="flex justify-center border-t border-gray-100 py-3">
-            <button
-              type="button"
-              onClick={() => setVisibleCategorySalesCount((previous) => previous + 10)}
-              className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
-            >
-              Load More ({categorySales.length - visibleCategorySales.length} more)
-            </button>
-          </div>
-        ) : null}
       </div>
 
       <div className="overflow-hidden rounded-[28px] bg-white shadow-sm">
@@ -676,7 +909,14 @@ export default function RecordPage() {
         ) : (
           <div className="divide-y divide-gray-100">
             {visibleOrders.map((order) => (
-              <RecordRow key={order.id} order={order} onView={() => setViewOrder(order)} onComplete={() => setCompleteOrderTarget(order)} />
+              <RecordRow
+                key={order.id}
+                order={order}
+                onView={() => setViewOrder(order)}
+                onComplete={() => setCompleteOrderTarget(order)}
+                toast={toast}
+                setPrintReadyUrl={setPrintReadyUrl}
+              />
             ))}
           </div>
         )}
@@ -714,13 +954,27 @@ export default function RecordPage() {
           toast={toast}
           onClose={() => setCompleteOrderTarget(null)}
           onCompleted={handleOrderCompleted}
+          setPrintReadyUrl={setPrintReadyUrl}
         />
       ) : null}
+      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
     </div>
   );
 }
 
-function RecordRow({ order, onView, onComplete }: { order: SavedOrder; onView: () => void; onComplete: () => void }) {
+function RecordRow({
+  order,
+  onView,
+  onComplete,
+  toast,
+  setPrintReadyUrl,
+}: {
+  order: SavedOrder;
+  onView: () => void;
+  onComplete: () => void;
+  toast: ToastLike;
+  setPrintReadyUrl: (url: string | null) => void;
+}) {
   const time = new Date(order.createdAt).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' });
   // A shift can run past midnight, so a bare time ("11:42 PM") is ambiguous
   // once a date range spans more than one day - the date underneath makes
@@ -779,13 +1033,20 @@ function RecordRow({ order, onView, onComplete }: { order: SavedOrder; onView: (
         >
           <Eye size={13} />
         </button>
-        <Link
-          to={`/dashboard/sales/print/${order.id}`}
+        <button
+          type="button"
+          // Direct-IPC-else-fallback-page, same as everywhere else - prints
+          // immediately on this till's own counter printer instead of
+          // always routing through the Manual Print Center page just to
+          // print something this till can already print itself. Manual
+          // Print Center is still what opens as the fallback when there's
+          // no configured printer / this isn't the Electron app.
+          onClick={() => printCustomerReceipt(order, 0, toast, setPrintReadyUrl)}
           title="Print receipt"
           className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
         >
           <Printer size={13} />
-        </Link>
+        </button>
       </div>
     </div>
   );
@@ -952,12 +1213,14 @@ function CompleteOrderModal({
   toast,
   onClose,
   onCompleted,
+  setPrintReadyUrl,
 }: {
   order: SavedOrder;
   isOnline: boolean;
   toast: ToastLike;
   onClose: () => void;
   onCompleted: (updated: SavedOrder) => void;
+  setPrintReadyUrl: (url: string | null) => void;
 }) {
   const [paymentAmount, setPaymentAmount] = useState('');
   const [customerDue, setCustomerDue] = useState(0);
@@ -1034,13 +1297,19 @@ function CompleteOrderModal({
       if (localFirst) {
         // Always local-first, online or not - queues to the Local Hub and
         // returns instantly instead of waiting on a live cloud round trip
-        // (see SalesPage.tsx's saveUpdate for the same pattern). No order
-        // type auto-prints its customer receipt at completion, here or
-        // anywhere else - available on demand only, via the printer icon.
-        // `false` as receiptPrinted below keeps customerReceiptPrintedAt
-        // unset so that on-demand print stays available once this syncs.
+        // (see SalesPage.tsx's saveUpdate for the same pattern). `false` as
+        // receiptPrinted below keeps customerReceiptPrintedAt unset so the
+        // printer icon still works as an on-demand reprint even after the
+        // auto-print just below.
         const updated = await saveOrderEditOffline(order, payload, false, false);
         triggerBackgroundSync();
+        // Auto-print the customer receipt the instant this order completes
+        // - fires for every order type (DineIn/TakeAway/Delivery all start
+        // pending and only ever complete through this same action) - see
+        // SalesPage.tsx's completeOrder for the full reasoning.
+        if (!updated.customerReceiptPrintedAt) {
+          printCustomerReceipt(updated, customerDue, toast, setPrintReadyUrl);
+        }
         toast.success(`Order completed. ${trulyOffline ? 'Will sync once back online.' : 'Syncing to the cloud...'}`);
         onCompleted(updated);
         return;
@@ -1049,10 +1318,9 @@ function CompleteOrderModal({
       // Only ever reached from a plain browser tab now (no Local Hub to
       // queue into).
       const updated = await updateOrder(order.id, payload);
-      // Same "never auto-print the receipt" rule as the local-first branch
-      // above - Record's Complete Order exists to quickly settle a hard-
-      // to-find old order, not to also handle printing; the printer icon
-      // next to every row still opens the manual print page on demand.
+      if (!updated.customerReceiptPrintedAt) {
+        printCustomerReceipt(updated, customerDue, toast, setPrintReadyUrl);
+      }
       toast.success('Order completed.');
       onCompleted(updated);
     } catch (err) {

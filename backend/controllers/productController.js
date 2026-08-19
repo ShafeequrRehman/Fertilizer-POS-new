@@ -23,7 +23,7 @@ exports.getProducts = async (req, res) => {
 };
 
 exports.getProduct = async (req, res) => {
-  const product = await Product.findOne({ _id: req.params.id, ...shopScope(req) });
+  const product = await Product.findOne({ _id: req.params.id, ...shopScope(req) }).lean();
   if (!product) {
     return res.status(404).json({ error: "Product not found" });
   }

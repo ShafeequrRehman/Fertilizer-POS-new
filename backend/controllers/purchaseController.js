@@ -9,7 +9,7 @@ exports.getPurchases = async (req, res) => {
 };
 
 exports.getPurchase = async (req, res) => {
-  const purchase = await Purchase.findOne({ _id: req.params.id, ...shopScope(req) }).populate("supplierId", "name phone");
+  const purchase = await Purchase.findOne({ _id: req.params.id, ...shopScope(req) }).populate("supplierId", "name phone").lean();
   if (!purchase) return res.status(404).json({ error: "Purchase not found" });
   res.json(purchase);
 };

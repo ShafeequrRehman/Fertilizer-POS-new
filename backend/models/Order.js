@@ -152,4 +152,16 @@ orderSchema.index({ shopId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ shopId: 1, kitchenPrintedAt: 1, createdAt: 1 });
 orderSchema.index({ shopId: 1, "pendingKitchenUpdate.queuedAt": 1 });
 
+// customerController.js's getCustomerOutstanding (called by SalesPage.tsx's
+// loadDue effect every time a cashier selects an order that has a customer
+// phone number - a very frequent, real-time interaction, not a periodic
+// poll) filters by {shopId, "customer.phone"} - as do settleCustomerDues and
+// the completeAndSettle dues cascade in orderController.js. None of those
+// were covered by an index, same missing-index problem as the two indexes
+// above: the matched result is small (one customer's orders), but finding
+// it still meant scanning every order this shop has ever had, and that
+// scan cost grows with the shop's total order history - felt as "selecting
+// an order with a phone number feels slower over time."
+orderSchema.index({ shopId: 1, "customer.phone": 1 });
+
 module.exports = mongoose.model("Order", orderSchema);

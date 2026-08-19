@@ -7,7 +7,7 @@ exports.getSuppliers = async (req, res) => {
 };
 
 exports.getSupplier = async (req, res) => {
-  const supplier = await Supplier.findOne({ _id: req.params.id, ...shopScope(req) });
+  const supplier = await Supplier.findOne({ _id: req.params.id, ...shopScope(req) }).lean();
   if (!supplier) return res.status(404).json({ error: "Supplier not found" });
   res.json(supplier);
 };

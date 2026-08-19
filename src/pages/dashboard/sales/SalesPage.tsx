@@ -681,6 +681,36 @@ export default function SalesPage() {
     return updated;
   }
 
+  // Same direct-IPC-else-fallback-page pattern used everywhere else in this
+  // file - prints on this till's own counter printer immediately if one's
+  // configured, otherwise opens the Manual Print Center page. Shared by the
+  // on-demand Print Receipt button below and completeOrder's own
+  // auto-print, so both ever only have one real implementation.
+  function printCustomerReceipt(order: SavedOrder) {
+    const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+    if (isElectron && settings && settings.counterPrinter) {
+      try {
+        const electronRequire = (window as ElectronWindow).require;
+        const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
+        if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
+        const printLogo = localStorage.getItem('preferred-print-logo');
+        // customerDue mirrors the "Previous Dues" figure shown on screen,
+        // same as every other cashier receipt print in this file, so the
+        // printed receipt always matches what the cashier saw.
+        const receiptData = { ...order, previousDues: customerDue };
+        reportPrintOutcome(
+          ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
+          'Customer receipt',
+          toast,
+        );
+      } catch {
+        setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+      }
+    } else {
+      setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+    }
+  }
+
   async function completeOrder(full: boolean) {
     if (!selectedOrder) return;
     const paid = full ? payable : Number(paymentAmount || 0);
@@ -718,6 +748,22 @@ export default function SalesPage() {
     // applies what's left to this order - see orderController.updateOrder.
     const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, discount: discountForOrder });
     if (!updated) return;
+    // Auto-print the customer receipt the instant the order completes,
+    // same till, same click - no background watcher involved (there used
+    // to be one, sibling to KitchenPrintWatcher, removed entirely - see
+    // DashboardShell.tsx's comment on why). Fires for every order type -
+    // DineIn, TakeAway, Delivery - all of them start "pending" and only
+    // ever reach "completed" through this same action (see POSPage.tsx's
+    // createOrder call, which always sends status: 'pending' regardless of
+    // orderType; TakeAway's old placement-time receipt print was removed
+    // entirely - see POSPage.tsx's own comment on why). The
+    // customerReceiptPrintedAt guard is defense-in-depth for if a receipt
+    // somehow already got marked printed some other way - printCustomerReceipt
+    // itself never sets it, so the button/printer icon stay available for a
+    // reprint regardless.
+    if (!updated.customerReceiptPrintedAt) {
+      printCustomerReceipt(updated);
+    }
     // Fire-and-forget: the order is already durably saved locally by
     // saveUpdate above, and this is a PDF render (Electron IPC) plus a
     // WhatsApp cloud send - a couple of seconds combined that the cashier
@@ -966,37 +1012,7 @@ export default function SalesPage() {
                         setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=kitchen`);
                       }
                     }} className="rounded-2xl bg-black px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white disabled:opacity-50">Send to Kitchen</button>
-                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => {
-                      // Same direct-IPC-else-fallback-page pattern as Send to
-                      // Kitchen above - prints immediately on this till's own
-                      // counter printer with no dependency on the internet,
-                      // rather than only ever being reachable through the
-                      // generic Manual Print Center page (the plain printer
-                      // icon link just below).
-                      const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
-                      if (isElectron && settings && settings.counterPrinter) {
-                        try {
-                          const electronRequire = (window as ElectronWindow).require;
-                          const { ipcRenderer } = electronRequire ? electronRequire('electron') : { ipcRenderer: null };
-                          if (!ipcRenderer) throw new Error('Electron IPC is unavailable.');
-                          const printLogo = localStorage.getItem('preferred-print-logo');
-                          // customerDue mirrors the "Previous Dues" figure
-                          // shown on screen, same as every other cashier
-                          // receipt print in this file, so the printed
-                          // receipt always matches what the cashier saw.
-                          const receiptData = { ...selectedOrder, previousDues: customerDue };
-                          reportPrintOutcome(
-                            ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
-                            'Customer receipt',
-                            toast,
-                          );
-                        } catch {
-                          setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=cashier`);
-                        }
-                      } else {
-                        setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=cashier`);
-                      }
-                    }} className="rounded-2xl bg-[#F6F7FB] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">Print Receipt</button>
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => printCustomerReceipt(selectedOrder)} className="rounded-2xl bg-[#F6F7FB] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">Print Receipt</button>
                     <Link to={`/dashboard/sales/print/${selectedOrder.id}`} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><Printer size={16} /></Link>
                     <button type="button" onClick={() => void refreshOne(selectedOrder.id)} className="rounded-2xl bg-[#F6F7FB] p-2.5 text-gray-500"><RefreshCcw size={16} /></button>
                     {selectedOrder.status === 'pending' ? (

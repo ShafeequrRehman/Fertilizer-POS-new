@@ -46,7 +46,7 @@ exports.createEmployee = async (req, res) => {
       return res.status(400).json({ message: "username, password, and roleId are required", reason: "validation_error" });
     }
 
-    const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId });
+    const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId }).lean();
     if (!role) {
       return res.status(400).json({ message: "Role not found for this shop", reason: "role_not_found" });
     }
@@ -63,7 +63,7 @@ exports.createEmployee = async (req, res) => {
       }
     }
 
-    const existingUsername = await User.findOne({ username });
+    const existingUsername = await User.findOne({ username }).lean();
     if (existingUsername) {
       return res.status(400).json({ message: "That username is already taken", reason: "username_taken" });
     }
@@ -104,7 +104,7 @@ exports.updateEmployee = async (req, res) => {
     } = req.body;
 
     if (username && username !== employee.username) {
-      const clash = await User.findOne({ username, _id: { $ne: employee._id } });
+      const clash = await User.findOne({ username, _id: { $ne: employee._id } }).lean();
       if (clash) return res.status(400).json({ message: "That username is already taken", reason: "username_taken" });
       employee.username = username;
     }
@@ -120,7 +120,7 @@ exports.updateEmployee = async (req, res) => {
     if (monthlySalary !== undefined) employee.monthlySalary = Number(monthlySalary) || 0;
 
     if (roleId) {
-      const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId });
+      const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId }).lean();
       if (!role) return res.status(400).json({ message: "Role not found for this shop", reason: "role_not_found" });
       employee.employeeRoleId = role._id;
     }

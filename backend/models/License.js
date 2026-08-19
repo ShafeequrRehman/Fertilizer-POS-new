@@ -39,8 +39,17 @@ const licenseSchema = new mongoose.Schema(
 // requiring a background job - `isExpired()` is checked at login time and
 // on every protected shop-data request (see middleware/requireLicenseValid.js).
 licenseSchema.methods.isExpired = function isExpired() {
-  if (this.status === "suspended") return true;
-  return this.expiryDate.getTime() < Date.now();
+  return isLicenseExpired(this);
 };
 
+// Plain-object version of the same check, for callers that intentionally
+// use .lean() (a real hot path - see requireLicenseValid.js) and so never
+// get a real Document with the schema method above. Kept in sync with the
+// method by construction - the method just delegates to this now.
+function isLicenseExpired(license) {
+  if (license.status === "suspended") return true;
+  return new Date(license.expiryDate).getTime() < Date.now();
+}
+
 module.exports = mongoose.model("License", licenseSchema);
+module.exports.isLicenseExpired = isLicenseExpired;

@@ -7,7 +7,7 @@ exports.getExpenses = async (req, res) => {
 };
 
 exports.getExpense = async (req, res) => {
-  const expense = await Expense.findOne({ _id: req.params.id, ...shopScope(req) });
+  const expense = await Expense.findOne({ _id: req.params.id, ...shopScope(req) }).lean();
   if (!expense) return res.status(404).json({ error: "Expense not found" });
   res.json(expense);
 };

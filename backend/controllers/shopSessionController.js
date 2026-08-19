@@ -51,7 +51,7 @@ function summarizeOrders(orders) {
 exports.getCurrent = async (req, res) => {
   try {
     const { shopId } = shopScope(req);
-    const session = await ShopSession.findOne({ shopId, status: "open" }).sort({ openedAt: -1 });
+    const session = await ShopSession.findOne({ shopId, status: "open" }).sort({ openedAt: -1 }).lean();
 
     // Tr# (see models/Order.js's shopSequenceNumber) - the shop's
     // permanent, never-resetting order count, unlike session.orderCounter
@@ -77,7 +77,7 @@ exports.getCurrent = async (req, res) => {
 
     res.json({
       isOpen: true,
-      session: { ...session.toObject(), id: String(session._id), liveSummary },
+      session: { ...session, id: String(session._id), liveSummary },
       shopSequenceCounter,
     });
   } catch (error) {
@@ -90,7 +90,7 @@ exports.openSession = async (req, res) => {
   try {
     const { shopId } = shopScope(req);
 
-    const existing = await ShopSession.findOne({ shopId, status: "open" });
+    const existing = await ShopSession.findOne({ shopId, status: "open" }).lean();
     if (existing) {
       return res.status(409).json({ error: "The shop is already open." });
     }

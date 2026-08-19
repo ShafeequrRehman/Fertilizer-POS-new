@@ -122,14 +122,6 @@ function buildShopScope(req) {
 }
 
 exports.getOrders = async (req, res) => {
-  // TEMPORARY DEBUG TIMING - see requireLicenseValid.js's matching
-  // instrumentation. Isolates how long the actual Mongo query + response
-  // serialization take here, separate from whatever requireLicenseValid
-  // (which runs before this handler even starts) already logged - together
-  // these two log lines account for the full request lifecycle and pin
-  // down exactly which part of it is eating the frontend's 8-second budget.
-  // Remove once the /api/orders timeout investigation is resolved.
-  const _debugStart = Date.now();
   try {
     const query = buildShopScope(req);
     // Optional status filter, most importantly `status=pending` combined
@@ -210,7 +202,6 @@ exports.getOrders = async (req, res) => {
     // on its action buttons, which exist specifically so a save can never
     // go out with a stale/empty items array.
     if (req.query.list === "true") {
-      const _dbStart = Date.now();
       const matchQuery = { ...query };
       // Aggregation's $match does NOT get Mongoose's usual auto-casting -
       // shopId comes from the JWT as a plain string (see tokenService.js),
@@ -261,9 +252,7 @@ exports.getOrders = async (req, res) => {
           },
         },
       ]);
-      const _dbDone = Date.now();
       const result = orders.map((order) => ({ ...order, id: String(order._id), items: [] }));
-      console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} list=true query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
       return res.json(result);
     }
 
@@ -271,13 +260,10 @@ exports.getOrders = async (req, res) => {
       ? "status total createdAt customer.phone waiter"
       : null;
 
-    const _dbStart = Date.now();
     let ordersQuery = Order.find(query).sort({ createdAt: -1 });
     if (projection) ordersQuery = ordersQuery.select(projection);
     const orders = await ordersQuery.lean();
-    const _dbDone = Date.now();
     const result = orders.map((order) => ({ ...order, id: String(order._id) }));
-    console.log(`[getOrders][DEBUG] shop=${req.user?.shopId} summary=${!!projection} query=${JSON.stringify(query)} count=${orders.length} - query took ${_dbDone - _dbStart}ms, map+serialize took ${Date.now() - _dbDone}ms, total handler ${Date.now() - _debugStart}ms`);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -289,11 +275,11 @@ exports.getOrder = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(404).json({ error: "Order not found" });
     }
-    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
+    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) }).lean();
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
     }
-    res.json({ ...order.toObject(), id: String(order._id) });
+    res.json({ ...order, id: String(order._id) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -331,7 +317,7 @@ exports.createOrder = async (req, res) => {
     if (requestedNumber > 0) {
       const openSessionBefore = await ShopSession.findOne(
         { ...buildShopScope(req), status: "open" }
-      ).sort({ openedAt: 1 });
+      ).sort({ openedAt: 1 }).lean();
       if (!openSessionBefore) {
         return res.status(409).json({ error: "The shop is closed. Open the shop before taking new orders.", reason: "shop_closed" });
       }
@@ -339,7 +325,7 @@ exports.createOrder = async (req, res) => {
         ...buildShopScope(req),
         dailyOrderNumber: requestedNumber,
         createdAt: { $gte: openSessionBefore.openedAt },
-      });
+      }).lean();
       if (!collision) {
         openSession = await ShopSession.findOneAndUpdate(
           { _id: openSessionBefore._id },
@@ -384,7 +370,7 @@ exports.createOrder = async (req, res) => {
       const sequenceCollision = await Order.findOne({
         ...buildShopScope(req),
         shopSequenceNumber: requestedSequenceNumber,
-      });
+      }).lean();
       if (!sequenceCollision) {
         await Shop.findOneAndUpdate(
           { _id: req.user.shopId },
@@ -415,9 +401,9 @@ exports.createOrder = async (req, res) => {
     // the same trade-off already made for a plain dropped request.
     const requestClientSyncId = payload.clientSyncId || payload.orderId || "";
     if (requestClientSyncId) {
-      const existing = await Order.findOne({ clientSyncId: requestClientSyncId, ...buildShopScope(req) });
+      const existing = await Order.findOne({ clientSyncId: requestClientSyncId, ...buildShopScope(req) }).lean();
       if (existing) {
-        return res.json({ ...existing.toObject(), id: String(existing._id) });
+        return res.json({ ...existing, id: String(existing._id) });
       }
     }
 
@@ -535,7 +521,7 @@ exports.importOfflineOrders = async (req, res) => {
 
       try {
         if (clientSyncId) {
-          const existing = await Order.findOne({ clientSyncId, ...buildShopScope(req) });
+          const existing = await Order.findOne({ clientSyncId, ...buildShopScope(req) }).lean();
           if (existing) {
             skipped.push({ localOrderId: entry.localOrderId, orderId: String(existing._id), dailyOrderNumber: existing.dailyOrderNumber });
             continue;
@@ -551,7 +537,7 @@ exports.importOfflineOrders = async (req, res) => {
         // needs openedAt before deciding how to allocate dailyOrderNumber.
         const openSessionBefore = await ShopSession.findOne(
           { ...buildShopScope(req), status: "open" }
-        ).sort({ openedAt: 1 });
+        ).sort({ openedAt: 1 }).lean();
         if (!openSessionBefore) {
           failed.push({ localOrderId: entry.localOrderId, error: "Shop is closed - open the shop to import queued offline orders." });
           continue;
@@ -586,7 +572,7 @@ exports.importOfflineOrders = async (req, res) => {
             ...buildShopScope(req),
             dailyOrderNumber: requestedNumber,
             createdAt: { $gte: openSessionBefore.openedAt },
-          });
+          }).lean();
           if (!collision) {
             openSession = await ShopSession.findOneAndUpdate(
               { _id: openSessionBefore._id },
@@ -621,7 +607,7 @@ exports.importOfflineOrders = async (req, res) => {
           const sequenceCollision = await Order.findOne({
             ...buildShopScope(req),
             shopSequenceNumber: requestedSequenceNumber,
-          });
+          }).lean();
           if (!sequenceCollision) {
             await Shop.findOneAndUpdate(
               { _id: req.user.shopId },
