@@ -10,6 +10,28 @@ const { escapeRegex } = require("../utils/escapeRegex");
 // up as a phantom "customer".
 const WALKIN_PHONE = "03000000000";
 
+// Every route below used to hand Mongoose documents/`.lean()` objects
+// straight to res.json(), which serialize with `_id`, never `id` - the
+// Customer model has no `toJSON: { virtuals: true }` set, so even
+// non-lean docs don't get the built-in `id` virtual for free. Both
+// frontends' Customer type declares `id` as required (pos-web/src/lib/
+// pos-types.ts, pos-mobile/src/types/models.ts) and use it as their React
+// list key and as the identifier passed back into updateCustomer(id, ...)
+// - with `id` always undefined, list keys collapsed to the same
+// `undefined` value (surfaced as the "each child in a list should have a
+// unique key" warning, most visibly on pos-mobile's DuesScreen where
+// LogBox shows it as a red-screen error) AND POSPage.tsx's "editing an
+// existing selected customer's details" flow silently no-opped, since its
+// `if (!selectedCustomerId || ...) return;` guard saw undefined and bailed
+// every time. This helper is the one place that now guarantees `id` is
+// always present - works on both lean plain objects and real Mongoose
+// documents. `/customers/ledger` (getCustomerLedger below) already built
+// its own response shape by hand and was never affected.
+function serializeCustomer(customer) {
+  const plain = typeof customer.toObject === "function" ? customer.toObject() : customer;
+  return { ...plain, id: String(plain._id) };
+}
+
 exports.searchCustomers = async (req, res) => {
   const query = String(req.query.q || "").trim();
   const searchBy = req.query.searchBy || "both";
@@ -39,20 +61,20 @@ exports.searchCustomers = async (req, res) => {
   if (filters.length) baseQuery.$or = filters;
 
   const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20).lean();
-  res.json(customers);
+  res.json(customers.map(serializeCustomer));
 };
 
 exports.getAllCustomers = async (req, res) => {
   // .lean() - read-only list (Ledger/Dues pages, customer lookup while
   // placing an order), same reasoning as productController.getProducts.
   const customers = await Customer.find({ ...shopScope(req) }).sort({ name: 1 }).lean();
-  res.json(customers);
+  res.json(customers.map(serializeCustomer));
 };
 
 
 exports.createCustomer = async (req, res) => {
   const customer = await Customer.create({ ...req.body, shopId: req.user.shopId });
-  res.status(201).json(customer);
+  res.status(201).json(serializeCustomer(customer));
 };
 
 exports.updateCustomer = async (req, res) => {
@@ -65,7 +87,7 @@ exports.updateCustomer = async (req, res) => {
   if (!customer) {
     return res.status(404).json({ error: "Customer not found" });
   }
-  res.json(customer);
+  res.json(serializeCustomer(customer));
 };
 
 // GET /api/customers/ledger
@@ -210,7 +232,7 @@ exports.updateCustomerDues = async (req, res) => {
     return res.status(404).json({ error: "Customer not found" });
   }
 
-  res.json(customer);
+  res.json(serializeCustomer(customer));
 };
 
 // POST /api/customers/:phone/settle-dues  body: { amount }

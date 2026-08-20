@@ -1,6 +1,20 @@
 import { getIpcRenderer } from './electron-bridge';
+import { getAuthUser, getAuthShop } from './auth';
 
 export type StoreSettings = {
+  // Computed fresh from the current login session on every getStoreSettings()
+  // call, NOT something a shop configures or that gets persisted to
+  // localStorage/disk - added specifically so main.js's print handlers
+  // (which only ever see whatever object is passed to
+  // ipcRenderer.invoke(...), i.e. this one) can reliably tell which shop is
+  // printing. businessEmail looked like the obvious field for this but
+  // defaults to a placeholder ("admin@vanguard.io") that most shops never
+  // touch, so a per-shop print-behavior check keyed on it silently never
+  // matched. loginUsername/shopName instead mirror exactly what the person
+  // actually typed to log in / their shop's registered name - both are
+  // required at signup/login, so unlike businessEmail they can't be blank.
+  loginUsername?: string;
+  shopName?: string;
   storeName: string;
   businessEmail: string;
   storeAddress: string;
@@ -84,15 +98,21 @@ export const defaultSettings: StoreSettings = {
 
 export function getStoreSettings(): StoreSettings {
   if (typeof window === 'undefined') return defaultSettings;
+  // Always computed fresh from the current session, never from whatever's
+  // saved in the settings blob below - see the type's own comment for why.
+  const sessionOverrides: Pick<StoreSettings, 'loginUsername' | 'shopName'> = {
+    loginUsername: getAuthUser()?.username || getAuthUser()?.email || '',
+    shopName: getAuthShop()?.name || '',
+  };
   try {
     const saved = localStorage.getItem('pos_store_settings');
     if (saved) {
-      return { ...defaultSettings, ...JSON.parse(saved) };
+      return { ...defaultSettings, ...JSON.parse(saved), ...sessionOverrides };
     }
   } catch (err) {
     console.error('Failed to load settings:', err);
   }
-  return defaultSettings;
+  return { ...defaultSettings, ...sessionOverrides };
 }
 
 export function saveStoreSettings(settings: StoreSettings) {

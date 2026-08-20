@@ -34,15 +34,34 @@ export default function KitchenKotReceipt({ order }: { order: SavedOrder }) {
   const totalQty = order.items.reduce((sum, item) => sum + item.quantity, 0);
   const cashierName = getAuthUser()?.name || getAuthUser()?.username || '';
 
+  // Scoped to this one shop only, per an explicit request not to change
+  // anything for other shops on the same shared codebase. Centering
+  // (margin: 0 auto) splits the 10mm of leftover width evenly on both
+  // sides, which pushes the whole content block 5mm rightward - on a
+  // printer narrower than expected that's 5mm of real content lost off
+  // the right edge for no reason. Left-flush keeps content as close to
+  // the paper's true left edge as possible, so a narrow printer only
+  // loses unused blank margin, never real content.
+  // Checks loginUsername/shopName, not businessEmail - see
+  // pos-settings.ts's comment on those fields for why (businessEmail
+  // defaults to a placeholder most shops never edit, so a check keyed on
+  // it silently never matched).
+  const shopHaystack = `${settings.loginUsername || ''} ${settings.shopName || ''} ${settings.businessEmail || ''}`.toLowerCase();
+  const isHeavenSlice = shopHaystack.includes('heavenslice') || shopHaystack.includes('heaven slice');
+  const receiptMargin = isHeavenSlice ? '0 8mm 0 2mm' : '0 auto';
+
   return (
-    <div className="thermal-receipt w-[72mm] max-w-[72mm] bg-white text-black font-mono text-[12px] leading-[15px] pb-2">
+    <div className="thermal-receipt w-[70mm] max-w-[70mm] bg-white text-black font-mono text-[12px] leading-[15px] pb-2">
+      {/* 70mm content inside an 80mm page - see ItemizedBillReceipt.tsx's
+          matching comment for why (bold text right up against the old
+          72mm edge was clipping on a real printout). */}
       <style dangerouslySetInnerHTML={{ __html: `
         .thermal-receipt { box-sizing: border-box; color: #000; overflow: visible; padding-top: 0; }
         .thermal-receipt * { box-sizing: border-box; }
         @media print {
           @page { margin: 0; size: 80mm auto; }
           html, body { width: 80mm; margin: 0; padding: 0; background: #fff; }
-          .thermal-receipt { width: 72mm !important; max-width: 72mm !important; margin: 0 auto !important; }
+          .thermal-receipt { width: 70mm !important; max-width: 70mm !important; margin: ${receiptMargin} !important; }
         }
       ` }} />
 
@@ -80,20 +99,20 @@ export default function KitchenKotReceipt({ order }: { order: SavedOrder }) {
         <div className="flex justify-between font-bold border-b border-black pb-0.5 mb-1">
           <span className="w-5 shrink-0">#</span>
           <span className="min-w-0 flex-1">Item Detail</span>
-          <span className="w-10 shrink-0 text-right">Qty</span>
+          <span className="w-10 shrink-0 text-right pr-[1mm]">Qty</span>
         </div>
         {order.items.map((item, idx) => (
           <div key={idx} className="mb-1.5">
             <div className="flex justify-between">
               <span className="w-5 shrink-0">{idx + 1}</span>
               <span className="min-w-0 flex-1 break-words pr-1 uppercase">{item.name}{item.variation ? ` (${item.variation})` : ''}</span>
-              <span className="w-10 shrink-0 text-right font-bold">{item.quantity}</span>
+              <span className="w-10 shrink-0 text-right font-bold pr-[1mm]">{item.quantity}</span>
             </div>
           </div>
         ))}
         <div className="border-t border-black mt-1 pt-1 flex justify-between font-bold">
           <span>Total:</span>
-          <span>{totalQty}</span>
+          <span className="pr-[1mm]">{totalQty}</span>
         </div>
       </div>
 

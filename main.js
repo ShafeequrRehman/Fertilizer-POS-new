@@ -619,6 +619,42 @@ if (!gotTheLock) {
   const RECEIPT_CONTENT_WIDTH_PT = mmToPt(68);
   const h = React.createElement;
 
+  // Scoped to this one shop only, per an explicit request not to change
+  // anything for other shops on the same shared codebase. Checks
+  // loginUsername/shopName (added to getStoreSettings()'s return
+  // specifically for this - see pos-settings.ts's comment) rather than
+  // businessEmail, which turned out to default to a placeholder
+  // ("admin@vanguard.io") most shops never edit - a check keyed on it
+  // silently never matched, which is why the first version of this fix had
+  // no visible effect at all. loginUsername/shopName instead mirror
+  // exactly what was typed to log in / the shop's registered name, both
+  // required fields that can't be blank.
+  function isHeavenSliceShop(settings) {
+    const haystack = `${settings?.loginUsername || ""} ${settings?.shopName || ""} ${settings?.businessEmail || ""}`.toLowerCase();
+    return haystack.includes("heavenslice") || haystack.includes("heaven slice");
+  }
+
+  // Heaven Slice's printers were still losing content on the right even
+  // after widening the safety margin, because the margin was split EVENLY
+  // on both sides (centering) - that pushes the whole content block
+  // rightward by half the leftover space instead of using that space as
+  // pure safety buffer. Left-flush (all the leftover width kept as margin
+  // on the right, only a small fixed margin on the left) means the block
+  // starts as close to the paper's true left edge as possible, so a
+  // narrower-than-expected printer clips only the unused blank space on
+  // the right, never real content. Fixed the kitchen ticket first (KOT
+  // Order#4); this is the same treatment for the cashier/customer receipt.
+  const LEFT_FLUSH_MARGIN_PT = mmToPt(2);
+  function leftFlushPageStyleFor(settings) {
+    if (!isHeavenSliceShop(settings)) return receiptStyles.page;
+    const totalMargin = RECEIPT_WIDTH_PT - RECEIPT_CONTENT_WIDTH_PT;
+    return {
+      ...receiptStyles.page,
+      paddingLeft: LEFT_FLUSH_MARGIN_PT,
+      paddingRight: Math.max(totalMargin - LEFT_FLUSH_MARGIN_PT, LEFT_FLUSH_MARGIN_PT),
+    };
+  }
+
   function formatReceiptDate(value) {
     const date = value ? new Date(value) : new Date();
     return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
@@ -843,7 +879,7 @@ if (!gotTheLock) {
     const pageHeight = estimateReceiptHeightPt(orderData, type, !!printLogo);
 
     return h(Document, null,
-      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: leftFlushPageStyleFor(settings) },
         h(View, { style: receiptStyles.center },
           // No fixed height here on purpose - a fixed square box with
           // objectFit:'contain' letterboxes any logo that isn't itself
@@ -1063,7 +1099,7 @@ if (!gotTheLock) {
     const pageHeight = estimateItemizedBillHeightPt(orderData, !!printLogo, settings);
 
     return h(Document, null,
-      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: leftFlushPageStyleFor(settings) },
         h(View, { style: receiptStyles.center },
           printLogo ? h(Image, { src: printLogo, style: { width: 90 } }) : null,
           h(Text, { style: receiptStyles.storeName }, settings?.receiptHeader || "THE HEAVEN SLICE"),
@@ -1124,11 +1160,27 @@ if (!gotTheLock) {
           h(Text, { style: receiptStyles.bold }, "Total:"),
           h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (subtotal + scAmount).toFixed(0))
         ),
-        h(Text, { style: { textAlign: "right", marginTop: 6, fontWeight: "bold" } }, `Bill Total: ${billTotal.toFixed(0)}`),
+        // Two-column row (label + value in its own right-aligned Text),
+        // same as the "Total:" row above it - NOT one bold string with
+        // textAlign:"right", which is what was actually causing the real
+        // printout's rightmost digit to clip (see the RECEIPT_CONTENT_WIDTH_PT
+        // comment above: bold text renders a touch wider than regular
+        // weight, and a single string right-aligned right up against the
+        // page's inner edge has nowhere for that extra width to go except
+        // past the physical paper edge). Splitting into two Text nodes lets
+        // rowRight's own smaller font-size + dedicated column do the same
+        // job the item table's Amount column already does safely.
+        h(View, { style: [receiptStyles.row, { marginTop: 6 }] },
+          h(Text, { style: receiptStyles.bold }, "Bill Total:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, billTotal.toFixed(0))
+        ),
         amountTendered !== undefined ? h(Text, { style: { marginTop: 4 } }, `Amount Tendered: ${amountTendered.toFixed(0)}`) : null,
         dueAmount > 0 ? h(Text, null, `Due: ${dueAmount.toFixed(0)}`) : null,
         previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `Previous Dues: ${previousDues.toFixed(0)}`) : null,
-        previousDues > 0 ? h(Text, { style: receiptStyles.bold }, `Total Outstanding: ${(billTotal + previousDues).toFixed(0)}`) : null,
+        previousDues > 0 ? h(View, { style: receiptStyles.row },
+          h(Text, { style: receiptStyles.bold }, "Total Outstanding:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (billTotal + previousDues).toFixed(0))
+        ) : null,
         h(View, { style: { marginTop: 6 } },
           h(Text, { style: receiptStyles.bold }, "In Words:"),
           h(Text, null, `${numberToWordsPdf(billTotal)} ONLY.`)
@@ -1160,7 +1212,7 @@ if (!gotTheLock) {
     const pageHeight = estimateKitchenKotHeightPt(orderData);
 
     return h(Document, null,
-      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: receiptStyles.page },
+      h(Page, { size: [RECEIPT_WIDTH_PT, pageHeight], style: leftFlushPageStyleFor(settings) },
         h(View, { style: receiptStyles.center },
           h(Text, { style: receiptStyles.storeName }, settings?.receiptHeader || "THE HEAVEN SLICE"),
           settings?.receiptSubHeader ? h(Text, { style: receiptStyles.small }, settings.receiptSubHeader) : null
@@ -1441,8 +1493,8 @@ if (!gotTheLock) {
               overflow: visible !important;
             }
             #receipt-print-area .thermal-receipt {
-              width: 72mm !important;
-              max-width: 72mm !important;
+              width: 70mm !important;
+              max-width: 70mm !important;
               margin: 0 auto !important;
               position: static !important;
               transform: none !important;

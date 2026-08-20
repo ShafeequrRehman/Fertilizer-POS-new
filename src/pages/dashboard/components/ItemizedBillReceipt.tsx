@@ -47,15 +47,36 @@ export default function ItemizedBillReceipt({
 
   const cashierName = getAuthUser()?.name || getAuthUser()?.username || '';
 
+  // Scoped to this one shop only, per an explicit request not to change
+  // anything for other shops on the same shared codebase - see
+  // KitchenKotReceipt.tsx's matching comment for why left-flush instead of
+  // centered, and pos-settings.ts's comment on loginUsername/shopName for
+  // why those fields (not businessEmail) are what's checked.
+  const shopHaystack = `${settings.loginUsername || ''} ${settings.shopName || ''} ${settings.businessEmail || ''}`.toLowerCase();
+  const isHeavenSlice = shopHaystack.includes('heavenslice') || shopHaystack.includes('heaven slice');
+  const receiptMargin = isHeavenSlice ? '0 8mm 0 2mm' : '0 auto';
+
   return (
-    <div className="thermal-receipt w-[72mm] max-w-[72mm] bg-white text-black font-mono text-[12px] leading-[15px] pb-2">
+    <div className="thermal-receipt w-[70mm] max-w-[70mm] bg-white text-black font-mono text-[12px] leading-[15px] pb-2">
+      {/* Content is 70mm inside an 80mm page (5mm margin each side, not the
+          old 4mm) - a real shop printout (see the "misprints from right
+          side" report against this exact template) showed the rightmost
+          digit of bold
+          right-aligned totals getting clipped on the physical paper, even
+          though on-screen/PDF preview looked fine. Bold text in a
+          monospace webfont commonly renders a touch wider per character
+          than regular weight (synthetic/faux-bold glyph widening), which is
+          invisible with room to overflow into (a screen, a PDF) but fatal
+          on a thermal printer that hard-cuts at its physical paper edge
+          with zero tolerance. Widening the margin gives that extra bold
+          width somewhere to go without reaching the edge. */}
       <style dangerouslySetInnerHTML={{ __html: `
         .thermal-receipt { box-sizing: border-box; color: #000; overflow: visible; padding-top: 0; }
         .thermal-receipt * { box-sizing: border-box; }
         @media print {
           @page { margin: 0; size: 80mm auto; }
           html, body { width: 80mm; margin: 0; padding: 0; background: #fff; }
-          .thermal-receipt { width: 72mm !important; max-width: 72mm !important; margin: 0 auto !important; }
+          .thermal-receipt { width: 70mm !important; max-width: 70mm !important; margin: ${receiptMargin} !important; }
         }
       ` }} />
 
@@ -110,7 +131,7 @@ export default function ItemizedBillReceipt({
           <span className="flex-[3]">Item</span>
           <span className="flex-1 text-right">Qty</span>
           <span className="flex-1 text-right">Price</span>
-          <span className="flex-1 text-right">Amount</span>
+          <span className="flex-1 text-right pr-[1mm]">Amount</span>
         </div>
         {order.items.map((item, idx) => (
           <div key={idx} className="mb-1">
@@ -118,7 +139,7 @@ export default function ItemizedBillReceipt({
               <span className="flex-[3] pr-1">{item.name}</span>
               <span className="flex-1 text-right">{item.quantity}</span>
               <span className="flex-1 text-right">{item.price.toFixed(0)}</span>
-              <span className="flex-1 text-right">{(item.price * item.quantity).toFixed(0)}</span>
+              <span className="flex-1 text-right pr-[1mm]">{(item.price * item.quantity).toFixed(0)}</span>
             </div>
             {item.variation && <p className="ml-1 text-[10px] text-gray-700 uppercase">- {item.variation}</p>}
           </div>
@@ -134,13 +155,20 @@ export default function ItemizedBillReceipt({
 
       <div className="border-t border-black my-1.5" />
 
+      {/* Two-column flex rows, value in its own non-bold span with a small
+          right-inset - matches the item table's Amount column (which never
+          clipped on the real printout) instead of a single bold string
+          forced flush against the container's right edge (which did). The
+          label alone carries the bold emphasis now; the bolded VALUE was
+          the actual thing getting clipped before. */}
       <div className="flex justify-between font-bold">
         <span>Total:</span>
-        <span>{(subtotal + scAmount).toFixed(0)}</span>
+        <span className="pr-[1mm]">{(subtotal + scAmount).toFixed(0)}</span>
       </div>
 
-      <div className="text-right mt-2">
-        <p className="font-bold">Bill Total: {billTotal.toFixed(0)}</p>
+      <div className="flex justify-between font-bold mt-2">
+        <span>Bill Total:</span>
+        <span className="pr-[1mm]">{billTotal.toFixed(0)}</span>
       </div>
 
       {(amountTendered !== undefined || dueAmount > 0 || previousDues > 0) && (
@@ -150,7 +178,10 @@ export default function ItemizedBillReceipt({
           {previousDues > 0 && (
             <>
               <p>Previous Dues: {previousDues.toFixed(0)}</p>
-              <p className="font-bold">Total Outstanding: {(billTotal + previousDues).toFixed(0)}</p>
+              <div className="flex justify-between font-bold">
+                <span>Total Outstanding:</span>
+                <span className="pr-[1mm]">{(billTotal + previousDues).toFixed(0)}</span>
+              </div>
             </>
           )}
         </div>

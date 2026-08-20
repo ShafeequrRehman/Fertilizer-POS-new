@@ -33,8 +33,23 @@ export default function ThermalReceipt({
     : '--:--:--';
   const orderNumber = String(order.dailyOrderNumber ?? order.id.slice(-3)).padStart(3, '0');
 
+  // Scoped to this one shop only, per an explicit request not to change
+  // anything for other shops - see KitchenKotReceipt.tsx's matching
+  // comment for why left-flush instead of centered. Checks
+  // loginUsername/shopName, not businessEmail - see pos-settings.ts's
+  // comment on those fields for why.
+  const shopHaystack = `${settings.loginUsername || ''} ${settings.shopName || ''} ${settings.businessEmail || ''}`.toLowerCase();
+  const isHeavenSlice = shopHaystack.includes('heavenslice') || shopHaystack.includes('heaven slice');
+  const receiptMargin = isHeavenSlice ? '0 8mm 0 2mm' : '0 auto';
+
   return (
-    <div className="thermal-receipt w-[72mm] max-w-[72mm] bg-white text-black font-mono text-[12px] leading-[14px] pb-2">
+    <div className="thermal-receipt w-[70mm] max-w-[70mm] bg-white text-black font-mono text-[12px] leading-[14px] pb-2">
+      {/* 70mm content inside an 80mm page (5mm margin each side) - widened
+          from the old 72mm/4mm to leave headroom for bold text rendering a
+          touch wider than regular weight (synthetic bold glyph widening),
+          which was clipping the rightmost digit of bold right-aligned
+          totals on a real thermal printout even though it looked fine
+          on-screen. See ItemizedBillReceipt.tsx's matching comment. */}
       <style dangerouslySetInnerHTML={{ __html: `
         .thermal-receipt {
           box-sizing: border-box;
@@ -57,9 +72,9 @@ export default function ThermalReceipt({
           }
 
           .thermal-receipt {
-            width: 72mm !important;
-            max-width: 72mm !important;
-            margin: 0 auto !important;
+            width: 70mm !important;
+            max-width: 70mm !important;
+            margin: ${receiptMargin} !important;
           }
         }
       ` }} />
@@ -133,7 +148,7 @@ export default function ThermalReceipt({
             <div key={idx} className="mb-1">
               <div className="flex justify-between items-start">
                 <span className="flex-1 pr-1">{item.quantity}x {item.name.toUpperCase()} {priceLine}</span>
-                {type === 'cashier' && <span className="text-right">Rs {itemTotal}</span>}
+                {type === 'cashier' && <span className="text-right pr-[1mm] shrink-0">Rs {itemTotal}</span>}
               </div>
               {item.variation && <p className="ml-4 text-[10px] text-gray-700 uppercase">- {item.variation}</p>}
             </div>
@@ -153,7 +168,7 @@ export default function ThermalReceipt({
           </div>
           <div className="flex justify-between gap-2 font-bold text-[13px] mt-1">
             <span>TOTAL:</span>
-            <span className="shrink-0">Rs {itemsTotal.toFixed(2)}</span>
+            <span className="shrink-0 pr-[1mm]">Rs {itemsTotal.toFixed(2)}</span>
           </div>
 
           <div className="mt-3">
@@ -167,7 +182,10 @@ export default function ThermalReceipt({
             {previousDues > 0 && (
               <>
                 <p className="mt-1">PREVIOUS DUES: Rs {previousDues.toFixed(2)}</p>
-                <p className="font-bold">TOTAL OUTSTANDING: Rs {(itemsTotal + previousDues).toFixed(2)}</p>
+                <div className="flex justify-between font-bold">
+                  <span>TOTAL OUTSTANDING:</span>
+                  <span className="pr-[1mm]">Rs {(itemsTotal + previousDues).toFixed(2)}</span>
+                </div>
               </>
             )}
           </div>

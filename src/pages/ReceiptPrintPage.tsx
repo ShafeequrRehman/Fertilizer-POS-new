@@ -217,8 +217,8 @@ export default function StandaloneReceiptPrintPage() {
         }
 
         #receipt-print-area .thermal-receipt {
-          width: 72mm !important;
-          max-width: 72mm !important;
+          width: 70mm !important;
+          max-width: 70mm !important;
           margin: 0 auto !important;
         }
 

@@ -248,13 +248,13 @@ export default function PrintOrderPage() {
           main { display: block !important; padding: 0 !important; margin: 0 !important; overflow: visible !important; }
           #silent-wrapper { display: block !important; background: white !important; margin: 0 !important; padding: 0 !important; width: 80mm !important; height: auto !important; overflow: visible !important; }
           #receipt-print-area { display: block !important; width: 80mm !important; max-width: 80mm !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; transform: translateY(0) !important; }
-          #receipt-print-area .thermal-receipt { width: 72mm !important; max-width: 72mm !important; margin: 0 auto !important; }
+          #receipt-print-area .thermal-receipt { width: 70mm !important; max-width: 70mm !important; margin: 0 auto !important; }
           #receipt-print-area > div { padding-top: 0 !important; padding-bottom: 0 !important; }
           @page { margin: 0; }
-          html, body, body > div { 
-            background-color: white !important; 
-            margin: 0 !important; 
-            padding: 0 !important; 
+          html, body, body > div {
+            background-color: white !important;
+            margin: 0 !important;
+            padding: 0 !important;
             width: 80mm !important;
             height: auto !important;
             min-height: 0 !important;
@@ -266,7 +266,7 @@ export default function PrintOrderPage() {
           * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         `}} />
         <div id="silent-wrapper">
-          <div id="receipt-print-area" className="w-[72mm] m-0 p-0 overflow-visible">
+          <div id="receipt-print-area" className="w-[70mm] m-0 p-0 overflow-visible">
             <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </div>
@@ -305,8 +305,8 @@ export default function PrintOrderPage() {
             display: block;
           }
           #receipt-print-area .thermal-receipt {
-            width: 72mm !important;
-            max-width: 72mm !important;
+            width: 70mm !important;
+            max-width: 70mm !important;
             margin: 0 auto !important;
           }
         }
