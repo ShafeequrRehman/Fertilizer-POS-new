@@ -206,7 +206,7 @@ api.interceptors.response.use(
       originalConfig &&
       !(originalConfig as { _retriedAfterRefresh?: boolean })._retriedAfterRefresh
     ) {
-      const refreshed = await tryRefreshAccessToken();
+      const { refreshed, invalidSession } = await tryRefreshAccessToken();
       if (refreshed) {
         try {
           return await api.request({
@@ -218,10 +218,24 @@ api.interceptors.response.use(
         }
       }
 
-      clearAuthSession();
-      // Same HashRouter fix as the 402 branch above - hash, not pathname/href.
-      if (!window.location.hash.startsWith("#/login")) {
-        window.location.hash = "/login";
+      // Only a genuine "no, this refresh token is invalid/expired" answer
+      // FROM THE SERVER should force a re-login - see tryRefreshAccessToken's
+      // own comment. A shop that's mid-shift on a flaky/unreachable
+      // self-hosted connection would otherwise get bounced to the login
+      // screen and have its work interrupted every time the refresh call
+      // itself simply couldn't get through, even though the session the
+      // cashier is actually using is still perfectly valid and the
+      // till's offline order queue (see local-hub-api.ts/
+      // offline-order-helpers.ts) is specifically built to keep the shop
+      // working through exactly this kind of connectivity gap. Login is a
+      // one-time cost at the start of a shift; after that, only a real
+      // "log back in" answer from the server should ever ask for it again.
+      if (invalidSession) {
+        clearAuthSession();
+        // Same HashRouter fix as the 402 branch above - hash, not pathname/href.
+        if (!window.location.hash.startsWith("#/login")) {
+          window.location.hash = "/login";
+        }
       }
     }
 
@@ -233,11 +247,27 @@ api.interceptors.response.use(
 // backend/controllers/authController.js `refresh`). A single in-flight
 // promise is shared so concurrent 401s from several parallel requests
 // don't each fire their own refresh call.
-let refreshPromise: Promise<boolean> | null = null;
+//
+// Returns `invalidSession: true` only when the SERVER actually answered
+// with a real "no" (401/403 on the refresh call itself) - that's the only
+// case that means this session's refresh token is genuinely dead and a
+// fresh login is actually required. Every other failure (no response at
+// all: timeout, DNS failure, the self-hosted backend being briefly
+// unreachable) means the refresh attempt simply couldn't be completed
+// right now, which says nothing about whether the session itself is still
+// good - treating that the same as "invalid" was the bug: it force-logged
+// the cashier out and threw up the login screen on ordinary network
+// hiccups, interrupting a shift that the app's own offline order queue was
+// specifically built to keep running through. See this function's caller
+// above for where that distinction actually gets acted on.
+let refreshPromise: Promise<{ refreshed: boolean; invalidSession: boolean }> | null = null;
 
-async function tryRefreshAccessToken(): Promise<boolean> {
+async function tryRefreshAccessToken(): Promise<{ refreshed: boolean; invalidSession: boolean }> {
   const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
+  // Nothing to even try refreshing with - this is the one case with no
+  // server round trip involved at all, so it's unambiguous: there's no
+  // session to keep alive.
+  if (!refreshToken) return { refreshed: false, invalidSession: true };
 
   if (!refreshPromise) {
     refreshPromise = axios
@@ -249,9 +279,13 @@ async function tryRefreshAccessToken(): Promise<boolean> {
       .then((response) => {
         const data = response.data as { accessToken: string; refreshToken?: string };
         updateTokens(data.accessToken, data.refreshToken);
-        return true;
+        return { refreshed: true, invalidSession: false };
       })
-      .catch(() => false)
+      .catch((err) => {
+        const status = err instanceof AxiosError ? err.response?.status : undefined;
+        const invalidSession = status === 401 || status === 403;
+        return { refreshed: false, invalidSession };
+      })
       .finally(() => {
         refreshPromise = null;
       });
