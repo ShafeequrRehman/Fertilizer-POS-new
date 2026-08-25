@@ -12,6 +12,7 @@ import { useNetworkStatus } from '@/lib/network-status';
 import { getLocalHubStartDiagnostics, getOccupiedTablesCache, getReferenceData, pushOccupiedTablesCache, pushOrdersCache } from '@/lib/local-hub-api';
 import { loadOrdersFromLocalHub, saveOrderEditOffline, computeKitchenPrintDelta } from '@/lib/offline-order-helpers';
 import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { computeDiscountFromInputs, loadDiscountDraft, saveDiscountDraft } from '@/lib/discount-draft';
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { useToast } from '@/lib/toast';
@@ -100,13 +101,49 @@ export default function SalesPage() {
   // real amount doesn't need this at all; it's only the "nothing entered"
   // case this guards.
   const [confirmPending, setConfirmPending] = useState(false);
-  // Discount now lives here, not in POS checkout - the cashier applies it
-  // when actually completing/collecting payment on an order, using either a
+  // Discount now lives on the order-details card (above the Complete Order
+  // button), not the Confirm Payment modal - the cashier sets it while
+  // reviewing the order, before ever opening that modal, using either a
   // flat PKR amount or a percent of the subtotal (Amount wins if both are
-  // filled). Cleared every time the Complete Payment modal is opened so it
-  // never bleeds from one order into the next.
+  // filled). Backed by sessionStorage per order id (see
+  // loadDiscountDraft/saveDiscountDraft above the component) - switching to
+  // a different order's card loads THAT order's own draft instead of
+  // clearing (see selectOrder), and navigating away entirely (e.g. to the
+  // Manual Print Center to check the receipt) and back still finds it, since
+  // this component itself gets fully unmounted by that route change and
+  // plain useState alone can't survive that. NOT cleared when the Complete
+  // Payment modal opens/closes, since that would erase the very discount
+  // the cashier just set.
   const [discountAmountInput, setDiscountAmountInput] = useState('');
   const [discountPercentInput, setDiscountPercentInput] = useState('');
+
+  // Covers every OTHER way selectedOrder's id can change besides an
+  // explicit selectOrder() click - the initial load, a background refresh
+  // tick, and (the case this exists for) coming back from a route change
+  // like the Manual Print Center, where this whole component just
+  // remounted and selectedOrder is being set fresh from the cache. Keyed on
+  // the id specifically (not the object) so it does NOT re-fire - and
+  // wipe out whatever the cashier is mid-typing - every time a periodic
+  // background refresh hands back a new object for the SAME order.
+  useEffect(() => {
+    if (!selectedOrder?.id) return;
+    const draft = loadDiscountDraft(selectedOrder.id);
+    setDiscountAmountInput(draft.amount);
+    setDiscountPercentInput(draft.percent);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrder?.id]);
+
+  // The other half of the persistence - saves on every keystroke so a
+  // navigate-away-and-back (or even a full app restart's worth of typing
+  // history, since this fires continuously, not just on blur) always has
+  // the latest value to restore. Empty-both is treated as "cleared" inside
+  // saveDiscountDraft itself, which is what makes actually deleting the
+  // typed value the one thing that stops it from persisting.
+  useEffect(() => {
+    if (!selectedOrder?.id) return;
+    saveDiscountDraft(selectedOrder.id, discountAmountInput, discountPercentInput);
+  }, [selectedOrder?.id, discountAmountInput, discountPercentInput]);
+
   const [customerDue, setCustomerDue] = useState(0);
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [isSendingWA, setIsSendingWA] = useState(false);
@@ -317,13 +354,13 @@ export default function SalesPage() {
   const orderSubtotal = selectedOrder?.subtotal ?? selectedOrder?.total ?? 0;
   const orderTax = selectedOrder?.tax ?? 0;
   const discountAmountValue = Number(discountAmountInput) || 0;
-  const discountPercentValue = Number(discountPercentInput) || 0;
-  const discountType: Discount['type'] = discountAmountValue > 0 ? 'value' : 'percent';
-  const discountRawValue = discountAmountValue > 0 ? discountAmountValue : discountPercentValue;
-  const discountAmount = discountRawValue > 0 && orderSubtotal > 0
-    ? Math.min(discountType === 'percent' ? Math.round((orderSubtotal * discountRawValue) / 100) : Math.round(discountRawValue), orderSubtotal)
-    : 0;
-  const discountForOrder: Discount | null = discountAmount > 0 ? { type: discountType, value: discountRawValue, amount: discountAmount } : null;
+  // Shared with PrintOrderPage.tsx's Manual Print Center preview - see
+  // discount-draft.ts's own comment for why this math lives in one place
+  // instead of two copies that could quietly drift apart.
+  const discountForOrder = computeDiscountFromInputs(discountAmountInput, discountPercentInput, orderSubtotal);
+  const discountAmount = discountForOrder?.amount ?? 0;
+  const discountType: Discount['type'] = discountForOrder?.type ?? 'percent';
+  const discountRawValue = discountForOrder?.value ?? 0;
   const adjustedTotal = Math.max(orderSubtotal + orderTax - discountAmount, 0);
   const payable = adjustedTotal + customerDue;
 
@@ -498,6 +535,16 @@ export default function SalesPage() {
   // hydrated it) skips the extra round trip entirely.
   function selectOrder(order: SavedOrder) {
     setSelectedOrder(order);
+    // Discount now lives on the order-details card itself (see the
+    // Complete Order button's own comment below), not the payment modal -
+    // loading (rather than blindly clearing) here is what makes a discount
+    // typed for THIS order still be there on switching back to it, while a
+    // different order's card still starts from whatever ITS OWN saved
+    // draft is (usually none) - see loadDiscountDraft's own comment for why
+    // this can't just be plain component state.
+    const draft = loadDiscountDraft(order.id);
+    setDiscountAmountInput(draft.amount);
+    setDiscountPercentInput(draft.percent);
     if (order.itemCount !== undefined) {
       void refreshOne(order.id);
     }
@@ -748,22 +795,15 @@ export default function SalesPage() {
     // applies what's left to this order - see orderController.updateOrder.
     const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, discount: discountForOrder });
     if (!updated) return;
-    // Auto-print the customer receipt the instant the order completes,
-    // same till, same click - no background watcher involved (there used
-    // to be one, sibling to KitchenPrintWatcher, removed entirely - see
-    // DashboardShell.tsx's comment on why). Fires for every order type -
-    // DineIn, TakeAway, Delivery - all of them start "pending" and only
-    // ever reach "completed" through this same action (see POSPage.tsx's
-    // createOrder call, which always sends status: 'pending' regardless of
-    // orderType; TakeAway's old placement-time receipt print was removed
-    // entirely - see POSPage.tsx's own comment on why). The
-    // customerReceiptPrintedAt guard is defense-in-depth for if a receipt
-    // somehow already got marked printed some other way - printCustomerReceipt
-    // itself never sets it, so the button/printer icon stay available for a
-    // reprint regardless.
-    if (!updated.customerReceiptPrintedAt) {
-      printCustomerReceipt(updated);
-    }
+    // No auto-print here any more, for any order type (DineIn, TakeAway,
+    // Delivery) - this used to fire the customer receipt automatically the
+    // instant an order completed, but that's now a deliberate, on-demand
+    // action only, via the Print Receipt button or the printer icon in the
+    // header above. customerReceiptPrintedAt is left exactly as
+    // completeAndSettle/saveUpdate set it either way, so a still-unprinted
+    // order is unaffected and an already-printed one (e.g. printed offline
+    // at completion via saveUpdate's local-first path, or explicitly
+    // beforehand) is unaffected too.
     // Fire-and-forget: the order is already durably saved locally by
     // saveUpdate above, and this is a PDF render (Electron IPC) plus a
     // WhatsApp cloud send - a couple of seconds combined that the cashier
@@ -1024,7 +1064,44 @@ export default function SalesPage() {
                 </div>
                 {selectedOrder.status === 'pending' ? (
                   <div className="mt-4 grid gap-2">
-                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setPaymentAmount(''); setConfirmPending(false); setShowPayment(true); }} className="rounded-2xl bg-[#E2F33C] px-4 py-2 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50">Complete Order</button>
+                    {/* Moved here from the Confirm Payment modal - the
+                        cashier sets the discount while reviewing the order,
+                        before Complete Order even opens the payment step, so
+                        it's visible in context with the rest of the order
+                        details instead of buried in a modal. */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="mb-1 block text-xs font-bold text-gray-500">Discount (PKR)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          disabled={!isSelectedOrderHydrated}
+                          value={discountAmountInput}
+                          onChange={(event) => { setDiscountAmountInput(event.target.value); if (event.target.value) setDiscountPercentInput(''); }}
+                          placeholder="0"
+                          className="w-full rounded-2xl border border-gray-200 px-3 py-2.5 text-sm outline-none disabled:cursor-not-allowed disabled:bg-gray-50"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-bold text-gray-500">Discount (%)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          disabled={!isSelectedOrderHydrated || discountAmountValue > 0}
+                          value={discountPercentInput}
+                          onChange={(event) => setDiscountPercentInput(event.target.value)}
+                          placeholder="0"
+                          className="w-full rounded-2xl border border-gray-200 px-3 py-2.5 text-sm outline-none disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-300"
+                        />
+                      </div>
+                    </div>
+                    {discountAmount > 0 ? (
+                      <p className="text-xs font-bold text-gray-500">
+                        Discount applied: Rs {discountAmount} ({discountType === 'percent' ? `${discountRawValue}% - Percentage` : 'Fixed Value'})
+                      </p>
+                    ) : null}
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => { setPaymentAmount(''); setConfirmPending(false); setShowPayment(true); }} className="rounded-2xl bg-[#E2F33C] px-4 py-2 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50">Complete Order</button>
                     {hasPermission('sales.delete') ? (
                       <button
                         disabled={!isSelectedOrderHydrated}
@@ -1090,15 +1167,29 @@ export default function SalesPage() {
 
               <div className="shrink-0 space-y-4 rounded-b-[32px] bg-[#F8F9FB] p-6">
                 <div className="rounded-[24px] bg-white p-4">
-                  <Row label="Subtotal" value={`Rs ${selectedOrder.subtotal ?? 0}`} />
-                  <Row label="Tax" value={`Rs ${selectedOrder.tax ?? 0}`} />
-                  {selectedOrder.discount && selectedOrder.discount.amount > 0 ? (
-                    <Row label={`Discount ${selectedOrder.discount.type === 'percent' ? `(${selectedOrder.discount.value}%)` : ''}`} value={`-Rs ${selectedOrder.discount.amount}`} />
+                  <Row label="Subtotal" value={`Rs ${orderSubtotal}`} />
+                  <Row label="Tax" value={`Rs ${orderTax}`} />
+                  {/* While still pending, this reflects the discount the
+                      cashier has typed into the card above but hasn't
+                      confirmed yet - a live preview, same figures the
+                      Complete Payment modal itself will use. Once the order
+                      is actually completed, `discountAmountInput`/
+                      `discountPercentInput` are reset (see completeOrder),
+                      so from that point on this reads the real, persisted
+                      selectedOrder.discount instead - both branches now
+                      always spell out value-vs-percentage explicitly rather
+                      than leaving a blank suffix for a flat-value discount. */}
+                  {selectedOrder.status === 'pending' ? (
+                    discountAmount > 0 ? (
+                      <Row label={`Discount (${discountType === 'percent' ? `${discountRawValue}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${discountAmount}`} />
+                    ) : null
+                  ) : selectedOrder.discount && selectedOrder.discount.amount > 0 ? (
+                    <Row label={`Discount (${selectedOrder.discount.type === 'percent' ? `${selectedOrder.discount.value}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${selectedOrder.discount.amount}`} />
                   ) : null}
-                  <Row label="Bill Total" value={`Rs ${selectedOrder.total}`} />
+                  <Row label="Bill Total" value={`Rs ${selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total}`} />
                   <Row label="Previous Dues" value={`Rs ${customerDue}`} />
                   <Row label="Paid" value={`Rs ${selectedOrder.paidAmount ?? 0}`} />
-                  <Row label="Grand Total" value={`Rs ${selectedOrder.total + customerDue}`} strong />
+                  <Row label="Grand Total" value={`Rs ${(selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total) + customerDue}`} strong />
                 </div>
                 {selectedOrder.status === 'cancelled' ? (
                   <div className="space-y-1.5 rounded-[24px] bg-rose-50 px-4 py-4 text-sm font-bold text-rose-700">
@@ -1116,37 +1207,15 @@ export default function SalesPage() {
       {showPayment && selectedOrder ? (
         <Modal title="Complete Payment" onClose={() => { setShowPayment(false); setConfirmPending(false); }}>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="mb-1 block text-sm font-semibold text-gray-700">Discount (PKR)</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={discountAmountInput}
-                  onChange={(event) => { setDiscountAmountInput(event.target.value); if (event.target.value) setDiscountPercentInput(''); }}
-                  placeholder="0"
-                  className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-semibold text-gray-700">Discount (%)</label>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={discountPercentInput}
-                  onChange={(event) => setDiscountPercentInput(event.target.value)}
-                  disabled={discountAmountValue > 0}
-                  placeholder="0"
-                  className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-300"
-                />
-              </div>
-            </div>
+            {/* Discount is set on the order-details card itself now, before
+                Complete Order is even clicked (see that button's own
+                comment) - this modal just reviews the figures it already
+                produces, read-only. */}
             <div className="rounded-[24px] bg-[#F8F9FB] p-4 text-sm">
               <Row label="Subtotal" value={`Rs ${orderSubtotal}`} />
               <Row label="Tax" value={`Rs ${orderTax}`} />
               {discountAmount > 0 ? (
-                <Row label={`Discount ${discountType === 'percent' ? `(${discountRawValue}%)` : ''}`} value={`-Rs ${discountAmount}`} />
+                <Row label={`Discount (${discountType === 'percent' ? `${discountRawValue}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${discountAmount}`} />
               ) : null}
               <Row label="Bill Total" value={`Rs ${adjustedTotal}`} />
               <Row label="Previous Dues" value={`Rs ${customerDue}`} />
@@ -1158,10 +1227,18 @@ export default function SalesPage() {
                 value={paymentAmount}
                 onChange={(event) => {
                   if (!/^\d*$/.test(event.target.value)) return;
-                  setPaymentAmount(event.target.value);
+                  // Clamped to the Final Payable figure as they type -
+                  // can't overpay an order (previously this only caught an
+                  // over-typed amount at Confirm Payment click time, via
+                  // completeOrder's own `paid > payable` check below, which
+                  // let something like "100000" sit in the field looking
+                  // valid until submit).
+                  const digitsOnly = event.target.value;
+                  const clamped = digitsOnly === '' ? '' : String(Math.min(Number(digitsOnly), payable));
+                  setPaymentAmount(clamped);
                   // Typing a real amount supersedes the tick below - only
                   // relevant while it's still empty.
-                  if (event.target.value) setConfirmPending(false);
+                  if (clamped) setConfirmPending(false);
                 }}
                 className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
                 placeholder={`Up to Rs ${payable}`}

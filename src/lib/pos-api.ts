@@ -147,9 +147,9 @@ export async function updateCustomer(id: string, payload: Partial<Customer>) {
   }
 }
 
-export async function updateCustomerDues(phone: string, previousDues: number) {
+export async function updateCustomerDues(phone: string, previousDues: number, note?: string) {
   try {
-    const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, { previousDues });
+    const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, { previousDues, note });
     return normalizeCustomer(response.data as Customer & { _id?: string; updatedAt?: string });
   } catch (error) {
     handleApiError(error);
@@ -163,9 +163,9 @@ export async function updateCustomerDues(phone: string, previousDues: number) {
 // others too). Unlike updateCustomerDues above, this can mark an order
 // "completed" if the payment fully covers it - see
 // customerController.settleCustomerDues for the full reasoning.
-export async function settleCustomerDues(phone: string, amount: number) {
+export async function settleCustomerDues(phone: string, amount: number, note?: string) {
   try {
-    const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, { amount });
+    const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, { amount, note });
     return response.data;
   } catch (error) {
     handleApiError(error);

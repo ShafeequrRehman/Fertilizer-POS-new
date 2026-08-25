@@ -1,8 +1,19 @@
 const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
+const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
+
+// The JWT (req.user) only ever carries id/role/shopId/permissions - never
+// a display name (see auth/tokenService.js) - so recording who made a
+// manual dues change needs one extra lookup, same pattern
+// orderController.cancelOrder already uses for cancelledBy.
+async function currentUserName(req) {
+  if (!req.user?.id) return "";
+  const user = await User.findById(req.user.id).select("name username").lean();
+  return user?.name || user?.username || "";
+}
 
 // Placeholder phone used for walk-in/guest orders (see
 // orderController.createOrder) - these are never upserted into the
@@ -154,6 +165,23 @@ exports.getCustomerLedger = async (req, res) => {
         totalOrderBalance,
         totalDue: totalOrderBalance + previousDues,
         lastOrderAt: customerOrders[0]?.createdAt || null,
+        // Manual add/settle entries (with whatever note the cashier typed)
+        // - newest first. Merged client-side (DuesPage.tsx's History
+        // dropdown) with the `orders` array below, which already carries
+        // its own per-order trail (dailyOrderNumber, total, paid,
+        // remaining) - so between the two, every rupee that makes up
+        // totalDue traces back to either a note or an order number.
+        duesHistory: (customer.duesHistory || [])
+          .slice()
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+          .map((entry) => ({
+            type: entry.type,
+            amount: entry.amount,
+            note: entry.note || "",
+            balanceAfter: entry.balanceAfter,
+            createdBy: entry.createdBy || "",
+            createdAt: entry.createdAt,
+          })),
         orders: customerOrders.map((order) => ({
           id: String(order._id),
           dailyOrderNumber: order.dailyOrderNumber,
@@ -221,16 +249,38 @@ exports.getCustomerOutstanding = async (req, res) => {
   }
 };
 
+// PATCH /api/customers/dues/:phone  body: { previousDues, note? }
+// `previousDues` is still the new TOTAL lump-sum figure (not a delta) -
+// kept exactly as before so pos-mobile's DuesScreen (which also calls this
+// same endpoint) keeps working unchanged. The note - and the history entry
+// recording this change - are new and optional: if the caller doesn't send
+// a note, this behaves identically to before. The delta (new total minus
+// whatever it was) is what actually gets recorded as the entry's `amount`
+// so "+Rs 500 (note)" in the History dropdown always matches what really
+// changed, not just whatever number happened to be typed into the field.
 exports.updateCustomerDues = async (req, res) => {
-  const customer = await Customer.findOneAndUpdate(
-    { phone: req.params.phone, ...shopScope(req) },
-    { previousDues: Number(req.body.previousDues || 0) },
-    { new: true }
-  );
+  const nextPreviousDues = Number(req.body.previousDues || 0);
+  const note = String(req.body.note || "").trim();
 
+  const customer = await Customer.findOne({ phone: req.params.phone, ...shopScope(req) });
   if (!customer) {
     return res.status(404).json({ error: "Customer not found" });
   }
+
+  const delta = nextPreviousDues - Number(customer.previousDues || 0);
+  customer.previousDues = nextPreviousDues;
+  // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
+  // worth a history row - only a real change is.
+  if (delta !== 0) {
+    customer.duesHistory.push({
+      type: delta > 0 ? "add" : "settle",
+      amount: Math.abs(delta),
+      note,
+      balanceAfter: nextPreviousDues,
+      createdBy: await currentUserName(req),
+    });
+  }
+  await customer.save();
 
   res.json(serializeCustomer(customer));
 };
@@ -252,6 +302,7 @@ exports.settleCustomerDues = async (req, res) => {
   try {
     const phone = req.params.phone;
     const amount = Math.max(Number(req.body.amount) || 0, 0);
+    const note = String(req.body.note || "").trim();
     if (amount <= 0) {
       return res.status(400).json({ message: "amount must be greater than 0", reason: "validation_error" });
     }
@@ -270,6 +321,11 @@ exports.settleCustomerDues = async (req, res) => {
       previousDues -= applied;
       remaining -= applied;
     }
+
+    // Tracked purely so the History dropdown's settle entry can say which
+    // order(s) this payment actually paid down, same "from order, then
+    // order number" tracking the note field covers for manual entries.
+    const touchedOrders = [];
 
     if (remaining > 0) {
       const orders = await Order.find({
@@ -291,18 +347,35 @@ exports.settleCustomerDues = async (req, res) => {
         if (order.remainingAmount === 0) order.status = "completed";
         order.version = Number(order.version || 0) + 1;
         await order.save();
+        touchedOrders.push({ dailyOrderNumber: order.dailyOrderNumber, applied });
         remaining -= applied;
       }
     }
 
     customer.previousDues = previousDues;
+
+    const appliedAmount = amount - remaining;
+    if (appliedAmount > 0) {
+      const orderRefs = touchedOrders
+        .map((entry) => (entry.dailyOrderNumber !== undefined && entry.dailyOrderNumber !== null ? `#${entry.dailyOrderNumber} (Rs ${entry.applied})` : null))
+        .filter(Boolean)
+        .join(", ");
+      customer.duesHistory.push({
+        type: "settle",
+        amount: appliedAmount,
+        note: [note, orderRefs ? `Applied to orders: ${orderRefs}` : ""].filter(Boolean).join(" - "),
+        balanceAfter: previousDues,
+        createdBy: await currentUserName(req),
+      });
+    }
+
     await customer.save();
 
     // appliedAmount can be less than the requested amount if it exceeded
     // everything this customer actually owed - the frontend caps the input
     // at totalDue before ever sending this, but this stays defensive
     // rather than trusting that.
-    res.json({ appliedAmount: amount - remaining, unapplied: remaining });
+    res.json({ appliedAmount, unapplied: remaining });
   } catch (error) {
     res.status(500).json({ message: "Failed to settle dues", detail: error.message });
   }

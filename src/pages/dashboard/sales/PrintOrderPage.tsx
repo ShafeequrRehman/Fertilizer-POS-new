@@ -9,6 +9,7 @@ import { isDesktopApp } from '@/lib/api';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 import { notifyParentPrintSent } from '@/lib/print-notify';
 import { useToast } from '@/lib/toast';
+import { computeDiscountFromInputs, loadDiscountDraft } from '@/lib/discount-draft';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -239,6 +240,34 @@ export default function PrintOrderPage() {
 
   const renderOrder = kitchenOnlyItems ? { ...order, items: kitchenOnlyItems } : order;
 
+  // A discount typed into SalesPage.tsx's order-details card only gets
+  // saved onto the real order document once Complete Order actually runs
+  // (see orderController.js's completeAndSettle) - before that, it's just
+  // a draft sitting in sessionStorage (see discount-draft.ts). A cashier
+  // checking this pending order's receipt here, before ever completing it
+  // (exactly what was reported: no printer connected right now, just
+  // wanting to see the receipt would look like), would otherwise see no
+  // discount at all - not because the receipt template is missing it, but
+  // because the order itself genuinely doesn't have one yet. This overlays
+  // that same draft on top, PREVIEW ONLY (never written back to the order
+  // or the backend) - the instant the order is actually completed,
+  // order.discount is real and this branch stops applying on its own
+  // (status is no longer 'pending').
+  const previewSubtotal = renderOrder.subtotal ?? renderOrder.total ?? 0;
+  const previewDiscount = renderOrder.status === 'pending'
+    ? (() => {
+        const draft = loadDiscountDraft(renderOrder.id);
+        return computeDiscountFromInputs(draft.amount, draft.percent, previewSubtotal);
+      })()
+    : null;
+  const displayOrder = previewDiscount
+    ? {
+        ...renderOrder,
+        discount: previewDiscount,
+        total: Math.max(previewSubtotal + (renderOrder.tax ?? 0) - previewDiscount.amount, 0),
+      }
+    : renderOrder;
+
   if (isSilent) {
     return (
       <div className="bg-white m-0 p-0">
@@ -267,7 +296,7 @@ export default function PrintOrderPage() {
         `}} />
         <div id="silent-wrapper">
           <div id="receipt-print-area" className="w-[70mm] m-0 p-0 overflow-visible">
-            <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+            <ReceiptRenderer order={displayOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </div>
       </div>
@@ -360,14 +389,14 @@ export default function PrintOrderPage() {
         <section className="rounded-[32px] bg-white p-8 shadow-sm flex items-start justify-center">
           {/* Visible in UI */}
           <div className="border shadow-lg p-4">
-             <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+             <ReceiptRenderer order={displayOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
           </div>
         </section>
       </div>
 
       {/* This is the only thing visible during actual printing natively */}
       <div className="hidden print:block" id="receipt-print-area">
-        <ReceiptRenderer order={renderOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
+        <ReceiptRenderer order={displayOrder} type={receiptType} logoSrc={logoSrc} previousDues={previousDues} />
       </div>
 
     </div>

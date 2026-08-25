@@ -1,8 +1,8 @@
 import { Link, useParams } from 'react-router-dom';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
-import { Product, SavedOrder } from '@/lib/pos-types';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerSearch, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
+import { Customer, Product, SavedOrder } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
@@ -121,6 +121,85 @@ export default function EditOrderPage() {
   // reason instead of thinking the order itself is gone.
   const [offlineUnavailable, setOfflineUnavailable] = useState(false);
   const { isOnline } = useNetworkStatus();
+
+  // Customer autocomplete for the Order Meta panel below - mirrors
+  // POSPage.tsx's own search-as-you-type dropdown (same offline-cache
+  // fallback via getReferenceData, same online path via
+  // fetchCustomerSearch) so editing a name/phone here surfaces existing
+  // saved customers instead of letting a cashier accidentally create a
+  // near-duplicate customer record by retyping one that already exists.
+  const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
+  const [isSearchingCustomers, setIsSearchingCustomers] = useState(false);
+  const [showCustomerSuggestions, setShowCustomerSuggestions] = useState(false);
+  const customerSuggestionRef = useRef<HTMLDivElement>(null);
+  const customerNameInputRef = useRef<HTMLInputElement>(null);
+  const customerPhoneInputRef = useRef<HTMLInputElement>(null);
+  const customerSearchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        customerSuggestionRef.current &&
+        !customerSuggestionRef.current.contains(event.target as Node) &&
+        !customerNameInputRef.current?.contains(event.target as Node) &&
+        !customerPhoneInputRef.current?.contains(event.target as Node)
+      ) {
+        setShowCustomerSuggestions(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  async function searchCustomers(query: string, searchBy: 'name' | 'phone') {
+    if (!query.trim() || query.trim().length < 2) {
+      setCustomerSuggestions([]);
+      setShowCustomerSuggestions(false);
+      return;
+    }
+    setIsSearchingCustomers(true);
+    try {
+      let result: Customer[];
+      if (isDesktopApp() && !isOnline) {
+        // Offline: filter the Local Hub's cached customer list, same
+        // approach as POSPage.tsx's own offline branch.
+        const snapshot = await getReferenceData();
+        const cached = (snapshot.customers || []) as Customer[];
+        const q = query.trim().toLowerCase();
+        result = cached
+          .filter((customer) => {
+            const matchesName = searchBy === 'name' && (customer.name || '').toLowerCase().includes(q);
+            const matchesPhone = searchBy === 'phone' && (customer.phone || '').toLowerCase().includes(q);
+            return matchesName || matchesPhone;
+          })
+          .slice(0, 20);
+      } else {
+        result = (await fetchCustomerSearch(query, searchBy)) || [];
+      }
+      setCustomerSuggestions(result);
+      setShowCustomerSuggestions(result.length > 0);
+    } catch {
+      setCustomerSuggestions([]);
+      setShowCustomerSuggestions(false);
+    } finally {
+      setIsSearchingCustomers(false);
+    }
+  }
+
+  function debouncedCustomerSearch(query: string, searchBy: 'name' | 'phone') {
+    if (customerSearchTimeoutRef.current) clearTimeout(customerSearchTimeoutRef.current);
+    customerSearchTimeoutRef.current = setTimeout(() => void searchCustomers(query, searchBy), 250);
+  }
+
+  function handleSelectCustomerSuggestion(customer: Customer) {
+    setOrder((previous) => previous ? {
+      ...previous,
+      customer: { ...previous.customer, name: customer.name, phone: customer.phone, address: customer.address },
+      address: customer.address,
+    } : previous);
+    setCustomerSuggestions([]);
+    setShowCustomerSuggestions(false);
+  }
 
   useEffect(() => {
     async function load() {
@@ -362,8 +441,51 @@ export default function EditOrderPage() {
           <div className="rounded-[32px] bg-white p-6 shadow-sm">
             <h2 className="mb-4 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Order Meta</h2>
             <div className="space-y-3">
-              <input value={order.customer.name} onChange={(event) => setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, name: event.target.value } } : previous)} placeholder="Customer name" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-              <input value={order.customer.phone} onChange={(event) => setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, phone: event.target.value } } : previous)} placeholder="Phone" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
+              <div className="relative">
+                <input
+                  ref={customerNameInputRef}
+                  value={order.customer.name}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, name: value } } : previous);
+                    if (value.trim().length >= 2) debouncedCustomerSearch(value.trim(), 'name');
+                    else { setCustomerSuggestions([]); setShowCustomerSuggestions(false); }
+                  }}
+                  onFocus={() => customerSuggestions.length > 0 && setShowCustomerSuggestions(true)}
+                  placeholder="Customer name"
+                  className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
+                />
+                <input
+                  ref={customerPhoneInputRef}
+                  value={order.customer.phone}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, phone: value } } : previous);
+                    if (value.trim().length >= 2) debouncedCustomerSearch(value.trim(), 'phone');
+                    else { setCustomerSuggestions([]); setShowCustomerSuggestions(false); }
+                  }}
+                  onFocus={() => customerSuggestions.length > 0 && setShowCustomerSuggestions(true)}
+                  placeholder="Phone"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
+                />
+                {showCustomerSuggestions && customerSuggestions.length > 0 ? (
+                  <div ref={customerSuggestionRef} className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+                    {isSearchingCustomers ? <div className="p-3 text-xs text-gray-500">Searching customers...</div> : null}
+                    {!isSearchingCustomers ? customerSuggestions.map((customer) => (
+                      <button key={customer.id} type="button" onClick={() => handleSelectCustomerSuggestion(customer)} className="block w-full border-b border-gray-100 px-3 py-2 text-left transition hover:bg-[#F8F9FB]">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-bold text-gray-900">{customer.name}</p>
+                            <p className="text-[11px] text-gray-500">{customer.phone}</p>
+                            <p className="text-[10px] text-gray-400">{customer.address}</p>
+                          </div>
+                          {customer.previousDues > 0 ? <span className="rounded-full bg-rose-50 px-2.5 py-1 text-[10px] font-bold text-rose-600">Due PKR {customer.previousDues}</span> : null}
+                        </div>
+                      </button>
+                    )) : null}
+                  </div>
+                ) : null}
+              </div>
               <input value={order.address} onChange={(event) => setOrder((previous) => previous ? { ...previous, address: event.target.value, customer: { ...previous.customer, address: event.target.value } } : previous)} placeholder="Address" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
               <input value={order.waiter} onChange={(event) => setOrder((previous) => previous ? { ...previous, waiter: event.target.value } : previous)} placeholder="Waiter" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
               <input value={order.table} onChange={(event) => setOrder((previous) => previous ? { ...previous, table: event.target.value } : previous)} placeholder="Table" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />

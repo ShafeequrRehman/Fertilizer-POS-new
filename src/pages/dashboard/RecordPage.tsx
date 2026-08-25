@@ -636,17 +636,28 @@ export default function RecordPage() {
     return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue);
   }, [itemSales, categoryByItem]);
 
-  // Whenever the underlying window/filters change, each table's own "Load
-  // More" progress would otherwise be showing a stale/inconsistent slice of
-  // a now-different list - snap all three back to the first 10 rows.
+  // Whenever the underlying window/filters actually change, each table's
+  // own "Load More" progress would otherwise be showing a stale/
+  // inconsistent slice of a now-different list - snap all three back to
+  // the first 10 rows. Deliberately depends on the FILTER inputs
+  // (date range, status, search) rather than on dayOrders/orders
+  // themselves: the 45s background poll (see loadAny's setInterval above)
+  // calls setOrders() with a brand new array reference on every tick even
+  // when the actual order list hasn't changed, which was resetting
+  // "Load More" progress back to 10 rows every 45 seconds - the person
+  // scrolled down, clicked Load More, and a moment later got yanked back
+  // to the top with the button reappearing. Reacting only to the filter
+  // identifiers means a poll landing mid-browse no longer disturbs it;
+  // reload the page (or actually change a filter) if a fresh count is
+  // wanted.
   useEffect(() => {
     setVisibleItemSalesCount(10);
     setVisibleCategorySalesCount(10);
-  }, [dayOrders, categoryByItem]);
+  }, [isCustomRange, rangeFrom, rangeTo, categoryByItem]);
 
   useEffect(() => {
     setVisibleOrdersCount(10);
-  }, [dayOrders, statusFilter, search, searchField]);
+  }, [isCustomRange, rangeFrom, rangeTo, statusFilter, search, searchField]);
 
   const visibleItemSales = itemSales.slice(0, visibleItemSalesCount);
   const visibleCategorySales = categorySales.slice(0, visibleCategorySalesCount);
@@ -1303,13 +1314,10 @@ function CompleteOrderModal({
         // auto-print just below.
         const updated = await saveOrderEditOffline(order, payload, false, false);
         triggerBackgroundSync();
-        // Auto-print the customer receipt the instant this order completes
-        // - fires for every order type (DineIn/TakeAway/Delivery all start
-        // pending and only ever complete through this same action) - see
-        // SalesPage.tsx's completeOrder for the full reasoning.
-        if (!updated.customerReceiptPrintedAt) {
-          printCustomerReceipt(updated, customerDue, toast, setPrintReadyUrl);
-        }
+        // No auto-print here any more, for any order type - see
+        // SalesPage.tsx's completeOrder for the full reasoning. Printing a
+        // customer receipt is now always a deliberate, on-demand action via
+        // the printer icon/button.
         toast.success(`Order completed. ${trulyOffline ? 'Will sync once back online.' : 'Syncing to the cloud...'}`);
         onCompleted(updated);
         return;
@@ -1318,9 +1326,6 @@ function CompleteOrderModal({
       // Only ever reached from a plain browser tab now (no Local Hub to
       // queue into).
       const updated = await updateOrder(order.id, payload);
-      if (!updated.customerReceiptPrintedAt) {
-        printCustomerReceipt(updated, customerDue, toast, setPrintReadyUrl);
-      }
       toast.success('Order completed.');
       onCompleted(updated);
     } catch (err) {
@@ -1362,11 +1367,16 @@ function CompleteOrderModal({
         <div className="mt-4">
           <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Partial Payment Amount</label>
           <input
-            type="number"
             value={paymentAmount}
             onChange={(event) => {
-              setPaymentAmount(event.target.value);
-              if (event.target.value) setConfirmPending(false);
+              if (!/^\d*$/.test(event.target.value)) return;
+              // Clamped to Payable Now as they type - same fix as
+              // SalesPage.tsx's Complete Payment modal, so this field can
+              // never hold an amount above what's actually owed.
+              const digitsOnly = event.target.value;
+              const clamped = digitsOnly === '' ? '' : String(Math.min(Number(digitsOnly), payable));
+              setPaymentAmount(clamped);
+              if (clamped) setConfirmPending(false);
             }}
             placeholder={`Up to Rs ${payable}`}
             className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"

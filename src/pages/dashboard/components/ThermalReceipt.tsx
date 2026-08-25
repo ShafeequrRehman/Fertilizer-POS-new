@@ -22,8 +22,17 @@ export default function ThermalReceipt({
   }, []);
 
   const itemsTotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, itemsTotal) : undefined;
-  const dueAmount = Math.max(itemsTotal - (amountTendered ?? 0), 0);
+  // order.total is the real, backend-computed total - once a discount has
+  // been applied (see SalesPage.tsx's completeOrder) that's already
+  // subtracted out of it, unlike itemsTotal above which is always the raw,
+  // pre-discount sum of the item lines. Falling back to itemsTotal only
+  // covers an order printed before order.total was ever set (shouldn't
+  // happen for a completed order, but matches ItemizedBillReceipt.tsx's
+  // same defensive fallback).
+  const billTotal = order.total ?? itemsTotal;
+  const discountAmount = order.discount?.amount || 0;
+  const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
+  const dueAmount = Math.max(billTotal - (amountTendered ?? 0), 0);
   const date = order.createdAt ? new Date(order.createdAt) : null;
   const dateString = date
     ? date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()
@@ -166,9 +175,19 @@ export default function ThermalReceipt({
             <span>Items Total:</span>
             <span>Rs {itemsTotal.toFixed(2)}</span>
           </div>
+          {/* This used to print itemsTotal again here too, meaning a
+              discount never showed up anywhere on this receipt - the
+              customer just saw the same figure twice with no explanation
+              for why it was less than the item lines added up to. */}
+          {discountAmount > 0 && (
+            <div className="flex justify-between">
+              <span>Discount {order.discount?.type === 'percent' ? `(${order.discount.value}% - Percentage)` : '(Fixed Value)'}:</span>
+              <span>-Rs {discountAmount.toFixed(2)}</span>
+            </div>
+          )}
           <div className="flex justify-between gap-2 font-bold text-[13px] mt-1">
             <span>TOTAL:</span>
-            <span className="shrink-0 pr-[1mm]">Rs {itemsTotal.toFixed(2)}</span>
+            <span className="shrink-0 pr-[1mm]">Rs {billTotal.toFixed(2)}</span>
           </div>
 
           <div className="mt-3">
@@ -180,11 +199,24 @@ export default function ThermalReceipt({
               <p>DUE: Rs {dueAmount.toFixed(2)}</p>
             )}
             {previousDues > 0 && (
+              // Full arrears breakdown - only for a customer who actually
+              // has previous dues (see this component's own doc comment
+              // on `previousDues`); a customer with none never sees any
+              // of this, everything else on the receipt stays exactly as
+              // it was.
               <>
-                <p className="mt-1">PREVIOUS DUES: Rs {previousDues.toFixed(2)}</p>
+                <p className="mt-1">ARREARS: Rs {previousDues.toFixed(2)}</p>
+                <div className="flex justify-between">
+                  <span>ARREARS+INV BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {(previousDues + billTotal).toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>INVOICE BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {dueAmount.toFixed(2)}</span>
+                </div>
                 <div className="flex justify-between font-bold">
-                  <span>TOTAL OUTSTANDING:</span>
-                  <span className="pr-[1mm]">Rs {(itemsTotal + previousDues).toFixed(2)}</span>
+                  <span>ACCOUNT BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {(previousDues + dueAmount).toFixed(2)}</span>
                 </div>
               </>
             )}

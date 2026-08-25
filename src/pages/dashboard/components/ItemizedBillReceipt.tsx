@@ -166,6 +166,17 @@ export default function ItemizedBillReceipt({
         <span className="pr-[1mm]">{(subtotal + scAmount).toFixed(0)}</span>
       </div>
 
+      {/* discountAmount was already being computed above (as a fallback for
+          billTotal when order.total was missing) but never actually shown
+          on the printout - the customer had no way to see a discount was
+          applied at all, only a smaller final number. */}
+      {discountAmount > 0 && (
+        <div className="flex justify-between">
+          <span>Discount {order.discount?.type === 'percent' ? `(${order.discount.value}% - Percentage)` : '(Fixed Value)'}:</span>
+          <span className="pr-[1mm]">-{discountAmount.toFixed(0)}</span>
+        </div>
+      )}
+
       <div className="flex justify-between font-bold mt-2">
         <span>Bill Total:</span>
         <span className="pr-[1mm]">{billTotal.toFixed(0)}</span>
@@ -176,11 +187,24 @@ export default function ItemizedBillReceipt({
           {amountTendered !== undefined && <p>Amount Tendered: {amountTendered.toFixed(0)}</p>}
           {dueAmount > 0 && <p>Due: {dueAmount.toFixed(0)}</p>}
           {previousDues > 0 && (
+            // Full arrears breakdown - only for a customer who actually
+            // has previous dues (see this component's own doc comment on
+            // `previousDues`); a customer with none never sees any of
+            // this, everything else on the receipt stays exactly as it
+            // was.
             <>
-              <p>Previous Dues: {previousDues.toFixed(0)}</p>
+              <p>Arrears: {previousDues.toFixed(0)}</p>
+              <div className="flex justify-between">
+                <span>Arrears+Inv Balance:</span>
+                <span className="pr-[1mm]">{(previousDues + billTotal).toFixed(0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Invoice Balance:</span>
+                <span className="pr-[1mm]">{dueAmount.toFixed(0)}</span>
+              </div>
               <div className="flex justify-between font-bold">
-                <span>Total Outstanding:</span>
-                <span className="pr-[1mm]">{(billTotal + previousDues).toFixed(0)}</span>
+                <span>Account Balance:</span>
+                <span className="pr-[1mm]">{(previousDues + dueAmount).toFixed(0)}</span>
               </div>
             </>
           )}

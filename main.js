@@ -719,13 +719,14 @@ if (!gotTheLock) {
     h += 15; // Dashed rule
 
     if (type === "cashier") {
-      h += 50; // Total, PAID
+      h += 50; // Items Total, TOTAL, PAID
+      if (Number(orderData?.discount?.amount) > 0) h += 15; // Discount row
       const total = getItemsTotal(orderData);
       const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
       const dueAmount = Math.max(total - (amountTendered ?? 0), 0);
       if (amountTendered !== undefined) h += 15;
       if (dueAmount > 0) h += 15;
-      if (Number(orderData?.previousDues) > 0) h += 30; // Previous Dues + Total Outstanding rows
+      if (Number(orderData?.previousDues) > 0) h += 60; // Arrears/Arrears+Inv Balance/Invoice Balance/Account Balance rows
       h += 15; // Dashed rule
     }
 
@@ -868,6 +869,14 @@ if (!gotTheLock) {
 
     const items = orderData?.items || [];
     const total = getItemsTotal(orderData);
+    // getItemsTotal prefers orderData.total when it's set, which is already
+    // net of any discount (see SalesPage.tsx's completeOrder) - that's
+    // right for the actual TOTAL line, but it meant "Items Total" printed
+    // that SAME already-discounted number, with no discount line anywhere
+    // to explain why it was less than the raw item sum. itemsSubtotal is
+    // that raw, pre-discount sum specifically for the "Items Total" row.
+    const itemsSubtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1), 0);
+    const discountAmount = Number(orderData?.discount?.amount) || 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
     const dueAmount = Math.max(total - (amountTendered ?? 0), 0);
     // Dues carried forward from the customer's OTHER unpaid orders, not
@@ -963,8 +972,12 @@ if (!gotTheLock) {
         type === "cashier" ? h(View, null,
           h(View, { style: receiptStyles.row },
             h(Text, null, "Items Total:"),
-            h(Text, { style: receiptStyles.rowRight }, `Rs ${total.toFixed(2)}`)
+            h(Text, { style: receiptStyles.rowRight }, `Rs ${itemsSubtotal.toFixed(2)}`)
           ),
+          discountAmount > 0 ? h(View, { style: receiptStyles.row },
+            h(Text, null, `Discount ${orderData?.discount?.type === "percent" ? `(${orderData.discount.value}% - Percentage)` : "(Fixed Value)"}:`),
+            h(Text, { style: receiptStyles.rowRight }, `-Rs ${discountAmount.toFixed(2)}`)
+          ) : null,
           h(View, { style: receiptStyles.row },
             h(Text, { style: receiptStyles.bold }, "TOTAL:"),
             h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${total.toFixed(2)}`)
@@ -972,10 +985,22 @@ if (!gotTheLock) {
           h(Text, { style: { marginTop: 6 } }, `PAID: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
           amountTendered !== undefined ? h(Text, null, `AMOUNT TENDERED: Rs ${amountTendered.toFixed(2)}`) : null,
           dueAmount > 0 ? h(Text, null, `DUE: Rs ${dueAmount.toFixed(2)}`) : null,
-          previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `PREVIOUS DUES: Rs ${previousDues.toFixed(2)}`) : null,
+          // Full arrears breakdown - only for a customer who actually has
+          // previous dues (see this receipt's own doc comment); a
+          // customer with none never sees any of this, unchanged from
+          // before.
+          previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `ARREARS: Rs ${previousDues.toFixed(2)}`) : null,
           previousDues > 0 ? h(View, { style: receiptStyles.row },
-            h(Text, { style: receiptStyles.bold }, "TOTAL OUTSTANDING:"),
-            h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${(total + previousDues).toFixed(2)}`)
+            h(Text, null, "ARREARS+INV BALANCE:"),
+            h(Text, { style: receiptStyles.rowRight }, `Rs ${(total + previousDues).toFixed(2)}`)
+          ) : null,
+          previousDues > 0 ? h(View, { style: receiptStyles.row },
+            h(Text, null, "INVOICE BALANCE:"),
+            h(Text, { style: receiptStyles.rowRight }, `Rs ${dueAmount.toFixed(2)}`)
+          ) : null,
+          previousDues > 0 ? h(View, { style: receiptStyles.row },
+            h(Text, { style: receiptStyles.bold }, "ACCOUNT BALANCE:"),
+            h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${(previousDues + dueAmount).toFixed(2)}`)
           ) : null,
           h(View, { style: receiptStyles.dashedRule })
         ) : null,
@@ -1093,6 +1118,7 @@ if (!gotTheLock) {
     const scPercent = Number(settings?.serviceChargePercent) || 0;
     const scAmount = scPercent > 0 ? Math.round((subtotal * scPercent) / 100) : 0;
     const billTotal = typeof orderData?.total === "number" ? orderData.total : Math.max(subtotal + scAmount, 0);
+    const discountAmount = Number(orderData?.discount?.amount) || 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), billTotal) : undefined;
     const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
     const previousDues = Number(orderData?.previousDues) || 0;
@@ -1160,6 +1186,10 @@ if (!gotTheLock) {
           h(Text, { style: receiptStyles.bold }, "Total:"),
           h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (subtotal + scAmount).toFixed(0))
         ),
+        discountAmount > 0 ? h(View, { style: receiptStyles.row },
+          h(Text, null, `Discount ${orderData?.discount?.type === "percent" ? `(${orderData.discount.value}% - Percentage)` : "(Fixed Value)"}:`),
+          h(Text, { style: receiptStyles.rowRight }, `-${discountAmount.toFixed(0)}`)
+        ) : null,
         // Two-column row (label + value in its own right-aligned Text),
         // same as the "Total:" row above it - NOT one bold string with
         // textAlign:"right", which is what was actually causing the real
@@ -1176,10 +1206,21 @@ if (!gotTheLock) {
         ),
         amountTendered !== undefined ? h(Text, { style: { marginTop: 4 } }, `Amount Tendered: ${amountTendered.toFixed(0)}`) : null,
         dueAmount > 0 ? h(Text, null, `Due: ${dueAmount.toFixed(0)}`) : null,
-        previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `Previous Dues: ${previousDues.toFixed(0)}`) : null,
+        // Full arrears breakdown - only for a customer who actually has
+        // previous dues, matching ItemizedBillReceipt.tsx's own on-screen
+        // preview; a customer with none never sees any of this.
+        previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `Arrears: ${previousDues.toFixed(0)}`) : null,
         previousDues > 0 ? h(View, { style: receiptStyles.row },
-          h(Text, { style: receiptStyles.bold }, "Total Outstanding:"),
-          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (billTotal + previousDues).toFixed(0))
+          h(Text, null, "Arrears+Inv Balance:"),
+          h(Text, { style: receiptStyles.rowRight }, (billTotal + previousDues).toFixed(0))
+        ) : null,
+        previousDues > 0 ? h(View, { style: receiptStyles.row },
+          h(Text, null, "Invoice Balance:"),
+          h(Text, { style: receiptStyles.rowRight }, dueAmount.toFixed(0))
+        ) : null,
+        previousDues > 0 ? h(View, { style: receiptStyles.row },
+          h(Text, { style: receiptStyles.bold }, "Account Balance:"),
+          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (previousDues + dueAmount).toFixed(0))
         ) : null,
         h(View, { style: { marginTop: 6 } },
           h(Text, { style: receiptStyles.bold }, "In Words:"),
@@ -1288,12 +1329,13 @@ if (!gotTheLock) {
       if (item.variation) h += 10;
     });
     if (Number(settings?.serviceChargePercent) > 0) h += 14;
+    if (Number(orderData?.discount?.amount) > 0) h += 14; // Discount row
     h += 40; // Total + Bill Total
     const total = typeof orderData?.total === "number" ? orderData.total : 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
     if (amountTendered !== undefined) h += 14;
     if (Math.max(total - (amountTendered ?? total), 0) > 0) h += 14;
-    if (Number(orderData?.previousDues) > 0) h += 28;
+    if (Number(orderData?.previousDues) > 0) h += 56; // Arrears/Arrears+Inv Balance/Invoice Balance/Account Balance rows
     h += 40; // In Words block
     h += 50; // footer (optional footer message + fixed "Haider's Creation" / phone lines)
     return h;

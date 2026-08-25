@@ -111,12 +111,12 @@ export default function CustomerDuesPage() {
   // amount field on a real success, and surfaces a toast either way
   // instead of silently doing nothing on failure (updateCustomerDues
   // throws on any HTTP error).
-  const handleAddManualDue = async (phone: string, amount: number): Promise<boolean> => {
+  const handleAddManualDue = async (phone: string, amount: number, note: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
 
     try {
-      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount);
+      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount, note);
       if (!updated) {
         toast.error('Could not update dues.');
         return false;
@@ -139,14 +139,14 @@ export default function CustomerDuesPage() {
   // distribution completeAndSettle's cascade already uses elsewhere).
   // amount is capped at totalDue before this is ever called (see
   // CustomerCard) - defensively re-checked here too.
-  const handleSettlePayment = async (phone: string, amount: number): Promise<boolean> => {
+  const handleSettlePayment = async (phone: string, amount: number, note: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer) return false;
     const cappedAmount = Math.min(amount, customer.totalDue || 0);
     if (cappedAmount <= 0) return false;
 
     try {
-      const result = await settleCustomerDues(phone, cappedAmount);
+      const result = await settleCustomerDues(phone, cappedAmount, note);
       if (!result) {
         toast.error('Could not record payment.');
         return false;
@@ -379,16 +379,47 @@ export default function CustomerDuesPage() {
   );
 }
 
-function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number) => Promise<boolean>, onSettlePayment: (phone: string, amount: number) => Promise<boolean>, onRemind: () => void }) {
+function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void }) {
   const { confirm } = useToast();
   const [amount, setAmount] = useState<string>('');
+  const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Collapsed by default - the History list can get long on a
+  // long-standing customer, no point rendering/scrolling past it on every
+  // card just to see the current balance.
+  const [showHistory, setShowHistory] = useState(false);
 
   const isPending = (customer.totalDue || 0) > 0;
   const fromOrders = customer.totalOrderBalance || 0;
   const fromLumpSum = customer.previousDues || 0;
   const totalDue = customer.totalDue || 0;
   const amountValue = Number(amount) || 0;
+
+  // Unified "everything that makes up what this customer owes" trail -
+  // merges the manual duesHistory entries (each with whatever note was
+  // typed) with the order-based ones (each tagged with its order number),
+  // newest first, so a dropdown here answers "where did this due come
+  // from" without having to separately check Sales/Ledger.
+  const historyEntries = [
+    ...customer.duesHistory.map((entry) => ({
+      key: `manual-${entry.createdAt}-${entry.amount}`,
+      date: entry.createdAt,
+      label: entry.type === 'add' ? `+ Rs ${entry.amount} added` : `- Rs ${entry.amount} paid`,
+      detail: entry.note || 'No note',
+      tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
+      by: entry.createdBy,
+    })),
+    ...customer.orders
+      .filter((order) => order.status !== 'cancelled')
+      .map((order) => ({
+        key: `order-${order.id}`,
+        date: order.createdAt,
+        label: `Order #${order.dailyOrderNumber ?? order.id.slice(-4)} - Rs ${order.total}`,
+        detail: order.remainingAmount > 0 ? `Rs ${order.remainingAmount} still due (paid Rs ${order.paidAmount})` : 'Fully paid',
+        tone: order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
+        by: '',
+      })),
+  ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   return (
     <div className={`p-6 rounded-[28px] border ${isPending ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 bg-white'} shadow-sm flex flex-col gap-4`}>
@@ -432,13 +463,20 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
           onChange={e => setAmount(e.target.value)}
           className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500"
         />
+        <input
+          type="text"
+          placeholder="Note (e.g. damaged item, cash payment...)"
+          value={note}
+          onChange={e => setNote(e.target.value)}
+          className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none focus:border-indigo-500"
+        />
         <div className="flex gap-2">
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onAddManual(customer.phone, amountValue);
+              const ok = await onAddManual(customer.phone, amountValue, note.trim());
               setSaving(false);
-              if (ok) setAmount('');
+              if (ok) { setAmount(''); setNote(''); }
             }}
             disabled={saving || amountValue <= 0}
             className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
@@ -448,9 +486,9 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, amountValue);
+              const ok = await onSettlePayment(customer.phone, amountValue, note.trim());
               setSaving(false);
-              if (ok) setAmount('');
+              if (ok) { setAmount(''); setNote(''); }
             }}
             disabled={saving || amountValue <= 0 || amountValue > totalDue}
             className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
@@ -463,8 +501,9 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
               const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
               if (!confirmed) return;
               setSaving(true);
-              await onSettlePayment(customer.phone, totalDue);
+              const ok = await onSettlePayment(customer.phone, totalDue, note.trim());
               setSaving(false);
+              if (ok) { setAmount(''); setNote(''); }
             }}
             disabled={saving || totalDue <= 0}
             className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -473,6 +512,33 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
             {saving ? '...' : 'Clear'}
           </button>
         </div>
+
+        {historyEntries.length > 0 ? (
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowHistory((previous) => !previous)}
+              className="w-full flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-100 transition-colors"
+            >
+              <span>History ({historyEntries.length})</span>
+              <span className="text-slate-400">{showHistory ? '▲' : '▼'}</span>
+            </button>
+            {showHistory ? (
+              <div className="mt-2 max-h-56 space-y-2 overflow-y-auto rounded-xl border border-slate-100 p-2">
+                {historyEntries.map((entry) => (
+                  <div key={entry.key} className="rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`font-black ${entry.tone}`}>{entry.label}</span>
+                      <span className="shrink-0 text-slate-400">{new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                    </div>
+                    <p className="mt-0.5 text-slate-500 font-semibold">{entry.detail}</p>
+                    {entry.by ? <p className="mt-0.5 text-slate-400">by {entry.by}</p> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

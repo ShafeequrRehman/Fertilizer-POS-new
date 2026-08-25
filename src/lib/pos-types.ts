@@ -47,6 +47,21 @@ export interface LedgerOrder {
   remainingAmount: number;
 }
 
+// One manual "+ Add Dues" / "- Pay Dues" / "Clear" entry from the Customer
+// Dues page - see backend/models/Customer.js's duesHistory subdocument.
+// Merged client-side with LedgerCustomer.orders (DuesPage.tsx's History
+// dropdown) to give a single "here's everything that makes up what this
+// customer owes" trail: a note for manual entries, an order number for
+// order-based ones.
+export interface DuesHistoryEntry {
+  type: 'add' | 'settle';
+  amount: number;
+  note: string;
+  balanceAfter: number;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface LedgerCustomer {
   id: string;
   name: string;
@@ -60,6 +75,7 @@ export interface LedgerCustomer {
   totalDue: number;
   lastOrderAt: string | null;
   orders: LedgerOrder[];
+  duesHistory: DuesHistoryEntry[];
 }
 
 export interface Waiter {
