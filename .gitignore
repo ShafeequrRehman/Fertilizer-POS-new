@@ -15,7 +15,14 @@ node_modules/
 /coverage
 
 # vite
-/dist/
+# /dist/ used to be ignored (a normal build artifact) - now deliberately
+# tracked in git. The backend serves this folder directly to the public
+# (see backend/index.js's express.static(dist) mount, for the customer QR
+# ordering PWA) - committing it means a plain `git pull` on the server
+# brings the built frontend along with the backend code, instead of
+# needing a separate manual copy step every deploy. Run `npm run build`
+# before committing whenever frontend source changes, so this never goes
+# stale relative to src/.
 dist-electron/
 
 # electron-builder installer output (large - installers, unpacked builds, caches)
