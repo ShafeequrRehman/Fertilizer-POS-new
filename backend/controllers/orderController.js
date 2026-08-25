@@ -6,6 +6,7 @@ const ShopSession = require("../models/ShopSession");
 const Shop = require("../models/Shop");
 const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
+const { notifyRiderForDelivery } = require("../services/riderNotificationService");
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -1262,5 +1263,60 @@ exports.importOfflineCancellations = async (req, res) => {
     res.json({ applied, failed });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+const TRACKING_STATUSES = ["awaiting_confirmation", "confirmed", "preparing", "ready", "cancelled"];
+
+// PATCH /api/orders/:id/tracking-status  body: { trackingStatus, reason? }
+// Staff/admin-only control for the customer-tracking lifecycle of a
+// customer-qr order (see models/Order.js's trackingStatus field comment -
+// deliberately separate from the real `status` field used everywhere
+// else). This is what CustomerOrderPage.tsx's status-polling screen
+// reflects back to the customer, and what fires the rider WhatsApp
+// notification the moment a Delivery order is accepted.
+exports.updateTrackingStatus = async (req, res) => {
+  try {
+    const { trackingStatus, reason } = req.body || {};
+    if (!TRACKING_STATUSES.includes(trackingStatus)) {
+      return res.status(400).json({ message: "Invalid tracking status." });
+    }
+
+    const query = { _id: req.params.id, ...buildShopScope(req) };
+    const order = await Order.findOne(query);
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (order.source !== "customer-qr") {
+      return res.status(400).json({ message: "This isn't a customer-placed order." });
+    }
+    if (order.trackingStatus === "cancelled") {
+      return res.status(400).json({ message: "This order was already cancelled." });
+    }
+
+    order.trackingStatus = trackingStatus;
+    if (trackingStatus === "cancelled") {
+      // Same terminal fields the real cancel flow sets (see
+      // cancelOrderCore above) so a cancelled customer-qr order disappears
+      // from active order lists the same way any other cancelled order
+      // does - deliberately WITHOUT the bcrypt Cancel Order Key gate that
+      // guards staff cancelling an already-rung-up order, since this is
+      // declining/voiding an order that hasn't been accepted into the
+      // kitchen queue yet (or, if it has, is still this shop's own call to
+      // make on their own incoming online order - no cash-drawer
+      // accounting depends on it the way a staff-placed order's does).
+      const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
+      order.status = "cancelled";
+      order.cancelledAt = new Date();
+      order.cancelledBy = user?.name || user?.username || "";
+      order.cancelReason = reason || "Declined by shop";
+    } else if (trackingStatus === "confirmed" && order.orderType === "Delivery") {
+      const shop = await Shop.findById(order.shopId).select("name riderPhones").lean();
+      void notifyRiderForDelivery(order, shop);
+    }
+
+    order.version = Number(order.version || 0) + 1;
+    await order.save();
+    res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };

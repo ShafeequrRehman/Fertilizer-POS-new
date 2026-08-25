@@ -41,4 +41,9 @@ router.patch("/profile", ctrl.updateOwnShop);
 // Admin assigned - see shopOwnerController.exports.updateEnabledPages)
 router.patch("/pages", ctrl.updateEnabledPages);
 
+// Customer QR ordering: rider WhatsApp number(s) + JazzCash/EasyPaisa
+// merchant credentials (see SettingsPage.tsx's Customer Ordering section).
+router.get("/ordering-settings", ctrl.getOrderingSettings);
+router.patch("/ordering-settings", ctrl.updateOrderingSettings);
+
 module.exports = router;

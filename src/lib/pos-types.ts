@@ -208,6 +208,15 @@ export interface OrderPayload {
   cancelReason?: string;
   discount?: Discount | null;
   userId?: string;
+  // "staff" (the default) for anything rung up from the till/POSPage.tsx/
+  // pos-mobile as normal - "customer-qr" only for an order a customer
+  // placed themselves via the QR ordering page (see
+  // backend/controllers/publicOrderController.js). See SalesPage.tsx's
+  // OnlineOrderControls for where trackingStatus is shown/advanced.
+  source?: 'staff' | 'customer-qr';
+  trackingStatus?: 'awaiting_confirmation' | 'confirmed' | 'preparing' | 'ready' | 'cancelled';
+  paymentStatus?: 'unpaid' | 'awaiting_confirmation' | 'paid' | 'failed';
+  deliveryLocation?: { lat: number; lng: number; accuracy?: number | null; capturedAt?: string | null } | null;
 }
 
 export interface SavedOrder extends OrderPayload {

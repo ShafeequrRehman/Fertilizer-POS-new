@@ -451,6 +451,21 @@ export async function cancelOrder(id: string, payload: CancelOrderPayload) {
   }
 }
 
+export type TrackingStatus = 'awaiting_confirmation' | 'confirmed' | 'preparing' | 'ready' | 'cancelled';
+
+// See orderController.exports.updateTrackingStatus - staff-side control
+// for a customer-qr order's tracking lifecycle (see SalesPage.tsx's
+// OnlineOrderControls). Only ever valid for orders with source ===
+// "customer-qr"; the backend rejects anything else.
+export async function updateOrderTrackingStatus(id: string, trackingStatus: TrackingStatus, reason?: string) {
+  try {
+    const response = await api.patch<SavedOrder & { _id?: string }>(`/orders/${id}/tracking-status`, { trackingStatus, reason });
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // GET /shop/profile - includes enabledPages (this shop's current sidebar
 // page selection, null if never configured) and hasPageVisibilityKey
 // (whether the Super Admin has set up the key needed to change it). Never
@@ -483,6 +498,50 @@ export async function fetchShopProfile() {
 export async function updateEnabledPages(enabledPages: string[], key: string) {
   try {
     const response = await api.patch<{ enabledPages: string[] }>('/shop/pages', { enabledPages, key });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export interface JazzCashConfig {
+  merchantId: string;
+  password: string;
+  integritySalt: string;
+  environment: 'sandbox' | 'live';
+}
+export interface EasyPaisaConfig {
+  storeId: string;
+  hashKey: string;
+  environment: 'sandbox' | 'live';
+}
+export interface OrderingSettings {
+  riderPhones: string[];
+  paymentGateway: { jazzCash?: Partial<JazzCashConfig>; easyPaisa?: Partial<EasyPaisaConfig> };
+}
+
+// See shopOwnerController.exports.getOrderingSettings/updateOrderingSettings
+// - kept separate from fetchShopProfile above specifically because this
+// one carries real payment-gateway secrets (JazzCash password/Integrity
+// Salt, EasyPaisa Hash Key), so it's only ever fetched by
+// CustomerOrderingSection.tsx, never the general shop-profile call used
+// broadly across the dashboard.
+export async function fetchOrderingSettings() {
+  try {
+    const response = await api.get<OrderingSettings>('/shop/ordering-settings');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateOrderingSettings(payload: {
+  riderPhones?: string[];
+  jazzCash?: Partial<JazzCashConfig>;
+  easyPaisa?: Partial<EasyPaisaConfig>;
+}) {
+  try {
+    const response = await api.patch<OrderingSettings>('/shop/ordering-settings', payload);
     return response.data;
   } catch (error) {
     handleApiError(error);

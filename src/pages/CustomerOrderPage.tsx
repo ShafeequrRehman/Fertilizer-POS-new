@@ -1,0 +1,575 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download } from 'lucide-react';
+import {
+  createPublicOrder,
+  fetchPublicCustomerStatus,
+  fetchPublicMenu,
+  fetchPublicOrderStatus,
+  fetchPublicTables,
+  initiatePublicPayment,
+  type PaymentRedirect,
+  type PublicMenuProduct,
+  type PublicMenuResponse,
+  type PublicOrderResult,
+  type PublicOrderStatus,
+} from '@/lib/public-order-api';
+import { getTableOptions, formatTableLabel } from '@/lib/table-options';
+import { getApiBaseCandidates } from '@/lib/api';
+
+// The customer-facing QR ordering PWA (see Settings > Customer Ordering for
+// how a shop gets its link/QR) - reachable at /order/:shopId with NO login,
+// from a customer's own phone browser after scanning the shop's QR code,
+// and installable to their home screen (see manifest.json/sw.js - this is
+// deliberately a plain installable web app, not an Expo/APK build, per an
+// explicit request to avoid app-store/build-pipeline overhead). A second
+// route, /order/:shopId/status/:orderId, deep-links straight to the
+// tracking view below - used when a JazzCash/EasyPaisa payment redirects
+// the customer's browser back (see publicOrderController.js's
+// jazzCashCallback/easyPaisaCallback) and by anyone re-opening/bookmarking
+// their order.
+//
+// Every write here goes through backend/controllers/publicOrderController.js,
+// which re-validates and re-prices everything server-side. This page's job
+// is just to collect the order and show a clear error if the backend
+// rejects it, not to be the source of truth for any of those checks itself.
+
+type CartLine = { product: PublicMenuProduct; quantity: number };
+type OrderType = 'DineIn' | 'TakeAway' | 'Delivery';
+
+const formatter = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 });
+
+const TRACKING_LABELS: Record<string, { label: string; tone: string }> = {
+  awaiting_confirmation: { label: 'Waiting for the shop to accept your order', tone: 'bg-amber-50 text-amber-800' },
+  confirmed: { label: 'Order confirmed - getting started', tone: 'bg-blue-50 text-blue-800' },
+  preparing: { label: 'Preparing your order', tone: 'bg-indigo-50 text-indigo-800' },
+  ready: { label: 'Ready', tone: 'bg-emerald-50 text-emerald-800' },
+  cancelled: { label: 'This order was cancelled', tone: 'bg-rose-50 text-rose-800' },
+};
+
+// Best-effort real-time location capture - never blocks placing the order.
+// A customer who denies/has no GPS still checks out fine on their typed
+// address alone (see publicOrderController.js's createOrder, which treats
+// this as optional). 8s timeout so a stuck GPS fix can't stall checkout.
+function captureLocation(): Promise<{ lat: number; lng: number; accuracy?: number } | null> {
+  return new Promise((resolve) => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({ lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+    );
+  });
+}
+
+// Auto-submits a hidden HTML form to the gateway's own hosted checkout
+// page - JazzCash/EasyPaisa both expect a real browser POST (not a fetch/
+// XHR redirect) so their page can render normally and eventually redirect
+// back through publicOrderController.js's callback routes.
+function redirectToGateway(redirect: PaymentRedirect) {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = redirect.url;
+  Object.entries(redirect.fields).forEach(([key, value]) => {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = key;
+    input.value = value;
+    form.appendChild(input);
+  });
+  document.body.appendChild(form);
+  form.submit();
+}
+
+function OrderStatusPanel({ shopId, orderId }: { shopId: string; orderId: string }) {
+  const [status, setStatus] = useState<PublicOrderStatus | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const result = await fetchPublicOrderStatus(shopId, orderId);
+        if (!cancelled) setStatus(result);
+      } catch {
+        if (!cancelled) setError("Couldn't load this order.");
+      }
+    }
+    void poll();
+    const intervalId = window.setInterval(poll, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [shopId, orderId]);
+
+  if (error) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] p-6 text-center text-sm font-bold text-gray-500">{error}</div>
+    );
+  }
+  if (!status) {
+    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading your order...</div>;
+  }
+
+  const tracking = TRACKING_LABELS[status.trackingStatus] || TRACKING_LABELS.awaiting_confirmation;
+  return (
+    <div className="min-h-screen bg-[#F8F9FB] p-6">
+      <div className="mx-auto max-w-md rounded-[28px] bg-white p-8 text-center shadow-sm">
+        <CheckCircle2 className="mx-auto mb-3 text-emerald-500" size={56} />
+        <h1 className="text-2xl font-black text-gray-900">Order #{status.dailyOrderNumber}</h1>
+        <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-black ${tracking.tone}`}>{tracking.label}</div>
+        <div className="mt-6 space-y-2 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
+          <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="font-black">{status.orderType}</span></div>
+          {status.table ? <div className="flex justify-between"><span className="text-gray-500">Table</span><span className="font-black">{formatTableLabel(status.table)}</span></div> : null}
+          <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-black">Rs {formatter.format(status.total)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Payment</span><span className="font-black capitalize">{status.paymentStatus.replace('_', ' ')}</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function CustomerOrderPage() {
+  const params = useParams<{ shopId: string; orderId?: string }>();
+  const shopId = params.shopId || '';
+
+  // Swap the page's <link rel="manifest"> to this shop's own per-shop
+  // manifest (see publicOrderController.js's getManifest) and register the
+  // installability service worker - both scoped to ONLY this customer-
+  // facing page mounting, never touching the staff dashboard/Electron
+  // shell's own generic /manifest.json or lack of a service worker. Runs
+  // for both the ordering flow and the status-tracking deep link below,
+  // since a customer could land on either first.
+  useEffect(() => {
+    if (!shopId || typeof document === 'undefined') return;
+
+    // Built from the same resolved API base as every other public-order
+    // call (see public-order-api.ts's getShopOrderingUrl) - NOT a
+    // hardcoded "/api/..." root path, because a shop deployed behind an
+    // nginx path prefix (e.g. VITE_API_URL=https://host/pos/api) needs
+    // that same "/pos" prefix here too, or the manifest 404s in production
+    // even though it works fine in local dev without a prefix.
+    const candidates = getApiBaseCandidates();
+    const apiBase = candidates.find((base) => !base.includes('localhost')) || candidates[0] || '';
+    const link = document.querySelector('link[rel="manifest"]');
+    const previousHref = link?.getAttribute('href') || null;
+    if (link && apiBase) link.setAttribute('href', `${apiBase}/public/${shopId}/manifest.json`);
+
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      // Relative (no leading "/") so it resolves against the CURRENT page
+      // URL rather than the site root - correct both for a bare-root
+      // deployment and one served under a path prefix like "/pos/".
+      navigator.serviceWorker.register('sw.js').catch(() => {
+        // Non-fatal - the page still works fully as a plain web page, it
+        // just won't offer the "Add to Home Screen" install prompt.
+      });
+    }
+
+    return () => {
+      if (link && previousHref) link.setAttribute('href', previousHref);
+    };
+  }, [shopId]);
+
+  // Deep link from a payment-gateway redirect or a re-opened order - skip
+  // straight to the tracking view, no menu/cart involved. Kept as a plain
+  // component-selection branch (not an early return inside the ordering
+  // flow itself) so the ordering flow's own hooks below are never
+  // conditionally skipped - see CustomerOrderingFlow.
+  if (params.orderId) {
+    return <OrderStatusPanel shopId={shopId} orderId={params.orderId} />;
+  }
+  return <CustomerOrderingFlow shopId={shopId} />;
+}
+
+function CustomerOrderingFlow({ shopId }: { shopId: string }) {
+  const [menu, setMenu] = useState<PublicMenuResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
+  const [category, setCategory] = useState('All');
+  const [cart, setCart] = useState<Map<string, CartLine>>(new Map());
+  const [showCart, setShowCart] = useState(false);
+
+  const [orderType, setOrderType] = useState<OrderType>('DineIn');
+  const [customerName, setCustomerName] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerAddress, setCustomerAddress] = useState('');
+  const [note, setNote] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'JazzCash' | 'EasyPaisa'>('Cash');
+
+  const [tables, setTables] = useState<string[]>([]);
+  const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
+  const [table, setTable] = useState('');
+
+  const [activeTableWarning, setActiveTableWarning] = useState<{ table: string; dailyOrderNumber: number } | null>(null);
+  const phoneCheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [placing, setPlacing] = useState(false);
+  const [placeError, setPlaceError] = useState('');
+  const [placedOrder, setPlacedOrder] = useState<PublicOrderResult | null>(null);
+  const [installPromptEvent, setInstallPromptEvent] = useState<any>(null);
+
+  useEffect(() => {
+    if (!shopId) {
+      setLoadError('This ordering link is invalid.');
+      setLoading(false);
+      return;
+    }
+    (async () => {
+      try {
+        const result = await fetchPublicMenu(shopId);
+        setMenu(result);
+      } catch (err) {
+        const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+        setLoadError(message || "Couldn't load this shop's menu. Please try again.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [shopId]);
+
+  // The browser's own "Add to Home Screen" prompt (Chrome/Edge/Android) -
+  // captured here so the Install button below can trigger it on demand
+  // instead of waiting for the browser's own mini-infobar. Safari/iOS has
+  // no such event at all (its install is the manual Share > Add to Home
+  // Screen flow) - the button just doesn't do anything there, which is
+  // fine since iOS users already see that option in their share sheet.
+  useEffect(() => {
+    function handler(event: Event) {
+      event.preventDefault();
+      setInstallPromptEvent(event);
+    }
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!shopId || orderType !== 'DineIn') return undefined;
+    let cancelled = false;
+    async function load() {
+      try {
+        const result = await fetchPublicTables(shopId);
+        if (cancelled) return;
+        setTables(result.tables);
+        setOccupiedTables(new Set(result.occupied));
+      } catch {
+        // Best-effort - the backend re-checks at submit time regardless.
+      }
+    }
+    void load();
+    const intervalId = window.setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [shopId, orderType]);
+
+  useEffect(() => {
+    if (orderType !== 'DineIn' || customerPhone.replace(/\D/g, '').length < 10) {
+      setActiveTableWarning(null);
+      return;
+    }
+    if (phoneCheckTimeoutRef.current) clearTimeout(phoneCheckTimeoutRef.current);
+    phoneCheckTimeoutRef.current = setTimeout(async () => {
+      try {
+        const status = await fetchPublicCustomerStatus(shopId, customerPhone);
+        setActiveTableWarning(status.hasActiveDineInOrder && status.order ? { table: status.order.table, dailyOrderNumber: status.order.dailyOrderNumber } : null);
+      } catch {
+        setActiveTableWarning(null);
+      }
+    }, 400);
+  }, [shopId, orderType, customerPhone]);
+
+  const products = menu?.products || [];
+  const tableOptions = getTableOptions(tables);
+  const categories = useMemo(() => ['All', ...Array.from(new Set(products.map((p) => p.category)))], [products]);
+  const visibleProducts = useMemo(
+    () => (category === 'All' ? products : products.filter((p) => p.category === category)),
+    [products, category],
+  );
+
+  const cartLines = Array.from(cart.values());
+  const cartCount = cartLines.reduce((sum, line) => sum + line.quantity, 0);
+  const cartTotal = cartLines.reduce((sum, line) => sum + line.product.price * line.quantity, 0);
+
+  function cartKey(product: PublicMenuProduct) {
+    return `${product.name}::${product.variation}`;
+  }
+
+  function addToCart(product: PublicMenuProduct) {
+    setCart((previous) => {
+      const next = new Map(previous);
+      const key = cartKey(product);
+      const existing = next.get(key);
+      next.set(key, { product, quantity: (existing?.quantity || 0) + 1 });
+      return next;
+    });
+  }
+
+  function changeQuantity(product: PublicMenuProduct, delta: number) {
+    setCart((previous) => {
+      const next = new Map(previous);
+      const key = cartKey(product);
+      const existing = next.get(key);
+      if (!existing) return next;
+      const quantity = existing.quantity + delta;
+      if (quantity <= 0) next.delete(key);
+      else next.set(key, { ...existing, quantity });
+      return next;
+    });
+  }
+
+  const phoneDigits = customerPhone.replace(/\D/g, '');
+  const canSubmit =
+    cartCount > 0 &&
+    menu?.isOpen &&
+    customerName.trim().length >= 2 &&
+    phoneDigits.length >= 10 &&
+    (orderType !== 'Delivery' || customerAddress.trim().length >= 5) &&
+    (orderType !== 'DineIn' || Boolean(table));
+
+  async function handlePlaceOrder() {
+    if (!canSubmit || placing) return;
+    setPlacing(true);
+    setPlaceError('');
+    try {
+      const location = orderType === 'Delivery' ? await captureLocation() : null;
+      const result = await createPublicOrder(shopId, {
+        orderType,
+        table: orderType === 'DineIn' ? table : undefined,
+        customer: { name: customerName.trim(), phone: customerPhone.trim(), address: customerAddress.trim() },
+        paymentMethod,
+        note: note.trim(),
+        items: cartLines.map((line) => ({ name: line.product.name, variation: line.product.variation, quantity: line.quantity })),
+        location: location || undefined,
+      });
+
+      if (result.requiresOnlinePayment && result.paymentMethod) {
+        const provider = result.paymentMethod === 'JazzCash' ? 'jazzcash' : 'easypaisa';
+        const redirect = await initiatePublicPayment(shopId, result.id, provider);
+        redirectToGateway(redirect);
+        return; // Browser is navigating away to the gateway now.
+      }
+
+      setPlacedOrder(result);
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setPlaceError(message || 'Could not place your order - please try again.');
+    } finally {
+      setPlacing(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading menu...</div>;
+  }
+  if (loadError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] p-6 text-center">
+        <div>
+          <AlertCircle className="mx-auto mb-3 text-rose-500" size={40} />
+          <p className="font-bold text-gray-700">{loadError}</p>
+        </div>
+      </div>
+    );
+  }
+  if (placedOrder) {
+    return <OrderStatusPanel shopId={shopId} orderId={placedOrder.id} />;
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8F9FB] pb-28">
+      <header className="bg-black px-5 py-6 text-white">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-black">{menu?.shopName || 'Menu'}</h1>
+            <p className="text-xs font-semibold text-white/60">Order Dine-In, Takeaway, or Delivery</p>
+          </div>
+          {installPromptEvent ? (
+            <button
+              type="button"
+              onClick={async () => {
+                installPromptEvent.prompt();
+                await installPromptEvent.userChoice;
+                setInstallPromptEvent(null);
+              }}
+              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-2 text-xs font-black"
+            >
+              <Download size={14} /> Install
+            </button>
+          ) : null}
+        </div>
+      </header>
+
+      {!menu?.isOpen ? (
+        <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 p-4 text-xs font-bold text-amber-800">
+          <AlertCircle size={16} /> This shop is currently closed and isn't taking orders right now.
+        </div>
+      ) : null}
+
+      <div className="flex gap-2 overflow-x-auto px-5 py-4">
+        {categories.map((cat) => (
+          <button
+            key={cat}
+            type="button"
+            onClick={() => setCategory(cat)}
+            className={`shrink-0 rounded-full px-4 py-2 text-xs font-black ${category === cat ? 'bg-black text-white' : 'bg-white text-gray-500'}`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 px-5 sm:grid-cols-3">
+        {visibleProducts.map((product) => {
+          const line = cart.get(cartKey(product));
+          return (
+            <div key={product.id} className="rounded-2xl bg-white p-3 shadow-sm">
+              {product.image ? <img src={product.image} alt={product.name} className="mb-2 h-20 w-full rounded-xl object-cover" /> : null}
+              <p className="text-sm font-black text-gray-900">{product.name}</p>
+              {product.variation ? <p className="text-[11px] text-gray-400">{product.variation}</p> : null}
+              <p className="mt-1 text-sm font-black text-gray-900">Rs {formatter.format(product.price)}</p>
+              {line ? (
+                <div className="mt-2 flex items-center justify-between rounded-xl bg-[#F8F9FB] px-2 py-1.5">
+                  <button type="button" onClick={() => changeQuantity(product, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
+                  <span className="text-sm font-black">{line.quantity}</span>
+                  <button type="button" onClick={() => changeQuantity(product, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => addToCart(product)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">Add</button>
+              )}
+            </div>
+          );
+        })}
+        {visibleProducts.length === 0 ? <p className="col-span-full py-10 text-center text-sm text-gray-400">No items in this category.</p> : null}
+      </div>
+
+      {cartCount > 0 ? (
+        <button
+          type="button"
+          onClick={() => setShowCart(true)}
+          className="fixed bottom-4 left-1/2 flex w-[92%] max-w-md -translate-x-1/2 items-center justify-between rounded-2xl bg-black px-5 py-4 text-white shadow-xl"
+        >
+          <span className="flex items-center gap-2 text-sm font-black"><ShoppingCart size={18} /> {cartCount} item{cartCount === 1 ? '' : 's'}</span>
+          <span className="text-sm font-black">Rs {formatter.format(cartTotal)} · Checkout</span>
+        </button>
+      ) : null}
+
+      {showCart ? (
+        <div className="fixed inset-0 z-30 flex items-end bg-black/50 sm:items-center sm:justify-center">
+          <div className="max-h-[90vh] w-full overflow-y-auto rounded-t-[28px] bg-white p-6 sm:max-w-md sm:rounded-[28px]">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-lg font-black text-gray-900">Your Order</h2>
+              <button type="button" onClick={() => setShowCart(false)}><X size={20} className="text-gray-400" /></button>
+            </div>
+
+            <div className="space-y-3">
+              {cartLines.map((line) => (
+                <div key={cartKey(line.product)} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                  <div>
+                    <p className="text-sm font-black text-gray-900">{line.product.name}</p>
+                    <p className="text-xs text-gray-400">Rs {formatter.format(line.product.price)} x {line.quantity}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => changeQuantity(line.product, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
+                    <span className="text-sm font-black">{line.quantity}</span>
+                    <button type="button" onClick={() => changeQuantity(line.product, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 flex justify-between border-t border-gray-100 pt-4 text-sm font-black">
+              <span>Total</span>
+              <span>Rs {formatter.format(cartTotal)}</span>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              <p className="text-xs font-black uppercase tracking-[0.14em] text-gray-400">Order Type</p>
+              <div className="flex gap-2">
+                {(['DineIn', 'TakeAway', 'Delivery'] as OrderType[]).map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => setOrderType(type)}
+                    className={`flex-1 rounded-xl py-2.5 text-xs font-black ${orderType === type ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}
+                  >
+                    {type === 'DineIn' ? 'Dine-In' : type}
+                  </button>
+                ))}
+              </div>
+
+              <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Your name" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
+              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value.replace(/[^\d]/g, ''))} placeholder="Phone number" inputMode="numeric" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
+              {orderType === 'Delivery' ? (
+                <div>
+                  <input value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Delivery address" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-gray-400">
+                    <MapPin size={12} /> We'll ask for your live location too, so the rider can find you faster.
+                  </p>
+                </div>
+              ) : null}
+
+              {activeTableWarning ? (
+                <div className="flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-800">
+                  <AlertCircle size={14} /> You already have an active order at Table {activeTableWarning.table} (#{activeTableWarning.dailyOrderNumber}) - finish that before starting another.
+                </div>
+              ) : null}
+
+              {orderType === 'DineIn' && !activeTableWarning ? (
+                <div>
+                  <p className="mb-2 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Choose Your Table</p>
+                  <div className="flex flex-wrap gap-2">
+                    {tableOptions.map((tableNumber) => {
+                      const isOccupied = occupiedTables.has(tableNumber) && table !== tableNumber;
+                      const isActive = table === tableNumber;
+                      return (
+                        <button
+                          key={tableNumber}
+                          type="button"
+                          disabled={isOccupied}
+                          onClick={() => setTable(tableNumber)}
+                          className={`rounded-xl px-3 py-2 text-xs font-black ${isActive ? 'bg-black text-white' : isOccupied ? 'cursor-not-allowed bg-gray-100 text-gray-300' : 'bg-[#F8F9FB] text-gray-700'}`}
+                        >
+                          {formatTableLabel(tableNumber)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              <p className="mt-3 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Payment</p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setPaymentMethod('Cash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'Cash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>Cash</button>
+                {menu?.paymentMethods.jazzCash ? (
+                  <button type="button" onClick={() => setPaymentMethod('JazzCash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'JazzCash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>JazzCash</button>
+                ) : null}
+                {menu?.paymentMethods.easyPaisa ? (
+                  <button type="button" onClick={() => setPaymentMethod('EasyPaisa')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'EasyPaisa' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>EasyPaisa</button>
+                ) : null}
+              </div>
+              {paymentMethod !== 'Cash' ? (
+                <p className="text-[11px] font-semibold text-gray-400">You'll be taken to {paymentMethod}'s secure payment page next - your order is confirmed automatically once payment clears.</p>
+              ) : null}
+
+              <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Any special instructions..." className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" rows={2} />
+
+              {placeError ? <p className="text-xs font-bold text-rose-600">{placeError}</p> : null}
+
+              <button
+                type="button"
+                onClick={() => void handlePlaceOrder()}
+                disabled={!canSubmit || placing || Boolean(activeTableWarning)}
+                className="w-full rounded-2xl bg-[#E2F33C] py-4 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {placing ? 'Placing Order...' : `Place Order · Rs ${formatter.format(cartTotal)}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

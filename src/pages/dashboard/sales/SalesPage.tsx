@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument } from '@/lib/pos-api';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, type TrackingStatus } from '@/lib/pos-api';
 import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
@@ -886,6 +886,32 @@ export default function SalesPage() {
     setStatus({ tone: 'success', text: `Order ${updated.dailyOrderNumber ?? updated.id} cancelled successfully.` });
   }
 
+  const [updatingTrackingStatus, setUpdatingTrackingStatus] = useState(false);
+
+  // Advances a customer-qr order's tracking lifecycle (see
+  // orderController.exports.updateTrackingStatus) - this is the staff-side
+  // half of the QR ordering feature: confirm it into the kitchen queue,
+  // mark it preparing/ready, or decline it outright. Firing "confirmed" on
+  // a Delivery order also triggers the WhatsApp rider notification
+  // server-side - nothing extra to do here for that.
+  async function handleTrackingStatusChange(order: SavedOrder, trackingStatus: TrackingStatus) {
+    if (trackingStatus === 'cancelled' && !window.confirm('Decline/cancel this online order?')) return;
+    setUpdatingTrackingStatus(true);
+    try {
+      const updated = await updateOrderTrackingStatus(order.id, trackingStatus);
+      if (updated) {
+        localEditVersionRef.current += 1;
+        setOrders((previous) => previous.map((o) => (o.id === updated.id ? updated : o)));
+        setSelectedOrder(updated);
+        toast.success(`Order #${updated.dailyOrderNumber ?? updated.id} marked ${trackingStatus.replace('_', ' ')}.`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update this order.');
+    } finally {
+      setUpdatingTrackingStatus(false);
+    }
+  }
+
   async function addItems(items: Array<{ name: string; price: number; quantity: number; variation: string }>) {
     if (items.length === 0) return setStatus({ tone: 'error', text: 'Select at least one item.' });
     const updated = await saveUpdate({ action: 'addItems', items });
@@ -1158,6 +1184,10 @@ export default function SalesPage() {
                   <Box label="Remaining" value={`Rs ${selectedOrder.remainingAmount ?? 0}`} />
                 </div>
 
+                {selectedOrder.source === 'customer-qr' ? (
+                  <OnlineOrderControls order={selectedOrder} updating={updatingTrackingStatus} onChange={handleTrackingStatusChange} />
+                ) : null}
+
                 <div>
                   <div className="mb-3 flex items-center justify-between">
                     <h3 className="text-sm font-black uppercase tracking-[0.18em] text-gray-400">Items</h3>
@@ -1320,6 +1350,72 @@ function StatCard({ label, value }: { label: string; value: string }) { return <
 function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="flex min-w-0 items-center gap-2 text-xs text-gray-600"><span className="shrink-0">{icon}</span><span className="truncate">{text}</span></div>; }
 function Box({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3"><p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{label}</p><p className="mt-1 break-words text-sm font-bold text-gray-900">{value}</p></div>; }
 function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) { return <div className={`flex items-center justify-between py-1.5 ${strong ? 'text-lg font-black text-gray-900' : 'text-sm text-gray-500'}`}><span>{label}</span><span>{value}</span></div>; }
+
+const TRACKING_STEP_LABEL: Record<string, string> = {
+  awaiting_confirmation: 'Waiting for confirmation',
+  confirmed: 'Confirmed',
+  preparing: 'Preparing',
+  ready: 'Ready',
+  cancelled: 'Cancelled',
+};
+
+// The staff-side half of the QR ordering feature (see
+// orderController.exports.updateTrackingStatus and
+// CustomerOrderPage.tsx's own tracking view on the customer's side) -
+// only ever rendered for an order with source === "customer-qr" (a
+// staff-placed order never has a trackingStatus that means anything).
+// Buttons offer the next logical step(s) from wherever the order
+// currently is, plus Decline/Cancel unless it's already cancelled.
+function OnlineOrderControls({
+  order,
+  updating,
+  onChange,
+}: {
+  order: SavedOrder;
+  updating: boolean;
+  onChange: (order: SavedOrder, next: TrackingStatus) => void;
+}) {
+  const current = order.trackingStatus || 'awaiting_confirmation';
+  if (current === 'cancelled') return null;
+
+  const nextSteps: TrackingStatus[] =
+    current === 'awaiting_confirmation' ? ['confirmed'] : current === 'confirmed' ? ['preparing'] : current === 'preparing' ? ['ready'] : [];
+
+  return (
+    <div className="rounded-[20px] border border-indigo-100 bg-indigo-50/60 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">Online Order</p>
+          <p className="mt-1 text-sm font-black text-indigo-900">
+            {TRACKING_STEP_LABEL[current] || current}
+            {order.paymentStatus ? ` · Payment: ${order.paymentStatus.replace('_', ' ')}` : ''}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {nextSteps.map((step) => (
+            <button
+              key={step}
+              type="button"
+              disabled={updating}
+              onClick={() => onChange(order, step)}
+              className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Mark {TRACKING_STEP_LABEL[step]}
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={updating}
+            onClick={() => onChange(order, 'cancelled')}
+            className="rounded-2xl bg-rose-100 px-4 py-2 text-xs font-black text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Decline
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) { return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm sm:p-6"><div className={`flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] bg-white shadow-2xl transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-gray-100 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-3 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>; }
 
 // Lets a cashier move a DineIn order to a different table (a customer

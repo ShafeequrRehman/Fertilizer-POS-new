@@ -106,6 +106,63 @@ const orderSchema = new mongoose.Schema(
     createdOffline: { type: Boolean, default: false },
     offlineOrderNumber: { type: Number, default: null },
     offlineCreatedAt: { type: Date, default: null },
+    // "staff" (the default, and every order before this field existed) for
+    // anything rung up from the till/POSPage.tsx/pos-mobile as normal -
+    // "customer-qr" only for an order placed by a customer themselves via
+    // the public QR ordering page (see publicOrderController.js). Purely
+    // informational.
+    source: { type: String, enum: ["staff", "customer-qr"], default: "staff" },
+    // Customer-facing order-tracking lifecycle for a customer-qr order -
+    // deliberately SEPARATE from `status` above (pending/completed/
+    // cancelled/paid), which drives kitchen printing, payment/dues, and
+    // every staff-facing page in the app and must never change meaning.
+    // trackingStatus is purely additional: it's what CustomerOrderPage.tsx
+    // polls to show the customer "Preparing your order..." etc, and what
+    // staff move forward from the dashboard (see orderController.js's
+    // updateTrackingStatus). "awaiting_confirmation" (the default) means a
+    // customer placed it but no one has accepted it into the kitchen queue
+    // yet - staff/admin explicitly (or a verified online payment
+    // automatically) moves it to "confirmed", then "preparing", then
+    // "ready" (TakeAway/Delivery pickup-ready) or straight to a normal
+    // completed status for DineIn. "cancelled" here also flips the real
+    // `status` field to "cancelled" at the same time (see
+    // updateTrackingStatus) so it disappears from active order lists the
+    // same way any other cancelled order does.
+    trackingStatus: {
+      type: String,
+      enum: ["awaiting_confirmation", "confirmed", "preparing", "ready", "cancelled"],
+      default: "awaiting_confirmation",
+    },
+    // Independent of paidAmount/remainingAmount above (which track a
+    // staff-collected cash/card tender at the counter) - this tracks an
+    // ONLINE payment made through JazzCash/EasyPaisa on a customer-qr
+    // order specifically. "awaiting_confirmation" while the customer is on
+    // the gateway's page; "paid" once the gateway's callback/webhook is
+    // verified (see paymentGatewayService.js) - that's also the trigger
+    // that auto-advances trackingStatus to "confirmed" without staff
+    // having to do anything. Cash/E-Wallet-by-hand orders never touch this
+    // field - it stays "unpaid" and confirmation is manual, same as before.
+    paymentStatus: { type: String, enum: ["unpaid", "awaiting_confirmation", "paid", "failed"], default: "unpaid" },
+    paymentGateway: {
+      provider: { type: String, enum: ["", "JazzCash", "EasyPaisa"], default: "" },
+      txnRefNo: { type: String, default: "" },
+      transactionId: { type: String, default: "" },
+      raw: { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+    // Captured once, at order-placement time, from the customer's own
+    // phone (navigator.geolocation) for a Delivery order - never updated
+    // afterwards (this is not live rider tracking, just "where were they
+    // standing when they ordered", which is what the WhatsApp rider
+    // notification's Google Maps link is built from - see
+    // orderController.js's notifyRiderForDelivery). null for every
+    // non-Delivery order and for any Delivery order placed before this
+    // field existed or from a browser that declined location access.
+    deliveryLocation: {
+      lat: { type: Number, default: null },
+      lng: { type: Number, default: null },
+      accuracy: { type: Number, default: null },
+      capturedAt: { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );

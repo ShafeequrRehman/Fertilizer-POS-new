@@ -68,6 +68,37 @@ const shopSchema = new mongoose.Schema(
     // src/lib/table-options.ts), so this is purely additive - no shop's
     // existing behavior changes unless this is explicitly set for them.
     tables: { type: [String], default: [] },
+    // WhatsApp number(s) that get notified (via the shop's own WhatsApp
+    // session - see whatsappService.js) the moment a Delivery order placed
+    // through the customer QR page is confirmed - see
+    // orderController.notifyRiderForDelivery. Plain array so a shop can
+    // notify more than one rider at once; empty means "no rider configured
+    // yet", in which case the notification is silently skipped rather than
+    // failing the confirm action.
+    riderPhones: { type: [String], default: [] },
+    // JazzCash/EasyPaisa MERCHANT credentials for THIS shop specifically -
+    // every shop is its own merchant, so these can never be shared/global.
+    // All blank by default; the online-payment step on CustomerOrderPage.tsx
+    // simply doesn't offer a gateway that has no credentials configured yet
+    // (see publicOrderController.getMenu's isPaymentGatewayConfigured
+    // flags) and falls back to "pay by hand" instead - see
+    // paymentGatewayService.js for where these are actually used, and
+    // SettingsPage.tsx's Customer Ordering section for where the Shop
+    // Owner enters them. Never returned to the public (unauthenticated)
+    // customer-facing endpoints - only ever read server-side.
+    paymentGateway: {
+      jazzCash: {
+        merchantId: { type: String, default: "" },
+        password: { type: String, default: "" },
+        integritySalt: { type: String, default: "" },
+        environment: { type: String, enum: ["sandbox", "live"], default: "sandbox" },
+      },
+      easyPaisa: {
+        storeId: { type: String, default: "" },
+        hashKey: { type: String, default: "" },
+        environment: { type: String, enum: ["sandbox", "live"], default: "sandbox" },
+      },
+    },
   },
   { timestamps: true }
 );

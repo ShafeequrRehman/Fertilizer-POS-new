@@ -384,7 +384,14 @@ exports.getOwnShop = async (req, res) => {
     // listShops. hasPageVisibilityKey is what SettingsPage.tsx's Sidebar
     // Pages section checks before letting the Shop Owner even try to
     // enter a key.
-    const { cancelOrderKeyHash, pageVisibilityKeyHash, ...shopWithoutKeyHashes } = shop;
+    // paymentGateway holds this shop's own JazzCash/EasyPaisa merchant
+    // credentials (password, integrity salt, hash key) - real secrets, not
+    // just a hash like the two keys below. Deliberately left out of this
+    // general profile response (fetched broadly across the dashboard) and
+    // only ever sent back by the dedicated getOrderingSettings endpoint
+    // below, so it never travels further than the one screen that
+    // actually needs it.
+    const { cancelOrderKeyHash, pageVisibilityKeyHash, paymentGateway, ...shopWithoutKeyHashes } = shop;
     res.json({
       ...shopWithoutKeyHashes,
       hasCancelOrderKey: Boolean(cancelOrderKeyHash),
@@ -452,5 +459,64 @@ exports.updateEnabledPages = async (req, res) => {
     res.json({ enabledPages: shop.enabledPages });
   } catch (error) {
     res.status(500).json({ message: "Failed to update page visibility", detail: error.message });
+  }
+};
+
+// GET /api/shop/ordering-settings
+// Everything CustomerOrderingSection.tsx (Settings) needs: the rider
+// WhatsApp number(s) and the shop's own JazzCash/EasyPaisa merchant
+// credentials - see models/Shop.js's riderPhones/paymentGateway. Kept
+// separate from getOwnShop above specifically so these real secrets never
+// travel to any screen but this one.
+exports.getOrderingSettings = async (req, res) => {
+  try {
+    const shop = await Shop.findById(req.user.shopId).select("riderPhones paymentGateway").lean();
+    if (!shop) return res.status(404).json({ message: "Shop not found" });
+    res.json({
+      riderPhones: shop.riderPhones || [],
+      paymentGateway: shop.paymentGateway || { jazzCash: {}, easyPaisa: {} },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load ordering settings", detail: error.message });
+  }
+};
+
+// PATCH /api/shop/ordering-settings
+// body: { riderPhones?: string[], jazzCash?: {merchantId,password,integritySalt,environment}, easyPaisa?: {storeId,hashKey,environment} }
+// Shop-Owner-only (see shopOwnerRoutes.js's router-level requireShopOwner) -
+// an employee should never be able to change where delivery orders'
+// details get sent, or the shop's own payment merchant credentials.
+exports.updateOrderingSettings = async (req, res) => {
+  try {
+    const shop = await Shop.findById(req.user.shopId);
+    if (!shop) return res.status(404).json({ message: "Shop not found" });
+
+    const { riderPhones, jazzCash, easyPaisa } = req.body || {};
+    if (riderPhones !== undefined) {
+      shop.riderPhones = Array.isArray(riderPhones) ? riderPhones.map((p) => String(p).trim()).filter(Boolean) : [];
+    }
+    if (jazzCash && typeof jazzCash === "object") {
+      shop.paymentGateway.jazzCash = {
+        merchantId: String(jazzCash.merchantId || "").trim(),
+        password: String(jazzCash.password || "").trim(),
+        integritySalt: String(jazzCash.integritySalt || "").trim(),
+        environment: jazzCash.environment === "live" ? "live" : "sandbox",
+      };
+    }
+    if (easyPaisa && typeof easyPaisa === "object") {
+      shop.paymentGateway.easyPaisa = {
+        storeId: String(easyPaisa.storeId || "").trim(),
+        hashKey: String(easyPaisa.hashKey || "").trim(),
+        environment: easyPaisa.environment === "live" ? "live" : "sandbox",
+      };
+    }
+
+    await shop.save();
+    res.json({
+      riderPhones: shop.riderPhones,
+      paymentGateway: shop.paymentGateway,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update ordering settings", detail: error.message });
   }
 };

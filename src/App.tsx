@@ -4,6 +4,7 @@ import PublicOnlyRoute from '@/routes/PublicOnlyRoute';
 import LoginPage from '@/pages/LoginPage';
 import LicenseExpiredPage from '@/pages/LicenseExpiredPage';
 import ReceiptPrintPage from '@/pages/ReceiptPrintPage';
+import CustomerOrderPage from '@/pages/CustomerOrderPage';
 import DashboardShell from '@/pages/dashboard/components/DashboardShell';
 import DashboardPageClient from '@/pages/dashboard/components/DashboardPageClient';
 import POSPage from '@/pages/dashboard/pos/POSPage';
@@ -62,6 +63,8 @@ export default function App() {
 
         <Route path="/license-expired" element={<LicenseExpiredPage />} />
         <Route path="/receipt/print/:id" element={<ReceiptPrintPage />} />
+        <Route path="/order/:shopId" element={<CustomerOrderPage />} />
+        <Route path="/order/:shopId/status/:orderId" element={<CustomerOrderPage />} />
 
         <Route element={<ProtectedRoute allowedRoles={['shopowner', 'employee']} />}>
           <Route path="/dashboard" element={<DashboardShell />}>
