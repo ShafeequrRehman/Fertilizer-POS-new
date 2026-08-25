@@ -744,7 +744,19 @@ export default function SalesPage() {
         // customerDue mirrors the "Previous Dues" figure shown on screen,
         // same as every other cashier receipt print in this file, so the
         // printed receipt always matches what the cashier saw.
-        const receiptData = { ...order, previousDues: customerDue };
+        //
+        // This button is only ever called with `selectedOrder` (see its
+        // one call site below), so for a still-pending order,
+        // discountForOrder/adjustedTotal are exactly the same typed-but-
+        // not-yet-saved discount preview PrintOrderPage.tsx's Manual Print
+        // Center shows - order.discount itself is still null/unset until
+        // Complete Order actually runs (see completeOrder below), so
+        // without this override, printing straight to a configured
+        // counter printer from this button would silently drop the
+        // discount even though the cashier can see it applied on screen.
+        const receiptData = order.status === 'pending'
+          ? { ...order, discount: discountForOrder, total: adjustedTotal, previousDues: customerDue }
+          : { ...order, previousDues: customerDue };
         reportPrintOutcome(
           ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
           'Customer receipt',
