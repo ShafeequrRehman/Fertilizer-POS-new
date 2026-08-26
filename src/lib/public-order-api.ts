@@ -51,8 +51,11 @@ export async function fetchPublicTables(shopId: string): Promise<PublicTablesRes
 }
 
 export interface PublicCustomerStatus {
-  hasActiveDineInOrder: boolean;
-  order: { id: string; dailyOrderNumber: number; table: string; createdAt: string } | null;
+  // Any active (still status: "pending") order for this phone at this
+  // shop - not Dine-In-specific anymore, see publicOrderController.js's
+  // getCustomerStatus/createOrder (one active order per phone, any type).
+  hasActiveOrder: boolean;
+  order: { id: string; dailyOrderNumber: number; orderType: string; table: string; createdAt: string } | null;
 }
 
 export async function fetchPublicCustomerStatus(shopId: string, phone: string): Promise<PublicCustomerStatus> {
@@ -73,6 +76,10 @@ export interface PublicOrderStatus {
   paymentStatus: PaymentStatus;
   total: number;
   createdAt: string;
+  // Read-only - see publicOrderController.js's publicOrderShape. There is
+  // no public edit endpoint; changing an already-placed order is staff/
+  // shop-owner-only from the Sales dashboard.
+  items: Array<{ name: string; price: number; quantity: number; variation: string }>;
 }
 
 export async function fetchPublicOrderStatus(shopId: string, orderId: string): Promise<PublicOrderStatus> {

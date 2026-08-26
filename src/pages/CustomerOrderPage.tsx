@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
-import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share } from 'lucide-react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share, RotateCcw } from 'lucide-react';
 import { getProductImageUrl } from '@/lib/asset-path';
 import {
   createPublicOrder,
@@ -39,6 +39,40 @@ type CartLine = { product: PublicMenuProduct; quantity: number };
 type OrderType = 'DineIn' | 'TakeAway' | 'Delivery';
 
 const formatter = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 });
+
+// One entry per shop, holding whatever order this device currently
+// considers "the one I'm tracking" - see the persistence effect in
+// CustomerOrderPage below. Scoped per shopId (not global) since a
+// customer's phone could plausibly have an active order at more than one
+// shop at once, even though only one PER SHOP is allowed (see
+// publicOrderController.js's createOrder).
+function activeOrderStorageKey(shopId: string) {
+  return `posCustomerActiveOrder:${shopId}`;
+}
+function readSavedOrderId(shopId: string): string | null {
+  try {
+    return localStorage.getItem(activeOrderStorageKey(shopId));
+  } catch {
+    return null;
+  }
+}
+function saveActiveOrderId(shopId: string, orderId: string) {
+  try {
+    localStorage.setItem(activeOrderStorageKey(shopId), orderId);
+  } catch {
+    // Best-effort only - private browsing / storage-disabled just means
+    // the customer has to re-find their order via the shop's own tracking
+    // link (e.g. a payment-gateway redirect) instead of it surviving a
+    // closed tab. Never blocks ordering itself.
+  }
+}
+function clearSavedOrderId(shopId: string) {
+  try {
+    localStorage.removeItem(activeOrderStorageKey(shopId));
+  } catch {
+    // See saveActiveOrderId.
+  }
+}
 
 const TRACKING_LABELS: Record<string, { label: string; tone: string }> = {
   awaiting_confirmation: { label: 'Waiting for the shop to accept your order', tone: 'bg-amber-50 text-amber-800' },
@@ -82,16 +116,43 @@ function redirectToGateway(redirect: PaymentRedirect) {
   form.submit();
 }
 
-function OrderStatusPanel({ shopId, orderId }: { shopId: string; orderId: string }) {
+// The customer's own order-tracking section - shown right after placing
+// an order, from a payment-gateway redirect, or automatically whenever
+// this device still has an active order remembered for this shop (see the
+// persistence effect in the default export below). Read-only by design:
+// there is no edit capability here or anywhere in this public API -
+// changing an already-placed order is staff/shop-owner-only, from the
+// Sales dashboard.
+function OrderStatusPanel({
+  shopId,
+  orderId,
+  onFinished,
+}: {
+  shopId: string;
+  orderId: string;
+  onFinished?: () => void;
+}) {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<PublicOrderStatus | null>(null);
   const [error, setError] = useState('');
+  const finishedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
         const result = await fetchPublicOrderStatus(shopId, orderId);
-        if (!cancelled) setStatus(result);
+        if (cancelled) return;
+        setStatus(result);
+        // "Finished" = staff has completed or cancelled it (same boundary
+        // publicOrderController.js's one-active-order-per-phone check
+        // uses: status !== "pending") - once that happens there's nothing
+        // left to track, so free up this device to remember/place a new
+        // order instead of holding onto a dead one forever.
+        if (result.status !== 'pending' && !finishedRef.current) {
+          finishedRef.current = true;
+          onFinished?.();
+        }
       } catch {
         if (!cancelled) setError("Couldn't load this order.");
       }
@@ -102,6 +163,7 @@ function OrderStatusPanel({ shopId, orderId }: { shopId: string; orderId: string
       cancelled = true;
       window.clearInterval(intervalId);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopId, orderId]);
 
   if (error) {
@@ -114,18 +176,43 @@ function OrderStatusPanel({ shopId, orderId }: { shopId: string; orderId: string
   }
 
   const tracking = TRACKING_LABELS[status.trackingStatus] || TRACKING_LABELS.awaiting_confirmation;
+  const isFinished = status.status !== 'pending';
   return (
     <div className="min-h-screen bg-[#F8F9FB] p-6">
       <div className="mx-auto max-w-md rounded-[28px] bg-white p-8 text-center shadow-sm">
         <CheckCircle2 className="mx-auto mb-3 text-emerald-500" size={56} />
         <h1 className="text-2xl font-black text-gray-900">Order #{status.dailyOrderNumber}</h1>
-        <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-black ${tracking.tone}`}>{tracking.label}</div>
-        <div className="mt-6 space-y-2 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
+        <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-black ${status.status === 'cancelled' ? TRACKING_LABELS.cancelled.tone : tracking.tone}`}>
+          {status.status === 'cancelled' ? TRACKING_LABELS.cancelled.label : status.status === 'completed' ? 'Order completed - thank you!' : tracking.label}
+        </div>
+
+        <div className="mt-6 space-y-1.5 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
+          {status.items.map((item, index) => (
+            <div key={`${item.name}-${index}`} className="flex justify-between gap-3">
+              <span className="text-gray-600">{item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</span>
+              <span className="shrink-0 font-black text-gray-900">Rs {formatter.format(item.price * item.quantity)}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 space-y-2 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
           <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="font-black">{status.orderType}</span></div>
           {status.table ? <div className="flex justify-between"><span className="text-gray-500">Table</span><span className="font-black">{formatTableLabel(status.table)}</span></div> : null}
           <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-black">Rs {formatter.format(status.total)}</span></div>
           <div className="flex justify-between"><span className="text-gray-500">Payment</span><span className="font-black capitalize">{status.paymentStatus.replace('_', ' ')}</span></div>
         </div>
+
+        {isFinished ? (
+          <button
+            type="button"
+            onClick={() => navigate(`/order/${shopId}`)}
+            className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-black py-3.5 text-sm font-black text-white"
+          >
+            <RotateCcw size={15} /> Start a New Order
+          </button>
+        ) : (
+          <p className="mt-5 text-[11px] font-semibold text-gray-400">This page updates automatically - no need to refresh.</p>
+        )}
       </div>
     </div>
   );
@@ -172,18 +259,77 @@ export default function CustomerOrderPage() {
     };
   }, [shopId]);
 
-  // Deep link from a payment-gateway redirect or a re-opened order - skip
-  // straight to the tracking view, no menu/cart involved. Kept as a plain
-  // component-selection branch (not an early return inside the ordering
-  // flow itself) so the ordering flow's own hooks below are never
-  // conditionally skipped - see CustomerOrderingFlow.
-  if (params.orderId) {
-    return <OrderStatusPanel shopId={shopId} orderId={params.orderId} />;
+  // Persisted "active order" session - lets a customer close the tab/app
+  // entirely and reopen the bare /order/:shopId link (not a specific
+  // status deep link) and still land straight on their order's tracking
+  // view, instead of the menu, for as long as that order is still active.
+  // There's only ever one to remember per shop, since a phone can only
+  // have one active order at a time now (see publicOrderController.js's
+  // createOrder). Cleared automatically once OrderStatusPanel observes the
+  // order leave "pending" (completed/cancelled).
+  const [resolvedOrderId, setResolvedOrderId] = useState<string | null>(params.orderId || null);
+  const [resolving, setResolving] = useState(!params.orderId);
+
+  useEffect(() => {
+    if (!shopId) {
+      setResolving(false);
+      return;
+    }
+    if (params.orderId) {
+      // Explicit deep link (payment-gateway redirect, a shared/bookmarked
+      // status link) - remember it too, so a later bare reopen of
+      // /order/:shopId also resumes tracking it.
+      saveActiveOrderId(shopId, params.orderId);
+      setResolvedOrderId(params.orderId);
+      setResolving(false);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      const savedId = readSavedOrderId(shopId);
+      if (!savedId) {
+        if (!cancelled) setResolving(false);
+        return;
+      }
+      try {
+        const status = await fetchPublicOrderStatus(shopId, savedId);
+        if (cancelled) return;
+        if (status.status !== 'pending') {
+          // Already finished (customer might have tracked it to
+          // completion on a different visit) - nothing left to resume.
+          clearSavedOrderId(shopId);
+          setResolvedOrderId(null);
+        } else {
+          setResolvedOrderId(savedId);
+        }
+      } catch {
+        // Order no longer exists/invalid - drop the stale reference and
+        // fall through to the ordering flow instead of getting stuck.
+        if (!cancelled) {
+          clearSavedOrderId(shopId);
+          setResolvedOrderId(null);
+        }
+      } finally {
+        if (!cancelled) setResolving(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shopId, params.orderId]);
+
+  if (resolving) {
+    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading...</div>;
+  }
+  if (resolvedOrderId) {
+    return <OrderStatusPanel shopId={shopId} orderId={resolvedOrderId} onFinished={() => clearSavedOrderId(shopId)} />;
   }
   return <CustomerOrderingFlow shopId={shopId} />;
 }
 
 function CustomerOrderingFlow({ shopId }: { shopId: string }) {
+  const navigate = useNavigate();
   const [menu, setMenu] = useState<PublicMenuResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -203,7 +349,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
   const [table, setTable] = useState('');
 
-  const [activeTableWarning, setActiveTableWarning] = useState<{ table: string; dailyOrderNumber: number } | null>(null);
+  const [activeOrderWarning, setActiveOrderWarning] = useState<{ id: string; orderType: string; table: string; dailyOrderNumber: number } | null>(null);
   const phoneCheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [placing, setPlacing] = useState(false);
@@ -283,21 +429,29 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     };
   }, [shopId, orderType]);
 
+  // Checked regardless of which order type is currently selected - the
+  // one-active-order-per-phone restriction applies across Dine-In/
+  // Takeaway/Delivery alike now (see publicOrderController.js's
+  // createOrder), not just Dine-In table reservations.
   useEffect(() => {
-    if (orderType !== 'DineIn' || customerPhone.replace(/\D/g, '').length < 10) {
-      setActiveTableWarning(null);
+    if (customerPhone.replace(/\D/g, '').length < 10) {
+      setActiveOrderWarning(null);
       return;
     }
     if (phoneCheckTimeoutRef.current) clearTimeout(phoneCheckTimeoutRef.current);
     phoneCheckTimeoutRef.current = setTimeout(async () => {
       try {
         const status = await fetchPublicCustomerStatus(shopId, customerPhone);
-        setActiveTableWarning(status.hasActiveDineInOrder && status.order ? { table: status.order.table, dailyOrderNumber: status.order.dailyOrderNumber } : null);
+        setActiveOrderWarning(
+          status.hasActiveOrder && status.order
+            ? { id: status.order.id, orderType: status.order.orderType, table: status.order.table, dailyOrderNumber: status.order.dailyOrderNumber }
+            : null,
+        );
       } catch {
-        setActiveTableWarning(null);
+        setActiveOrderWarning(null);
       }
     }, 400);
-  }, [shopId, orderType, customerPhone]);
+  }, [shopId, customerPhone]);
 
   const products = menu?.products || [];
   const tableOptions = getTableOptions(tables);
@@ -363,6 +517,11 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         location: location || undefined,
       });
 
+      // Remembered immediately (not just once the status panel mounts) so
+      // even a payment-gateway redirect that fails to come back still
+      // leaves this device tracking the right order.
+      saveActiveOrderId(shopId, result.id);
+
       if (result.requiresOnlinePayment && result.paymentMethod) {
         const provider = result.paymentMethod === 'JazzCash' ? 'jazzcash' : 'easypaisa';
         const redirect = await initiatePublicPayment(shopId, result.id, provider);
@@ -393,7 +552,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     );
   }
   if (placedOrder) {
-    return <OrderStatusPanel shopId={shopId} orderId={placedOrder.id} />;
+    return <OrderStatusPanel shopId={shopId} orderId={placedOrder.id} onFinished={() => clearSavedOrderId(shopId)} />;
   }
 
   return (
@@ -554,13 +713,26 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 </div>
               ) : null}
 
-              {activeTableWarning ? (
-                <div className="flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-800">
-                  <AlertCircle size={14} /> You already have an active order at Table {activeTableWarning.table} (#{activeTableWarning.dailyOrderNumber}) - finish that before starting another.
+              {activeOrderWarning ? (
+                <div className="rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-800">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle size={14} className="shrink-0" />
+                    <span>
+                      You already have an active order{activeOrderWarning.table ? ` at Table ${activeOrderWarning.table}` : ''} (#{activeOrderWarning.dailyOrderNumber}).
+                      Please wait until it's completed before placing another.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/order/${shopId}/status/${activeOrderWarning.id}`)}
+                    className="mt-2 w-full rounded-lg bg-amber-800/10 py-2 text-xs font-black text-amber-900"
+                  >
+                    Track that order
+                  </button>
                 </div>
               ) : null}
 
-              {orderType === 'DineIn' && !activeTableWarning ? (
+              {orderType === 'DineIn' && !activeOrderWarning ? (
                 <div>
                   <p className="mb-2 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Choose Your Table</p>
                   <div className="flex flex-wrap gap-2">
@@ -604,7 +776,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
               <button
                 type="button"
                 onClick={() => void handlePlaceOrder()}
-                disabled={!canSubmit || placing || Boolean(activeTableWarning)}
+                disabled={!canSubmit || placing || Boolean(activeOrderWarning)}
                 className="w-full rounded-2xl bg-[#E2F33C] py-4 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {placing ? 'Placing Order...' : `Place Order · Rs ${formatter.format(cartTotal)}`}

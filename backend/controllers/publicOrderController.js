@@ -55,6 +55,18 @@ function publicOrderShape(order) {
     paymentStatus: order.paymentStatus,
     total: order.total,
     createdAt: order.createdAt,
+    // Read-only for the tracking view (CustomerOrderPage.tsx's
+    // OrderStatusPanel) - a customer can see exactly what they ordered
+    // here, but there's no corresponding public edit endpoint anywhere in
+    // this file. Changing an already-placed order is deliberately staff/
+    // shop-owner-only (see orderController.updateOrder), never something
+    // this public API exposes.
+    items: (order.items || []).map((item) => ({
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+      variation: item.variation || "",
+    })),
   };
 }
 
@@ -159,25 +171,36 @@ exports.getTables = async (req, res) => {
 };
 
 // GET /api/public/:shopId/customer-status?phone=...
+// Checks for ANY still-active order (any orderType) for this phone at this
+// shop - the one-active-order-per-phone restriction now applies across
+// Dine-In/Takeaway/Delivery alike (see createOrder below), not just
+// Dine-In table reservations. CustomerOrderPage.tsx polls this as the
+// customer types their phone number, to warn them (and offer a "Track it"
+// shortcut) before they even try to submit.
 exports.getCustomerStatus = async (req, res) => {
   try {
     const phone = normalizePhone(req.query.phone);
-    if (!phone) return res.json({ hasActiveDineInOrder: false, order: null });
+    if (!phone) return res.json({ hasActiveOrder: false, order: null });
 
     const existing = await Order.findOne({
       shopId: req.shop._id,
       "customer.phone": phone,
-      orderType: "DineIn",
       status: "pending",
     })
       .sort({ createdAt: -1 })
-      .select("dailyOrderNumber table createdAt")
+      .select("dailyOrderNumber orderType table createdAt")
       .lean();
 
     res.json({
-      hasActiveDineInOrder: Boolean(existing),
+      hasActiveOrder: Boolean(existing),
       order: existing
-        ? { id: String(existing._id), dailyOrderNumber: existing.dailyOrderNumber, table: existing.table, createdAt: existing.createdAt }
+        ? {
+            id: String(existing._id),
+            dailyOrderNumber: existing.dailyOrderNumber,
+            orderType: existing.orderType,
+            table: existing.table,
+            createdAt: existing.createdAt,
+          }
         : null,
     });
   } catch (error) {
@@ -189,7 +212,7 @@ exports.getCustomerStatus = async (req, res) => {
 exports.getOrderStatus = async (req, res) => {
   try {
     const order = await Order.findOne({ _id: req.params.orderId, shopId: req.shop._id })
-      .select("dailyOrderNumber orderType table status trackingStatus paymentStatus total createdAt")
+      .select("dailyOrderNumber orderType table status trackingStatus paymentStatus total createdAt items")
       .lean();
     if (!order) return res.status(404).json({ message: "Order not found." });
     res.json(publicOrderShape(order));
@@ -268,23 +291,35 @@ exports.createOrder = async (req, res) => {
       items.push({ name: product.name, price: product.price, quantity, variation: product.variation || "" });
     }
 
+    // One-active-order-per-phone restriction - applies across ALL order
+    // types (Dine-In, Takeaway, Delivery alike), not just Dine-In. A
+    // customer can only have one order in flight with this shop at a time;
+    // they have to wait for staff to complete (or cancel) it before
+    // placing another. "Active" here matches the same boundary
+    // orderController.applyOrderPatch's completeAndSettle uses to flip a
+    // real order to status "completed" - i.e. still status: "pending".
+    // Keeps CustomerOrderPage.tsx's on-device tracking session
+    // unambiguous too - there's only ever one order worth remembering.
+    const existingActiveForPhone = await Order.findOne({ shopId, "customer.phone": customerPhone, status: "pending" })
+      .select("dailyOrderNumber orderType table")
+      .lean();
+    if (existingActiveForPhone) {
+      return res.status(409).json({
+        message: `You already have an active order (#${existingActiveForPhone.dailyOrderNumber}). Please wait until it's completed before placing another.`,
+        reason: "already_has_active_order",
+        existingOrder: {
+          id: String(existingActiveForPhone._id),
+          orderType: existingActiveForPhone.orderType,
+          table: existingActiveForPhone.table,
+          dailyOrderNumber: existingActiveForPhone.dailyOrderNumber,
+        },
+      });
+    }
+
     if (orderType === "DineIn") {
-      const [tableTaken, existingForPhone] = await Promise.all([
-        Order.exists({ shopId, orderType: "DineIn", status: "pending", table }),
-        Order.findOne({ shopId, "customer.phone": customerPhone, orderType: "DineIn", status: "pending" })
-          .select("dailyOrderNumber table")
-          .lean(),
-      ]);
+      const tableTaken = await Order.exists({ shopId, orderType: "DineIn", status: "pending", table });
       if (tableTaken) {
         return res.status(409).json({ message: `Table ${table} is already occupied - please choose another.`, reason: "table_occupied" });
-      }
-      // One-table-per-phone restriction.
-      if (existingForPhone) {
-        return res.status(409).json({
-          message: `You already have an active order at Table ${existingForPhone.table} (Order #${existingForPhone.dailyOrderNumber}). Please finish that order before starting another.`,
-          reason: "already_has_table",
-          existingOrder: { id: String(existingForPhone._id), table: existingForPhone.table, dailyOrderNumber: existingForPhone.dailyOrderNumber },
-        });
       }
     }
 
