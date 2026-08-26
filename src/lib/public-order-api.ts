@@ -15,6 +15,11 @@ export interface PublicMenuProduct {
   category: string;
   variation: string;
   image: string;
+  // Same per-product color chip POSPage.tsx's own product grid shows
+  // behind each icon (see lib/asset-path.ts's getProductImageUrl, used
+  // identically here) - keeps the customer ordering page visually
+  // synchronized with the exact catalog set up on desktop.
+  color: string;
   description: string;
   isDeal: boolean;
 }

@@ -124,6 +124,12 @@ exports.getMenu = async (req, res) => {
         category: product.category || "General",
         variation: product.variation || "",
         image: product.image || "",
+        // Same per-product color chip POSPage.tsx's product grid uses
+        // behind each icon (see models/Product.js) - included here so the
+        // customer ordering page's cards visually match the exact same
+        // catalog a shop set up on desktop, not a generic customer-only
+        // look.
+        color: product.color || "bg-slate-50",
         description: product.description || "",
         isDeal: Boolean(product.isDeal),
       })),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed } from 'lucide-react';
+import { getProductImageUrl } from '@/lib/asset-path';
 import {
   createPublicOrder,
   fetchPublicCustomerStatus,
@@ -424,9 +425,22 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       <div className="grid grid-cols-2 gap-3 px-5 sm:grid-cols-3">
         {visibleProducts.map((product) => {
           const line = cart.get(cartKey(product));
+          const imageUrl = getProductImageUrl(product.image);
           return (
             <div key={product.id} className="rounded-2xl bg-white p-3 shadow-sm">
-              {product.image ? <img src={product.image} alt={product.name} className="mb-2 h-20 w-full rounded-xl object-cover" /> : null}
+              {/* Same colored icon tile POSPage.tsx's own product grid uses
+                  on desktop (see getProductImageUrl's own comment for why a
+                  relative path is required, not "/products/...") - keeps
+                  this page visually identical to the shop's real catalog
+                  instead of a plain photo grid, and still shows a sensible
+                  placeholder for the (rare) product with no icon set. */}
+              <div className={`mb-2 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl p-2 ${product.color || 'bg-indigo-50'}`}>
+                {imageUrl ? (
+                  <img src={imageUrl} alt={product.name} className="h-full w-full object-contain" />
+                ) : (
+                  <UtensilsCrossed className="text-black/30" size={28} strokeWidth={1.5} />
+                )}
+              </div>
               <p className="text-sm font-black text-gray-900">{product.name}</p>
               {product.variation ? <p className="text-[11px] text-gray-400">{product.variation}</p> : null}
               <p className="mt-1 text-sm font-black text-gray-900">Rs {formatter.format(product.price)}</p>
