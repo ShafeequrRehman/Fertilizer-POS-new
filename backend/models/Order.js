@@ -163,6 +163,18 @@ const orderSchema = new mongoose.Schema(
       accuracy: { type: Number, default: null },
       capturedAt: { type: Date, default: null },
     },
+    // Which staff member (a User with designation "Delivery Rider" - see
+    // waiterController.getRiders) this Delivery order was handed to, set
+    // by orderController.assignRider. A snapshot of {id,name,phone} rather
+    // than just a User ref, same reasoning as `waiter` above (String, not
+    // a ref) - if that staff member is later renamed/removed, this order's
+    // own record of who delivered it should stay exactly as it was.
+    assignedRider: {
+      id: { type: String, default: "" },
+      name: { type: String, default: "" },
+      phone: { type: String, default: "" },
+      assignedAt: { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );

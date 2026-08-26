@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share } from 'lucide-react';
 import { getProductImageUrl } from '@/lib/asset-path';
 import {
   createPublicOrder,
@@ -210,6 +210,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   const [placeError, setPlaceError] = useState('');
   const [placedOrder, setPlacedOrder] = useState<PublicOrderResult | null>(null);
   const [installPromptEvent, setInstallPromptEvent] = useState<any>(null);
+  const [showIosInstallHint, setShowIosInstallHint] = useState(false);
 
   useEffect(() => {
     if (!shopId) {
@@ -243,6 +244,22 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     }
     window.addEventListener('beforeinstallprompt', handler);
     return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  // iOS Safari never fires beforeinstallprompt at all (an Apple platform
+  // restriction, not something any website can work around) - so the
+  // Install button above would just silently never appear there, leaving
+  // an iPhone customer with no visible way to add this to their home
+  // screen. This shows the manual steps instead (Share -> Add to Home
+  // Screen), and skips itself entirely once the page is already running
+  // installed (navigator.standalone - the flag iOS sets on a launched
+  // home-screen app - or the standard matchMedia check other installed
+  // PWAs use).
+  useEffect(() => {
+    const ua = window.navigator.userAgent;
+    const isIos = /iphone|ipad|ipod/i.test(ua) && !(window as any).MSStream;
+    const isStandalone = (window.navigator as any).standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+    setShowIosInstallHint(isIos && !isStandalone);
   }, []);
 
   useEffect(() => {
@@ -406,6 +423,18 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       {!menu?.isOpen ? (
         <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 p-4 text-xs font-bold text-amber-800">
           <AlertCircle size={16} /> This shop is currently closed and isn't taking orders right now.
+        </div>
+      ) : null}
+
+      {showIosInstallHint ? (
+        <div className="mx-5 mt-4 flex items-start gap-2 rounded-2xl bg-white p-4 text-xs font-bold text-gray-700 shadow-sm">
+          <Share size={16} className="mt-0.5 shrink-0 text-indigo-600" />
+          <span className="flex-1">
+            Add this to your Home Screen: tap the <b>Share</b> button below, then <b>Add to Home Screen</b>.
+          </span>
+          <button type="button" onClick={() => setShowIosInstallHint(false)} className="shrink-0 text-gray-400">
+            <X size={16} />
+          </button>
         </div>
       ) : null}
 

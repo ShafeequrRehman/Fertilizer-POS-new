@@ -17,6 +17,10 @@ export interface EmployeeSummary {
   designation?: string;
   idCardNumber?: string;
   address?: string;
+  // Vehicle/bike registration number - only really relevant when
+  // designation is "Delivery Rider", but stored on every employee (see
+  // backend/models/User.js).
+  vehicleNumber?: string;
   reference?: string;
   comment?: string;
   monthlySalary?: number;

@@ -6,7 +6,7 @@ const ShopSession = require("../models/ShopSession");
 const Shop = require("../models/Shop");
 const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
-const { notifyRiderForDelivery } = require("../services/riderNotificationService");
+const { notifyRiderForDelivery, notifyAssignedRider } = require("../services/riderNotificationService");
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -1316,6 +1316,44 @@ exports.updateTrackingStatus = async (req, res) => {
     order.version = Number(order.version || 0) + 1;
     await order.save();
     res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// PATCH /api/orders/:id/assign-rider  body: { riderId, riderName, riderPhone }
+// Hands a Delivery order to one specific staff member (picked from
+// waiterController.getRiders' "Delivery Rider" list on
+// SalesPage.tsx's OnlineOrderControls) and sends THAT rider - not the
+// whole Shop.riderPhones broadcast list - the customer's details and a
+// Maps link over WhatsApp. Deliberately allowed for any Delivery
+// customer-qr order regardless of trackingStatus (staff might reassign a
+// delivery mid-flow, e.g. the first rider called in sick) - the response
+// reports whether the WhatsApp message actually sent so a staff member
+// isn't left thinking someone's on it when nobody was actually notified.
+exports.assignRider = async (req, res) => {
+  try {
+    const { riderId, riderName, riderPhone } = req.body || {};
+    const phone = String(riderPhone || "").trim();
+    if (!phone) {
+      return res.status(400).json({ message: "Choose a rider with a phone number on file." });
+    }
+
+    const query = { _id: req.params.id, ...buildShopScope(req) };
+    const order = await Order.findOne(query);
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (order.orderType !== "Delivery") {
+      return res.status(400).json({ message: "Only Delivery orders can be assigned to a rider." });
+    }
+
+    order.assignedRider = { id: String(riderId || ""), name: String(riderName || ""), phone, assignedAt: new Date() };
+    order.version = Number(order.version || 0) + 1;
+    await order.save();
+
+    const shop = await Shop.findById(order.shopId).select("name").lean();
+    const notified = await notifyAssignedRider(order, shop, phone);
+
+    res.json({ ...order.toObject(), id: String(order._id), riderNotified: notified });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

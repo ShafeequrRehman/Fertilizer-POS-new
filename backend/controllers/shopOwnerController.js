@@ -40,7 +40,7 @@ exports.createEmployee = async (req, res) => {
   try {
     const {
       name, username, password, email, phone, roleId,
-      designation, idCardNumber, address, reference, comment, monthlySalary,
+      designation, idCardNumber, address, vehicleNumber, reference, comment, monthlySalary,
     } = req.body;
     if (!username || !password || !roleId) {
       return res.status(400).json({ message: "username, password, and roleId are required", reason: "validation_error" });
@@ -81,6 +81,7 @@ exports.createEmployee = async (req, res) => {
       designation: designation || "",
       idCardNumber: idCardNumber || "",
       address: address || "",
+      vehicleNumber: vehicleNumber || "",
       reference: reference || "",
       comment: comment || "",
       monthlySalary: Number(monthlySalary) || 0,
@@ -100,7 +101,7 @@ exports.updateEmployee = async (req, res) => {
 
     const {
       name, email, phone, roleId, isActive, username,
-      designation, idCardNumber, address, reference, comment, monthlySalary,
+      designation, idCardNumber, address, vehicleNumber, reference, comment, monthlySalary,
     } = req.body;
 
     if (username && username !== employee.username) {
@@ -115,6 +116,7 @@ exports.updateEmployee = async (req, res) => {
     if (designation !== undefined) employee.designation = designation;
     if (idCardNumber !== undefined) employee.idCardNumber = idCardNumber;
     if (address !== undefined) employee.address = address;
+    if (vehicleNumber !== undefined) employee.vehicleNumber = vehicleNumber;
     if (reference !== undefined) employee.reference = reference;
     if (comment !== undefined) employee.comment = comment;
     if (monthlySalary !== undefined) employee.monthlySalary = Number(monthlySalary) || 0;

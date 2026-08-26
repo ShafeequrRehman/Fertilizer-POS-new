@@ -199,6 +199,45 @@ export async function fetchWaiters() {
   }
 }
 
+export interface Rider {
+  id: string;
+  name: string;
+  phone: string;
+  isActive: boolean;
+  vehicleNumber?: string;
+  idCardNumber?: string;
+  address?: string;
+}
+
+// Staff with designation "Delivery Rider" (see EmployeesPage.tsx's Manage
+// Staff form / waiterController.getRiders) - the picker
+// OnlineOrderControls in SalesPage.tsx builds from this.
+export async function fetchRiders() {
+  try {
+    const response = await api.get<Rider[]>('/waiters/riders');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// See orderController.exports.assignRider - hands a Delivery order to one
+// specific rider and WhatsApps them the customer's details + a Maps link.
+// riderNotified in the response tells the caller whether that message
+// actually sent (the shop's WhatsApp might not be connected).
+export async function assignOrderRider(orderId: string, rider: { id: string; name: string; phone: string }) {
+  try {
+    const response = await api.patch<SavedOrder & { _id?: string; riderNotified?: boolean }>(`/orders/${orderId}/assign-rider`, {
+      riderId: rider.id,
+      riderName: rider.name,
+      riderPhone: rider.phone,
+    });
+    return { order: normalizeOrder(response.data), riderNotified: Boolean(response.data.riderNotified) };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 export async function createWaiter(payload: { name: string; isActive?: boolean }) {
   try {
     const response = await api.post<Waiter & { _id?: string }>('/waiters', payload);

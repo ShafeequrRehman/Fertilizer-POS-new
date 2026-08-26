@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil, WifiOff } from "lucide-react";
+import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil, WifiOff, Eye } from "lucide-react";
 import { shopApi, type EmployeeSummary, type RoleSummary, type PermissionDef } from "@/lib/shop-api";
 import { STAFF_DESIGNATIONS } from "@/lib/staff-designations";
 import { useToast } from "@/lib/toast";
@@ -31,6 +31,7 @@ export default function EmployeesPage() {
   const [loading, setLoading] = useState(true);
   const [showCreateEmployee, setShowCreateEmployee] = useState(false);
   const [editTarget, setEditTarget] = useState<EmployeeSummary | null>(null);
+  const [viewTarget, setViewTarget] = useState<EmployeeSummary | null>(null);
   const [showRoleEditor, setShowRoleEditor] = useState<RoleSummary | "new" | null>(null);
   const [resetTarget, setResetTarget] = useState<EmployeeSummary | null>(null);
 
@@ -210,6 +211,9 @@ export default function EmployeesPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
+                        <button type="button" title="View full details" onClick={() => setViewTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
+                          <Eye size={15} />
+                        </button>
                         <button type="button" title="Edit staff details" onClick={() => setEditTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
                           <Pencil size={15} />
                         </button>
@@ -258,6 +262,14 @@ export default function EmployeesPage() {
       {editTarget ? (
         <StaffFormModal roles={roles} offline={offline} employee={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
       ) : null}
+      {viewTarget ? (
+        <StaffDetailsModal
+          employee={viewTarget}
+          roleLabel={roleName(viewTarget)}
+          onClose={() => setViewTarget(null)}
+          onEdit={() => { setEditTarget(viewTarget); setViewTarget(null); }}
+        />
+      ) : null}
       {showRoleEditor ? (
         <RoleEditorModal
           role={showRoleEditor === "new" ? null : showRoleEditor}
@@ -297,6 +309,62 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
   );
 }
 
+// Read-only view of everything on file for one staff member - the Manage
+// Staff table itself only has room for name/designation/username/phone/
+// role/status, so this is where directory details (ID card, address,
+// vehicle number, reference, salary, comment) actually show up without
+// having to open Edit (and risk accidentally changing something). Rider-
+// specific fields (vehicle number) only render when there's actually a
+// value, same idea as StaffFormModal only offering that field for a
+// Delivery Rider designation.
+function StaffDetailsModal({
+  employee,
+  roleLabel,
+  onClose,
+  onEdit,
+}: {
+  employee: EmployeeSummary;
+  roleLabel: string;
+  onClose: () => void;
+  onEdit: () => void;
+}) {
+  const rows: Array<[string, string]> = [
+    ["Full Name", employee.name || "—"],
+    ["Username", `@${employee.username}`],
+    ["Designation", employee.designation || "—"],
+    ["Role", roleLabel],
+    ["Status", employee.isActive ? "Active" : "Disabled"],
+    ["Email", employee.email || "—"],
+    ["Phone Number", employee.phone || "—"],
+    ["ID Card Number", employee.idCardNumber || "—"],
+    ["Address", employee.address || "—"],
+    ...(employee.vehicleNumber ? ([["Vehicle / Bike Number", employee.vehicleNumber]] as Array<[string, string]>) : []),
+    ["Reference", employee.reference || "—"],
+    ["Monthly Salary", employee.monthlySalary ? `PKR ${employee.monthlySalary.toLocaleString()}` : "—"],
+    ["Comment", employee.comment || "—"],
+  ];
+
+  return (
+    <ModalShell title={`Staff Details — ${employee.name || employee.username}`} onClose={onClose}>
+      <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1 text-sm">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-start justify-between gap-4 border-b border-gray-100 py-2 last:border-0">
+            <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-400">{label}</span>
+            <span className="text-right font-medium text-gray-800">{value}</span>
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onEdit}
+        className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white"
+      >
+        Edit Details
+      </button>
+    </ModalShell>
+  );
+}
+
 // Handles both "New Staff Member" and "Edit Staff Member" - the same
 // fields either way, just pre-filled and PATCHed instead of POSTed when
 // `employee` is passed in.
@@ -328,6 +396,7 @@ function StaffFormModal({
     customDesignation: "",
     idCardNumber: employee?.idCardNumber || "",
     address: employee?.address || "",
+    vehicleNumber: employee?.vehicleNumber || "",
     reference: employee?.reference || "",
     comment: employee?.comment || "",
     monthlySalary: employee?.monthlySalary ? String(employee.monthlySalary) : "",
@@ -337,6 +406,13 @@ function StaffFormModal({
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  // Shows the rider-only Vehicle/Bike Number field once the chosen
+  // designation looks like "Delivery Rider" (handles the custom-typed
+  // case too, not just the dropdown pick) - see waiterController.getRiders,
+  // which does the same case-insensitive match on the backend.
+  const currentDesignation = useCustomDesignation ? form.customDesignation : form.designation;
+  const isRider = /delivery rider/i.test(currentDesignation);
 
   const submit = async () => {
     setSubmitting(true);
@@ -350,6 +426,7 @@ function StaffFormModal({
       designation,
       idCardNumber: form.idCardNumber,
       address: form.address,
+      vehicleNumber: form.vehicleNumber,
       reference: form.reference,
       comment: form.comment,
       monthlySalary: form.monthlySalary ? Number(form.monthlySalary) : 0,
@@ -451,6 +528,13 @@ function StaffFormModal({
 
         <TextField label="ID Card Number" value={form.idCardNumber} onChange={(v) => setForm({ ...form, idCardNumber: v })} />
         <TextField label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} />
+        {isRider ? (
+          <TextField
+            label="Vehicle / Bike Number"
+            value={form.vehicleNumber}
+            onChange={(v) => setForm({ ...form, vehicleNumber: v })}
+          />
+        ) : null}
         <div className="grid grid-cols-2 gap-3">
           <TextField label="Reference" value={form.reference} onChange={(v) => setForm({ ...form, reference: v })} />
           <TextField label="Monthly Salary" type="number" value={form.monthlySalary} onChange={(v) => setForm({ ...form, monthlySalary: v })} />

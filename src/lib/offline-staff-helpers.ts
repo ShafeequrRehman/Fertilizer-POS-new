@@ -41,6 +41,7 @@ export function localEmployeeToSummary(record: LocalEmployeeRecord): EmployeeSum
     designation: payload.designation || '',
     idCardNumber: payload.idCardNumber || '',
     address: payload.address || '',
+    vehicleNumber: payload.vehicleNumber || '',
     reference: payload.reference || '',
     comment: payload.comment || '',
     monthlySalary: payload.monthlySalary || 0,
@@ -65,6 +66,7 @@ export function applyEmployeePatchOptimistically(
   if (typeof patch.designation === 'string') next.designation = patch.designation;
   if (typeof patch.idCardNumber === 'string') next.idCardNumber = patch.idCardNumber;
   if (typeof patch.address === 'string') next.address = patch.address;
+  if (typeof patch.vehicleNumber === 'string') next.vehicleNumber = patch.vehicleNumber;
   if (typeof patch.reference === 'string') next.reference = patch.reference;
   if (typeof patch.comment === 'string') next.comment = patch.comment;
   if (typeof patch.monthlySalary === 'number') next.monthlySalary = patch.monthlySalary;

@@ -217,6 +217,9 @@ export interface OrderPayload {
   trackingStatus?: 'awaiting_confirmation' | 'confirmed' | 'preparing' | 'ready' | 'cancelled';
   paymentStatus?: 'unpaid' | 'awaiting_confirmation' | 'paid' | 'failed';
   deliveryLocation?: { lat: number; lng: number; accuracy?: number | null; capturedAt?: string | null } | null;
+  // See orderController.exports.assignRider - which staff member (a
+  // "Delivery Rider") this Delivery order was handed to, if any.
+  assignedRider?: { id: string; name: string; phone: string; assignedAt?: string | null } | null;
 }
 
 export interface SavedOrder extends OrderPayload {

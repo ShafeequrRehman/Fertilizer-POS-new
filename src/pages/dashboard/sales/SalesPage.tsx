@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Globe, Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, type TrackingStatus } from '@/lib/pos-api';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, type TrackingStatus, type Rider } from '@/lib/pos-api';
 import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
@@ -55,6 +55,9 @@ export default function SalesPage() {
   // real order and made the filter buttons silently do nothing when
   // clicked) - see BASE_FILTERS above and the filters memo below.
   const [waiters, setWaiters] = useState<Waiter[]>([]);
+  // Staff with designation "Delivery Rider" (see waiterController.getRiders)
+  // - the picker OnlineOrderControls shows for assigning a Delivery order.
+  const [riders, setRiders] = useState<Rider[]>([]);
   // This shop's custom DineIn table labels (Shop.tables), if configured -
   // see src/lib/table-options.ts. Passed down to TableChangeModal and used
   // by this page's own "Table {x}" display spots.
@@ -471,6 +474,14 @@ export default function SalesPage() {
         if (waiterData) setWaiters(waiterData.filter((waiter) => waiter.isActive));
       } catch {
         // Best-effort - falls back to whatever the offline cache already had.
+      }
+
+      try {
+        const riderData = await fetchRiders();
+        if (riderData) setRiders(riderData.filter((rider) => rider.isActive));
+      } catch {
+        // Best-effort - the rider picker just shows no options until this
+        // succeeds; doesn't block anything else on the page.
       }
 
       try {
@@ -912,6 +923,34 @@ export default function SalesPage() {
     }
   }
 
+  const [assigningRider, setAssigningRider] = useState(false);
+
+  // Hands a confirmed/accepted Delivery order to a specific staff member
+  // with designation "Delivery Rider" (see waiterController.getRiders) and
+  // fires the targeted WhatsApp notification server-side (orderController.
+  // assignRider -> riderNotificationService.notifyAssignedRider) with the
+  // customer's order details and captured delivery location.
+  async function handleAssignRider(order: SavedOrder, rider: Rider) {
+    setAssigningRider(true);
+    try {
+      const result = await assignOrderRider(order.id, { id: rider.id, name: rider.name, phone: rider.phone });
+      if (result?.order) {
+        localEditVersionRef.current += 1;
+        setOrders((previous) => previous.map((o) => (o.id === result.order.id ? result.order : o)));
+        setSelectedOrder(result.order);
+        toast.success(
+          result.riderNotified
+            ? `Assigned to ${rider.name} - WhatsApp sent.`
+            : `Assigned to ${rider.name}, but the WhatsApp message could not be sent.`,
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not assign this rider.');
+    } finally {
+      setAssigningRider(false);
+    }
+  }
+
   async function addItems(items: Array<{ name: string; price: number; quantity: number; variation: string }>) {
     if (items.length === 0) return setStatus({ tone: 'error', text: 'Select at least one item.' });
     const updated = await saveUpdate({ action: 'addItems', items });
@@ -1205,7 +1244,14 @@ export default function SalesPage() {
                 </div>
 
                 {selectedOrder.source === 'customer-qr' ? (
-                  <OnlineOrderControls order={selectedOrder} updating={updatingTrackingStatus} onChange={handleTrackingStatusChange} />
+                  <OnlineOrderControls
+                    order={selectedOrder}
+                    updating={updatingTrackingStatus}
+                    onChange={handleTrackingStatusChange}
+                    riders={riders}
+                    assigningRider={assigningRider}
+                    onAssignRider={handleAssignRider}
+                  />
                 ) : null}
 
                 <div>
@@ -1390,16 +1436,30 @@ function OnlineOrderControls({
   order,
   updating,
   onChange,
+  riders,
+  assigningRider,
+  onAssignRider,
 }: {
   order: SavedOrder;
   updating: boolean;
   onChange: (order: SavedOrder, next: TrackingStatus) => void;
+  riders: Rider[];
+  assigningRider: boolean;
+  onAssignRider: (order: SavedOrder, rider: Rider) => void;
 }) {
   const current = order.trackingStatus || 'awaiting_confirmation';
+  const [selectedRiderId, setSelectedRiderId] = useState('');
+
   if (current === 'cancelled') return null;
 
   const nextSteps: TrackingStatus[] =
     current === 'awaiting_confirmation' ? ['confirmed'] : current === 'confirmed' ? ['preparing'] : current === 'preparing' ? ['ready'] : [];
+
+  // Rider assignment only makes sense for Delivery orders, and only once
+  // staff has actually accepted the order (past awaiting_confirmation) -
+  // per the user's own request: "after accepting the order add option to
+  // assign rider to send him the location and order details of customer".
+  const showRiderPicker = order.orderType === 'Delivery' && current !== 'awaiting_confirmation';
 
   return (
     <div className="rounded-[20px] border border-indigo-100 bg-indigo-50/60 p-4">
@@ -1433,6 +1493,47 @@ function OnlineOrderControls({
           </button>
         </div>
       </div>
+
+      {showRiderPicker ? (
+        <div className="mt-3 border-t border-indigo-100 pt-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">Delivery Rider</p>
+          {order.assignedRider?.phone ? (
+            <p className="mt-1 text-sm font-bold text-indigo-900">
+              Assigned to {order.assignedRider.name || order.assignedRider.phone}
+              {order.assignedRider.phone ? ` (${order.assignedRider.phone})` : ''}
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-indigo-700">Not assigned yet.</p>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <select
+              value={selectedRiderId}
+              onChange={(event) => setSelectedRiderId(event.target.value)}
+              disabled={assigningRider || riders.length === 0}
+              className="rounded-2xl border border-indigo-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="">{riders.length === 0 ? 'No riders on staff' : 'Choose a rider…'}</option>
+              {riders.map((rider) => (
+                <option key={rider.id} value={rider.id}>
+                  {rider.name}
+                  {rider.phone ? ` - ${rider.phone}` : ''}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={assigningRider || !selectedRiderId}
+              onClick={() => {
+                const rider = riders.find((r) => r.id === selectedRiderId);
+                if (rider) onAssignRider(order, rider);
+              }}
+              className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {order.assignedRider?.phone ? 'Reassign & Notify' : 'Assign & Notify'}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

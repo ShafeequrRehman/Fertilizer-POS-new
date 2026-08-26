@@ -20,6 +20,7 @@ const {
   importOfflineCancellations,
   getOccupiedDineInTables,
   updateTrackingStatus,
+  assignRider,
 } = require("../controllers/orderController");
 
 const router = express.Router();
@@ -47,6 +48,7 @@ router.patch("/:id/claim-kitchen-print", claimKitchenPrint);
 router.patch("/:id/claim-receipt-print", claimReceiptPrint);
 router.patch("/:id/claim-kitchen-update-print", claimKitchenUpdatePrint);
 router.patch("/:id/tracking-status", updateTrackingStatus);
+router.patch("/:id/assign-rider", assignRider);
 router.post("/:id/cancel", cancelOrder);
 
 module.exports = router;

@@ -60,6 +60,13 @@ const userSchema = new mongoose.Schema(
     designation: { type: String, default: "" },
     idCardNumber: { type: String, default: "" },
     address: { type: String, default: "" },
+    // Vehicle/bike registration number - only really meaningful for staff
+    // with designation "Delivery Rider", but kept as free text on every
+    // employee (same reasoning as idCardNumber/address) rather than a
+    // rider-only sub-schema, so it survives a designation change cleanly.
+    // Surfaced in waiterController.getRiders for the SalesPage.tsx rider
+    // picker, and shown/edited in EmployeesPage.tsx's Manage Staff form.
+    vehicleNumber: { type: String, default: "" },
     reference: { type: String, default: "" },
     comment: { type: String, default: "" },
     // Agreed monthly salary, used by the Payroll page alongside
