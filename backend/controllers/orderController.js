@@ -7,6 +7,7 @@ const Shop = require("../models/Shop");
 const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { notifyRiderForDelivery, notifyAssignedRider } = require("../services/riderNotificationService");
+const { notifyCustomerConfirmed, notifyCustomerCompleted } = require("../services/customerNotificationService");
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -1090,6 +1091,19 @@ exports.updateOrder = async (req, res) => {
     }
 
     const updated = await applyOrderPatch(order, req.body, req);
+
+    // "Order Completed" WhatsApp goes out only for a customer-qr order
+    // actually being settled here (not the live HTTP path's offline-sync
+    // replay counterpart, and not the other-orders-swept-into-completed
+    // side effect inside applyOrderPatch's dues-settlement loop) - a
+    // walk-in/staff order already gets its own separate PDF-receipt
+    // WhatsApp flow client-side, so this would double-message that
+    // customer if it fired for every order.
+    if (req.body?.action === "completeAndSettle" && updated.source === "customer-qr") {
+      const shop = await Shop.findById(updated.shopId).select("name phone address").lean();
+      void notifyCustomerCompleted(updated, shop);
+    }
+
     res.json({ ...updated.toObject(), id: String(updated._id) });
   } catch (error) {
     if (error.status) {
@@ -1308,9 +1322,15 @@ exports.updateTrackingStatus = async (req, res) => {
       order.cancelledAt = new Date();
       order.cancelledBy = user?.name || user?.username || "";
       order.cancelReason = reason || "Declined by shop";
-    } else if (trackingStatus === "confirmed" && order.orderType === "Delivery") {
-      const shop = await Shop.findById(order.shopId).select("name riderPhones").lean();
-      void notifyRiderForDelivery(order, shop);
+    } else if (trackingStatus === "confirmed") {
+      // Both notifications reuse this one Shop lookup - name/phone/address
+      // feed the customer's WhatsApp template (customerNotificationService),
+      // riderPhones feeds the existing delivery-rider broadcast.
+      const shop = await Shop.findById(order.shopId).select("name phone address riderPhones").lean();
+      void notifyCustomerConfirmed(order, shop);
+      if (order.orderType === "Delivery") {
+        void notifyRiderForDelivery(order, shop);
+      }
     }
 
     order.version = Number(order.version || 0) + 1;
