@@ -1265,7 +1265,20 @@ export default function SalesPage() {
                   <Box label="Order Number" value={`#${orderNumber(selectedOrder)}`} />
                   <Box label="Created At" value={formatOrderDateTime(selectedOrder.createdAt)} />
                   <Box label="Customer" value={label(selectedOrder)} />
-                  <Box label={selectedOrder.orderType === 'DineIn' ? 'Waiter' : 'Phone'} value={phoneLabel(selectedOrder)} />
+                  {/* Shows the real "Waiter" label only when there's no real
+                      customer phone to show instead (see phoneLabel's own
+                      comment) - a Dine-In order placed through the customer
+                      QR page always has a real phone and no waiter, a
+                      staff-placed Dine-In order usually has the reverse. */}
+                  <Box label={selectedOrder.orderType === 'DineIn' && !hasCustomerPhone(selectedOrder) ? 'Waiter' : 'Phone'} value={phoneLabel(selectedOrder)} />
+                  {/* Dedicated Waiter box - only shown when there IS a real
+                      phone number above (so the waiter box above didn't
+                      already cover it) and a waiter is actually assigned,
+                      e.g. a Dine-In order a customer placed via QR that
+                      staff then assigned a waiter to after the fact. */}
+                  {selectedOrder.orderType === 'DineIn' && hasCustomerPhone(selectedOrder) && selectedOrder.waiter ? (
+                    <Box label="Waiter" value={selectedOrder.waiter} />
+                  ) : null}
                   {selectedOrder.orderType === 'DineIn' ? (
                     selectedOrder.status === 'pending' ? (
                       <button
@@ -1462,8 +1475,31 @@ export default function SalesPage() {
   );
 }
 
-function label(order: SavedOrder) { return order.orderType === 'DineIn' ? (order.table ? formatTableLabel(order.table) : 'Dine-In Customer') : order.customer.name || 'Walk-in Customer'; }
-function phoneLabel(order: SavedOrder) { return order.orderType === 'DineIn' ? (order.waiter ? `Waiter: ${order.waiter}` : 'Dine In') : order.customer.phone || 'No phone'; }
+// Used to always ignore whatever was actually typed into customer.name/
+// customer.phone for a DineIn order and show the table/waiter instead - on
+// the assumption that a Dine-In order never has real customer details.
+// That's true for a STAFF-placed Dine-In order (POSPage doesn't require a
+// name/phone for Dine-In), but it's never true for a Dine-In order placed
+// through the customer QR page (CustomerOrderPage.tsx always collects a
+// real name + phone, for every order type including Dine-In - see its own
+// canSubmit check) - those were silently hidden here even though the data
+// was saved correctly server-side (see publicOrderController.createOrder's
+// `customer: {name, phone, address}`, never conditioned on orderType).
+// Now: show the real name/phone whenever one was actually provided, for
+// every order type: the table (as a heading) and waiter are still shown
+// elsewhere for Dine-In (see cardHeading and the dedicated Waiter Box
+// below), so nothing is lost for a walk-in table order that only ever had
+// a waiter assigned.
+function label(order: SavedOrder) {
+  const name = order.customer?.name?.trim();
+  if (name) return name;
+  return order.orderType === 'DineIn' ? 'Dine-In Customer' : 'Walk-in Customer';
+}
+function phoneLabel(order: SavedOrder) {
+  if (hasCustomerPhone(order)) return order.customer.phone;
+  if (order.orderType === 'DineIn') return order.waiter ? `Waiter: ${order.waiter}` : 'Dine In';
+  return 'No phone';
+}
 function prettyType(order: SavedOrder) { return order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery'; }
 function age(createdAt: string) { const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000); return mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} hr ${mins % 60} min ago`; }
 function orderNumber(order: SavedOrder) { return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, '0'); }
