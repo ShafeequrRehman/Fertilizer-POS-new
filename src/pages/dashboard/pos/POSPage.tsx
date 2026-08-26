@@ -984,10 +984,14 @@ export default function POSPage() {
   return (
     <div className="space-y-6">
       {statusMessage ? <StatusBanner tone={statusMessage.tone} text={statusMessage.text} /> : null}
-      {/* Checkout must always sit to the right of the products, at every
-          window size - never stack below - even if that means the product
-          grid drops to fewer/narrower columns on smaller screens. */}
-      <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
+      {/* Checkout sits to the right of the products from tablet width (sm,
+          640px) up - never stacking there, even if that means the product
+          grid drops to fewer/narrower columns. Below that (a real phone
+          screen) there simply isn't room for a 240px+ fixed sidebar next to
+          a usable product grid at the same time - that combination doesn't
+          fit and used to overflow/break - so it stacks to one column
+          instead: full-width product grid, checkout panel underneath. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
         <section className="space-y-5">
           <div className="rounded-[32px] bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">

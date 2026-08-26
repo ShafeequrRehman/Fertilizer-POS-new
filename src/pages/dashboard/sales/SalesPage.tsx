@@ -62,6 +62,13 @@ export default function SalesPage() {
   // see src/lib/table-options.ts. Passed down to TableChangeModal and used
   // by this page's own "Table {x}" display spots.
   const [shopTables, setShopTables] = useState<string[]>([]);
+  // Per-order-type "print the customer receipt automatically the instant
+  // this order is completed & settled" - a Shop Owner setting (see
+  // SettingsPage.tsx's ReceiptAutoPrintSection / models/Shop.js's
+  // receiptAutoPrint), not a per-device one, so it's the same across every
+  // till. Read only by completeOrder below - never affects the always-
+  // available manual Print Receipt button/printer icon.
+  const [receiptAutoPrint, setReceiptAutoPrint] = useState({ dineIn: false, takeAway: false, delivery: false });
   const [selectedOrder, setSelectedOrder] = useState<SavedOrder | null>(null);
   // Mirror of selectedOrder for refresh() to read - refresh() itself is
   // recreated fresh every render, but the 45-second poll's setInterval
@@ -487,6 +494,13 @@ export default function SalesPage() {
       try {
         const shopProfile = await fetchShopProfile();
         setShopTables(shopProfile?.tables || []);
+        if (shopProfile?.receiptAutoPrint) {
+          setReceiptAutoPrint({
+            dineIn: Boolean(shopProfile.receiptAutoPrint.dineIn),
+            takeAway: Boolean(shopProfile.receiptAutoPrint.takeAway),
+            delivery: Boolean(shopProfile.receiptAutoPrint.delivery),
+          });
+        }
       } catch {
         // Best-effort - falls back to whatever the offline cache already had
         // (or the default numbered list if this till has never fetched it).
@@ -818,15 +832,16 @@ export default function SalesPage() {
     // applies what's left to this order - see orderController.updateOrder.
     const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, discount: discountForOrder });
     if (!updated) return;
-    // No auto-print here any more, for any order type (DineIn, TakeAway,
-    // Delivery) - this used to fire the customer receipt automatically the
-    // instant an order completed, but that's now a deliberate, on-demand
-    // action only, via the Print Receipt button or the printer icon in the
-    // header above. customerReceiptPrintedAt is left exactly as
-    // completeAndSettle/saveUpdate set it either way, so a still-unprinted
-    // order is unaffected and an already-printed one (e.g. printed offline
-    // at completion via saveUpdate's local-first path, or explicitly
-    // beforehand) is unaffected too.
+    // Auto-print is opt-in per order type (Settings > Hardware/POS - see
+    // receiptAutoPrint above) - a Shop Owner explicitly turns this back on
+    // for whichever type(s) they want. Off by default for every shop, so
+    // nothing changes here unless they've saved that preference. The
+    // manual Print Receipt button/printer icon stay available regardless.
+    const shouldAutoPrint =
+      (updated.orderType === 'DineIn' && receiptAutoPrint.dineIn) ||
+      (updated.orderType === 'TakeAway' && receiptAutoPrint.takeAway) ||
+      (updated.orderType === 'Delivery' && receiptAutoPrint.delivery);
+    if (shouldAutoPrint) printCustomerReceipt(updated);
     // Fire-and-forget: the order is already durably saved locally by
     // saveUpdate above, and this is a PDF render (Electron IPC) plus a
     // WhatsApp cloud send - a couple of seconds combined that the cashier
@@ -1035,11 +1050,12 @@ export default function SalesPage() {
         <StatCard label="Open Value" value={`Rs ${visibleOrders.reduce((sum, order) => sum + order.total, 0)}`} />
       </div>
 
-      {/* Order detail must always sit to the right of the order list, at
-          every window size - never stack below - matching the POS
-          checkout panel behavior. The list column shrinks instead of
-          collapsing to a single stacked column on narrower windows. */}
-      <div className="grid grid-cols-[minmax(0,1fr)_260px] gap-3 sm:grid-cols-[minmax(0,1fr)_300px] sm:gap-4 lg:min-h-[calc(100vh-14rem)] lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,26%)] lg:gap-6 lg:items-stretch">
+      {/* Order detail sits to the right of the order list from tablet width
+          (sm, 640px) up, matching the POS checkout panel. Below that (a
+          real phone) a fixed 260px+ sidebar next to a usable order grid
+          doesn't fit at all - it stacks to one column instead: order list
+          on top, detail panel underneath. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_300px] sm:gap-4 lg:min-h-[calc(100vh-14rem)] lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,26%)] lg:gap-6 lg:items-stretch">
         <section className="min-w-0 space-y-5 lg:flex lg:min-h-0 lg:flex-col">
           <div className="rounded-[24px] bg-white p-3.5 shadow-sm">
             <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">

@@ -532,11 +532,30 @@ export interface ShopProfile {
   // This shop's custom DineIn table labels (Shop.tables) - see
   // src/lib/table-options.ts. Empty/absent means no custom layout.
   tables?: string[];
+  // Whether the customer receipt should print automatically the instant an
+  // order is completed & settled, broken out per order type - see
+  // models/Shop.js's own comment and SalesPage.tsx's completeOrder, the
+  // only place this is actually read. Absent (an older shop that's never
+  // saved this) should be treated the same as all-false.
+  receiptAutoPrint?: { dineIn: boolean; takeAway: boolean; delivery: boolean };
 }
 
 export async function fetchShopProfile() {
   try {
     const response = await api.get<ShopProfile>('/shop/profile');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// PATCH /shop/profile - see shopOwnerController.exports.updateOwnShop. Used
+// today just for the receiptAutoPrint checkboxes in Settings (Hardware/POS)
+// - name/phone/email/address are also accepted server-side but nothing in
+// this app's UI edits those through this call yet.
+export async function updateShopProfile(payload: { receiptAutoPrint?: Partial<{ dineIn: boolean; takeAway: boolean; delivery: boolean }> }) {
+  try {
+    const response = await api.patch<ShopProfile>('/shop/profile', payload);
     return response.data;
   } catch (error) {
     handleApiError(error);

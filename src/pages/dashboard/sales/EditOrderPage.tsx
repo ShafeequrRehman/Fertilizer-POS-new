@@ -390,9 +390,10 @@ export default function EditOrderPage() {
         </div>
       </div>
 
-      {/* Order meta / quick-add panel always sits to the right of the item
-          list, at every window size, matching the POS and Sales pages. */}
-      <div className="grid grid-cols-[minmax(0,1fr)_260px] gap-3 sm:grid-cols-[minmax(0,1fr)_320px] sm:gap-4 xl:grid-cols-[minmax(0,1.2fr)_380px] xl:gap-6">
+      {/* Order meta / quick-add panel sits to the right of the item list
+          from tablet width (sm) up, matching the POS and Sales pages;
+          stacks to one column below that for phone screens. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_320px] sm:gap-4 xl:grid-cols-[minmax(0,1.2fr)_380px] xl:gap-6">
         <section className="min-w-0 rounded-[32px] bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Order Items</h2>
           <div className="space-y-3">

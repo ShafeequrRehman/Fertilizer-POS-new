@@ -411,11 +411,22 @@ exports.updateOwnShop = async (req, res) => {
     const shop = await Shop.findById(req.user.shopId);
     if (!shop) return res.status(404).json({ message: "Shop not found" });
 
-    const { name, phone, email, address } = req.body;
+    const { name, phone, email, address, receiptAutoPrint } = req.body;
     if (name !== undefined) shop.name = name;
     if (phone !== undefined) shop.phone = phone;
     if (email !== undefined) shop.email = email;
     if (address !== undefined) shop.address = address;
+    // Partial patch - only the order types actually included get changed,
+    // same convention as updateOrderingSettings below. See models/Shop.js's
+    // own comment on receiptAutoPrint for what this actually controls.
+    if (receiptAutoPrint && typeof receiptAutoPrint === "object") {
+      const current = shop.receiptAutoPrint || {};
+      shop.receiptAutoPrint = {
+        dineIn: receiptAutoPrint.dineIn !== undefined ? Boolean(receiptAutoPrint.dineIn) : Boolean(current.dineIn),
+        takeAway: receiptAutoPrint.takeAway !== undefined ? Boolean(receiptAutoPrint.takeAway) : Boolean(current.takeAway),
+        delivery: receiptAutoPrint.delivery !== undefined ? Boolean(receiptAutoPrint.delivery) : Boolean(current.delivery),
+      };
+    }
 
     await shop.save();
     res.json(shop);

@@ -99,6 +99,21 @@ const shopSchema = new mongoose.Schema(
         environment: { type: String, enum: ["sandbox", "live"], default: "sandbox" },
       },
     },
+    // Whether to automatically print the customer receipt the instant an
+    // order is completed & settled - per order type, since a shop may want
+    // this for Dine-In/Takeaway (handed to the customer at the counter) but
+    // not Delivery (no one to hand a paper receipt to until the rider picks
+    // up), or any other combination. Purely a policy flag read by
+    // SalesPage.tsx's completeOrder - the backend itself never prints
+    // anything (that's always a client/device action against a real
+    // thermal printer). All default false, matching the prior behavior
+    // (auto-print-on-completion was removed entirely) until a Shop Owner
+    // explicitly opts a type back in from Settings.
+    receiptAutoPrint: {
+      dineIn: { type: Boolean, default: false },
+      takeAway: { type: Boolean, default: false },
+      delivery: { type: Boolean, default: false },
+    },
   },
   { timestamps: true }
 );

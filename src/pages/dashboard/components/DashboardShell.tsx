@@ -4,7 +4,8 @@ import {
   LayoutDashboard, ShoppingCart, BarChart3, Calculator,
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
-  Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw
+  Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
+  Menu, X, Smartphone
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, hasPermission, isPageEnabled } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
@@ -56,6 +57,14 @@ export default function DashboardShell() {
   const pathname = useLocation().pathname;
   const navigate = useNavigate();
   const role = getAuthRole();
+  // Off-canvas sidebar on phone/tablet widths (<lg) - the sidebar used to
+  // be a fixed, always-visible 224px column with zero responsive
+  // breakpoints, which left literally no room for page content on a phone
+  // screen. At lg and up this renders exactly as it always did (a static
+  // column); below that it's a slide-in drawer toggled by the hamburger
+  // button in the header, closed by default, and auto-closes on
+  // navigation/backdrop tap.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const navItems = DASHBOARD_PAGES
     // Payroll and Manage Staff both hit Shop Owner-only backend routes
@@ -90,17 +99,46 @@ export default function DashboardShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastResult]);
 
+  // Close the drawer automatically whenever the route changes (tapping a
+  // nav link already closes it explicitly - see NavItem's onClick below -
+  // but this also covers back/forward navigation and any other route
+  // change that doesn't go through a nav link click).
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [pathname]);
+
   return (
     <ShopSessionProvider>
       <KitchenPrintWatcher />
       <KitchenUpdateWatcher />
       <div className="flex min-h-screen bg-[#F2F4F7] font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
-        <aside className="print:hidden flex w-56 flex-col gap-6 p-4">
-          <div className="flex items-center gap-2 px-2">
-            <div className="rounded-lg bg-black p-1">
-              <div className="text-[10px] text-white">*</div>
+        {sidebarOpen ? (
+          <div
+            className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden="true"
+          />
+        ) : null}
+
+        <aside
+          className={`print:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col gap-6 overflow-y-auto bg-[#F2F4F7] p-4 shadow-2xl transition-transform duration-200 ease-out lg:static lg:z-auto lg:w-56 lg:translate-x-0 lg:shadow-none ${
+            sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2 px-2">
+            <div className="flex items-center gap-2">
+              <div className="rounded-lg bg-black p-1">
+                <div className="text-[10px] text-white">*</div>
+              </div>
+              <span className="text-xl font-bold tracking-tight">Starline</span>
             </div>
-            <span className="text-xl font-bold tracking-tight">Starline</span>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="rounded-full p-1.5 text-gray-400 hover:bg-gray-200 lg:hidden"
+            >
+              <X size={18} />
+            </button>
           </div>
 
           <nav className="flex flex-col gap-1">
@@ -111,22 +149,32 @@ export default function DashboardShell() {
                 label={item.label}
                 href={item.href}
                 active={pathname === item.href}
+                onNavigate={() => setSidebarOpen(false)}
               />
             ))}
           </nav>
         </aside>
 
-        <main className="flex-1 overflow-auto p-8 print:overflow-visible print:p-0">
-          <div className="print:hidden mb-6 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
+        <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6 lg:p-8 print:overflow-visible print:p-0">
+          <div className="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                className="flex items-center justify-center rounded-full border border-white bg-white p-2.5 text-gray-600 shadow-sm hover:bg-gray-50 lg:hidden"
+                aria-label="Open menu"
+              >
+                <Menu size={18} />
+              </button>
               <ShopStatusControl />
               <NetworkStatusBadge />
               <OfflineModeToggle />
               <UpdateStatusBadge />
             </div>
-            <div className="flex items-center gap-3">
-              <TopAction icon={<Search size={18} />} />
-              <TopAction icon={<Cloud size={18} />} />
+            <div className="flex flex-wrap items-center gap-3">
+              <InstallAppButton />
+              <TopAction icon={<Search size={18} />} className="hidden sm:flex" />
+              <TopAction icon={<Cloud size={18} />} className="hidden sm:flex" />
               <TopAction icon={<MessageCircle size={18} />} />
               <div className="relative">
                 <TopAction icon={<Bell size={18} />} />
@@ -139,10 +187,10 @@ export default function DashboardShell() {
                   clearAuthSession();
                   navigate('/login', { replace: true });
                 }}
-                className="flex items-center gap-2 rounded-full border border-white bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+                className="flex items-center gap-2 rounded-full border border-white bg-white px-3 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50 sm:px-4"
               >
                 <LogOut size={16} />
-                Logout
+                <span className="hidden sm:inline">Logout</span>
               </button>
             </div>
           </div>
@@ -151,6 +199,72 @@ export default function DashboardShell() {
       </div>
     </ShopSessionProvider>
   );
+}
+
+// The Android/Chrome "install this as an app" trigger for the STAFF
+// dashboard itself - separate from CustomerOrderPage.tsx's own Install
+// button, which only ever appears on the customer-facing ordering page.
+// Needs main.tsx's site-wide sw.js registration (see the comment there) to
+// ever fire at all - Chrome won't offer beforeinstallprompt without a
+// registered service worker + this manifest (public/manifest.json).
+// Renders nothing inside Electron (already a real installed app, nothing
+// to prompt) or once the prompt has been used/dismissed for this session.
+function InstallAppButton() {
+  const [installEvent, setInstallEvent] = useState<any>(null);
+  const [showIosHint, setShowIosHint] = useState(false);
+
+  useEffect(() => {
+    if (isDesktopApp()) return undefined;
+    function handler(event: Event) {
+      event.preventDefault();
+      setInstallEvent(event);
+    }
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  // iOS Safari never fires beforeinstallprompt (an Apple platform
+  // restriction) - shows a one-tap dismissible hint with the manual Share ->
+  // Add to Home Screen steps instead, same pattern as CustomerOrderPage.tsx.
+  useEffect(() => {
+    if (isDesktopApp()) return;
+    const ua = window.navigator.userAgent;
+    const isIos = /iphone|ipad|ipod/i.test(ua) && !(window as any).MSStream;
+    const isStandalone = (window.navigator as any).standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+    setShowIosHint(isIos && !isStandalone);
+  }, []);
+
+  if (installEvent) {
+    return (
+      <button
+        type="button"
+        onClick={async () => {
+          installEvent.prompt();
+          await installEvent.userChoice;
+          setInstallEvent(null);
+        }}
+        title="Install this dashboard as an app on this phone/computer"
+        className="flex items-center gap-2 rounded-full bg-black px-3 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-gray-800 sm:px-4"
+      >
+        <Smartphone size={16} />
+        <span className="hidden sm:inline">Install App</span>
+      </button>
+    );
+  }
+
+  if (showIosHint) {
+    return (
+      <div
+        title="On iPhone/iPad: tap Share, then Add to Home Screen"
+        className="flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-xs font-bold text-indigo-700"
+      >
+        <Smartphone size={14} />
+        <span className="hidden sm:inline">Share → Add to Home Screen</span>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 // Background "print any order nobody has printed a kitchen ticket for yet"
@@ -624,11 +738,13 @@ function NavItem({
   label,
   href,
   active,
+  onNavigate,
 }: {
   icon: React.ReactNode;
   label: string;
   href?: string;
   active?: boolean;
+  onNavigate?: () => void;
 }) {
   const className = `flex items-center gap-2.5 rounded-full px-3 py-2.5 transition-all ${
     active ? 'bg-[#E2F33C] font-bold text-black shadow-sm' : 'text-gray-500 hover:bg-gray-200'
@@ -644,16 +760,16 @@ function NavItem({
   }
 
   return (
-    <Link to={href} className={className}>
+    <Link to={href} className={className} onClick={onNavigate}>
       {icon}
       <span className="text-sm">{label}</span>
     </Link>
   );
 }
 
-function TopAction({ icon }: { icon: React.ReactNode }) {
+function TopAction({ icon, className = '' }: { icon: React.ReactNode; className?: string }) {
   return (
-    <div className="cursor-pointer rounded-full border border-white bg-white/60 p-2.5 text-gray-500 shadow-sm transition-colors hover:bg-white">
+    <div className={`cursor-pointer rounded-full border border-white bg-white/60 p-2.5 text-gray-500 shadow-sm transition-colors hover:bg-white ${className}`}>
       {icon}
     </div>
   );

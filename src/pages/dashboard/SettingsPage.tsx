@@ -10,6 +10,7 @@ import { ProductManagementSection } from '@/components/ProductManagementSection'
 import { ReceiptManagementSection } from '@/components/ReceiptManagementSection';
 import { SidebarPagesSection } from '@/components/SidebarPagesSection';
 import { CustomerOrderingSection } from '@/components/CustomerOrderingSection';
+import { ReceiptAutoPrintSection } from '@/components/ReceiptAutoPrintSection';
 import { getStoreSettings, saveStoreSettings, StoreSettings, CURRENCIES, TIMEZONES } from '@/lib/pos-settings';
 import { fetchPrinters } from '@/lib/pos-api';
 
@@ -386,6 +387,8 @@ export default function SettingsPage() {
                   onRemoveLogo={handleRemoveLogo}
                 />
               </div>
+
+              <ReceiptAutoPrintSection />
               </div>
             ) : null}
               </>

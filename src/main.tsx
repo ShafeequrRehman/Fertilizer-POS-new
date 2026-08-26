@@ -88,6 +88,25 @@ Promise.all([import('@/store'), import('./App')])
     // overlay now instead of leaving it up (or, worse, having removed it
     // earlier and shown a blank frame if mounting itself then failed).
     window.__hideBootOverlay?.();
+
+    // Registers the same minimal, network-first service worker
+    // CustomerOrderPage.tsx already uses (see public/sw.js) - site-wide
+    // this time, not just for the customer ordering page, so the STAFF
+    // dashboard itself becomes installable on a phone (Chrome/Android
+    // requires a registered service worker with a fetch handler before it
+    // will ever offer "Add to Home Screen" / fire beforeinstallprompt - see
+    // DashboardShell.tsx's InstallAppButton, the thing that actually
+    // prompts for this). Skipped entirely inside the Electron desktop
+    // shell: service workers don't run under a file:// origin anyway, and
+    // Electron has its own auto-updater (see UpdateStatusBadge) - there is
+    // nothing for this to do there.
+    const isElectronShell = typeof navigator !== 'undefined' && navigator.userAgent.includes('Electron');
+    if (!isElectronShell && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {
+        // Non-fatal - the app still works fully as a plain web page, it
+        // just won't offer the install prompt.
+      });
+    }
   })
   .catch((error) => {
     console.error('[main.tsx] Failed to load store/App:', error);
