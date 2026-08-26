@@ -268,7 +268,11 @@ export default function DashboardPageClient() {
         <div className="col-span-12 min-w-0 space-y-6 lg:col-span-7">
           <div className="rounded-[32px] bg-white p-6 shadow-sm">
             <h3 className="mb-6 font-bold text-gray-800">Sales Overview</h3>
-            <div className="mb-8 grid grid-cols-2 gap-4">
+            {/* Stacked on phone - a half-width card here (icon + truncated
+                text) had no room left for a real revenue figure like
+                "Rs 1,245,690", so it just showed "Rs 1,245..." with no way
+                to see the rest. Side-by-side again from tablet width up. */}
+            <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <StatCard title={`Rs ${formatter.format(stats.totalRevenue)}`} subtitle="Total Revenue" trend="Live" color="bg-orange-50 text-orange-400" icon={<Target size={20} />} />
               <StatCard title={formatter.format(stats.totalOrders)} subtitle="Total Orders" trend="Live" color="bg-purple-50 text-purple-400" icon={<Users size={20} />} />
             </div>
@@ -307,7 +311,9 @@ export default function DashboardPageClient() {
               </div>
             </div>
 
-            <div className="mt-8 grid grid-cols-3 gap-4">
+            {/* Same reasoning as the StatCard row above - 3-across left
+                almost no width per figure on a phone. */}
+            <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
               <MiniStat label="Business Day Sales" value={`Rs ${formatter.format(stats.businessSales)}`} />
               <MiniStat label="Transactions" value={formatter.format(stats.totalOrders)} />
               <MiniStat label="Avg. Order" value={`Rs ${formatter.format(stats.avgValue)}`} valueColor="text-green-500" />
@@ -345,7 +351,7 @@ export default function DashboardPageClient() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <StatusRing stats={stats} />
             <div className="space-y-4 rounded-[32px] bg-white p-5 shadow-sm">
               <h3 className="text-sm font-bold">Service Stats</h3>

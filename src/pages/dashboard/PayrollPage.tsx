@@ -284,7 +284,7 @@ function RecordPaymentModal({ row, onClose, onSaved }: { row: PayrollRow; onClos
         <div className="space-y-3 text-sm">
           <div>
             <label className="mb-1 block text-xs font-bold text-slate-500">Type</label>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {(['salary', 'advance', 'bonus', 'deduction'] as const).map((t) => (
                 <button
                   key={t}

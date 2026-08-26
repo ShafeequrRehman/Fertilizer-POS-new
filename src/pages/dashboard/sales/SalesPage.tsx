@@ -1041,9 +1041,10 @@ export default function SalesPage() {
   return (
     <div className="space-y-6">
       {status ? <Banner tone={status.tone} text={status.text} /> : null}
-      {/* Fixed 4-up grid (not auto-fit) so these always sit in a single
-          compact row instead of wrapping to 2 across on narrower windows. */}
-      <div className="grid grid-cols-4 gap-2">
+      {/* 2-up on phone widths (a 4-up row left ~85px per card, which
+          truncated every currency value down to "Rs 45,2..." - illegible),
+          4-up from tablet width (sm, 640px) up where there's actually room. */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <StatCard label="Pending Orders" value={String(visibleOrders.length)} />
         <StatCard label="Completed" value={String(filteredOrders.filter((order) => order.status === 'completed').length)} />
         <StatCard label="Cancelled" value={String(filteredOrders.filter((order) => order.status === 'cancelled').length)} />
@@ -1479,7 +1480,7 @@ function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toL
 
 function Banner({ tone, text }: { tone: 'success' | 'error' | 'info'; text: string }) { return <div className={`rounded-[28px] border px-5 py-4 text-sm shadow-sm ${tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : tone === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-sky-200 bg-sky-50 text-sky-700'}`}>{text}</div>; }
 function Surface({ text }: { text: string }) { return <div className="rounded-[32px] bg-white p-8 text-sm text-gray-500 shadow-sm">{text}</div>; }
-function StatCard({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[16px] bg-white px-3 py-2.5 shadow-sm"><p className="truncate text-[9px] font-black uppercase tracking-[0.1em] text-gray-400">{label}</p><p className="mt-0.5 truncate text-lg font-black text-gray-900">{value}</p></div>; }
+function StatCard({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[16px] bg-white px-3 py-2.5 shadow-sm"><p className="truncate text-[9px] font-black uppercase tracking-[0.1em] text-gray-400">{label}</p><p className="mt-0.5 truncate text-base font-black text-gray-900 sm:text-lg">{value}</p></div>; }
 function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="flex min-w-0 items-center gap-2 text-xs text-gray-600"><span className="shrink-0">{icon}</span><span className="truncate">{text}</span></div>; }
 function Box({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3"><p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{label}</p><p className="mt-1 break-words text-sm font-bold text-gray-900">{value}</p></div>; }
 function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) { return <div className={`flex items-center justify-between py-1.5 ${strong ? 'text-lg font-black text-gray-900' : 'text-sm text-gray-500'}`}><span>{label}</span><span>{value}</span></div>; }
