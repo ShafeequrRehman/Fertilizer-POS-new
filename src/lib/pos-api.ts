@@ -505,6 +505,19 @@ export async function updateOrderTrackingStatus(id: string, trackingStatus: Trac
   }
 }
 
+// See orderController.exports.respondToChangeRequest - staff-side
+// approve/reject for a customer's own request to add/remove items on an
+// order they already placed (see SavedOrder.customerChangeRequest below,
+// and SalesPage.tsx's OnlineOrderControls for the UI).
+export async function respondToOrderChangeRequest(id: string, action: 'approve' | 'reject', reason?: string) {
+  try {
+    const response = await api.patch<SavedOrder & { _id?: string }>(`/orders/${id}/change-request`, { action, reason });
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // GET /shop/profile - includes enabledPages (this shop's current sidebar
 // page selection, null if never configured) and hasPageVisibilityKey
 // (whether the Super Admin has set up the key needed to change it). Never

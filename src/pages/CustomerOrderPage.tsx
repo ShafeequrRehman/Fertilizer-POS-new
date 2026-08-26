@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share, RotateCcw } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share, RotateCcw, Edit3, Clock } from 'lucide-react';
 import { getProductImageUrl } from '@/lib/asset-path';
 import {
   createPublicOrder,
@@ -9,11 +9,13 @@ import {
   fetchPublicOrderStatus,
   fetchPublicTables,
   initiatePublicPayment,
+  requestOrderChange,
   type PaymentRedirect,
   type PublicMenuProduct,
   type PublicMenuResponse,
   type PublicOrderResult,
   type PublicOrderStatus,
+  type PublicChangeRequest,
 } from '@/lib/public-order-api';
 import { getTableOptions, formatTableLabel } from '@/lib/table-options';
 import { getApiBaseCandidates } from '@/lib/api';
@@ -82,19 +84,66 @@ const TRACKING_LABELS: Record<string, { label: string; tone: string }> = {
   cancelled: { label: 'This order was cancelled', tone: 'bg-rose-50 text-rose-800' },
 };
 
-// Best-effort real-time location capture - never blocks placing the order.
-// A customer who denies/has no GPS still checks out fine on their typed
-// address alone (see publicOrderController.js's createOrder, which treats
-// this as optional). 8s timeout so a stuck GPS fix can't stall checkout.
-function captureLocation(): Promise<{ lat: number; lng: number; accuracy?: number } | null> {
+type LocationResult =
+  | { ok: true; lat: number; lng: number; accuracy?: number }
+  | { ok: false; reason: 'unsupported' | 'denied' | 'unavailable' | 'timeout' };
+
+// Real-time location capture for a Delivery order - MANDATORY, not
+// best-effort (see publicOrderController.js's createOrder, which now
+// rejects a Delivery order with no valid lat/lng at all - a customer typing
+// an address alone is no longer enough on its own). Returns a specific
+// failure reason rather than just null, so handlePlaceOrder can show the
+// customer an actionable message (e.g. "you denied location access" is a
+// very different fix than "your GPS timed out").
+function captureLocation(): Promise<LocationResult> {
   return new Promise((resolve) => {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) return resolve(null);
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      return resolve({ ok: false, reason: 'unsupported' });
+    }
     navigator.geolocation.getCurrentPosition(
-      (position) => resolve({ lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy }),
-      () => resolve(null),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+      (position) => resolve({ ok: true, lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy }),
+      (error) => {
+        // GeolocationPositionError codes: 1 = PERMISSION_DENIED, 2 =
+        // POSITION_UNAVAILABLE, 3 = TIMEOUT.
+        if (error.code === 1) resolve({ ok: false, reason: 'denied' });
+        else if (error.code === 3) resolve({ ok: false, reason: 'timeout' });
+        else resolve({ ok: false, reason: 'unavailable' });
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 },
     );
   });
+}
+
+type LocationErrorReason = Extract<LocationResult, { ok: false }>['reason'];
+
+const LOCATION_ERROR_MESSAGE: Record<LocationErrorReason, string> = {
+  unsupported: "Your browser doesn't support location - please try a different browser (Chrome works best) to place a delivery order.",
+  denied: 'You denied location access. Please allow location for this site in your browser settings, then try again - delivery orders require it so the rider can find you.',
+  unavailable: "Couldn't get your location - please check your GPS/network connection and try again.",
+  timeout: 'Getting your location took too long - please make sure GPS is on and try again.',
+};
+
+// Mirrors publicOrderController.js's own ADD_ITEMS_WINDOW_MS - kept in
+// sync with the server-side cutoff so the countdown shown here never
+// promises more time than the backend will actually honor (the backend
+// re-checks this regardless, so this is purely a UX courtesy).
+const ADD_ITEMS_WINDOW_MS = 5 * 60 * 1000;
+
+function useCountdown(deadline: number): number {
+  const [remaining, setRemaining] = useState(() => Math.max(deadline - Date.now(), 0));
+  useEffect(() => {
+    setRemaining(Math.max(deadline - Date.now(), 0));
+    const intervalId = window.setInterval(() => setRemaining(Math.max(deadline - Date.now(), 0)), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [deadline]);
+  return remaining;
+}
+
+function formatCountdown(ms: number): string {
+  const totalSeconds = Math.max(Math.ceil(ms / 1000), 0);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 // Auto-submits a hidden HTML form to the gateway's own hosted checkout
@@ -116,13 +165,245 @@ function redirectToGateway(redirect: PaymentRedirect) {
   form.submit();
 }
 
+// Lets the customer ask to add and/or remove items on an order they
+// already placed - never applied directly (see publicOrderController.js's
+// requestOrderChange): it just sits on the order as a pending request
+// until staff approves or rejects it from the Sales dashboard (see
+// SalesPage.tsx's OnlineOrderControls). Adding new items is only offered
+// within ADD_ITEMS_WINDOW_MS of the order being placed (the kitchen may
+// already be well underway after that) - removals stay available for as
+// long as the order itself is still open to changes at all (see
+// OrderStatusPanel's own canRequestChange).
+function ChangeRequestModal({
+  shopId,
+  status,
+  onClose,
+  onSubmitted,
+}: {
+  shopId: string;
+  status: PublicOrderStatus;
+  onClose: () => void;
+  onSubmitted: (request: PublicChangeRequest) => void;
+}) {
+  const deadline = useMemo(() => new Date(status.createdAt).getTime() + ADD_ITEMS_WINDOW_MS, [status.createdAt]);
+  const remaining = useCountdown(deadline);
+  const canAdd = remaining > 0;
+
+  const [menu, setMenu] = useState<PublicMenuResponse | null>(null);
+  const [menuLoading, setMenuLoading] = useState(canAdd);
+  const [addQuantities, setAddQuantities] = useState<Map<string, number>>(new Map());
+  const [removeQuantities, setRemoveQuantities] = useState<Map<string, number>>(new Map());
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!canAdd) {
+      setMenuLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await fetchPublicMenu(shopId);
+        if (!cancelled) setMenu(result);
+      } catch {
+        // Best-effort - the Add section just stays empty if this fails;
+        // removals (loaded straight from `status`, no fetch needed) still work.
+      } finally {
+        if (!cancelled) setMenuLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shopId, canAdd]);
+
+  function itemKey(name: string, variation: string) {
+    return `${name}::${variation}`;
+  }
+
+  // Existing order lines grouped by name+variation, so the remove-quantity
+  // stepper can't go past what's actually on the order even if the same
+  // item appears as more than one line (e.g. added at different times).
+  const currentItems = useMemo(() => {
+    const map = new Map<string, { name: string; variation: string; quantity: number; price: number }>();
+    status.items.forEach((item) => {
+      const key = itemKey(item.name, item.variation);
+      const existing = map.get(key);
+      if (existing) existing.quantity += item.quantity;
+      else map.set(key, { name: item.name, variation: item.variation, quantity: item.quantity, price: item.price });
+    });
+    return Array.from(map.values());
+  }, [status.items]);
+
+  function setAddQty(product: PublicMenuProduct, qty: number) {
+    setAddQuantities((previous) => {
+      const next = new Map(previous);
+      const key = itemKey(product.name, product.variation);
+      if (qty <= 0) next.delete(key);
+      else next.set(key, qty);
+      return next;
+    });
+  }
+
+  function setRemoveQty(item: { name: string; variation: string; quantity: number }, qty: number) {
+    setRemoveQuantities((previous) => {
+      const next = new Map(previous);
+      const key = itemKey(item.name, item.variation);
+      const clamped = Math.max(0, Math.min(qty, item.quantity));
+      if (clamped <= 0) next.delete(key);
+      else next.set(key, clamped);
+      return next;
+    });
+  }
+
+  const addItemsPayload = Array.from(addQuantities.entries()).map(([key, quantity]) => {
+    const [name, variation] = key.split('::');
+    return { name, variation, quantity };
+  });
+  const removeItemsPayload = Array.from(removeQuantities.entries()).map(([key, quantity]) => {
+    const [name, variation] = key.split('::');
+    return { name, variation, quantity };
+  });
+  const canSubmit = (addItemsPayload.length > 0 || removeItemsPayload.length > 0) && !submitting;
+
+  async function submit() {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await requestOrderChange(shopId, status.id, {
+        addItems: addItemsPayload.length > 0 ? addItemsPayload : undefined,
+        removeItems: removeItemsPayload.length > 0 ? removeItemsPayload : undefined,
+        note: note.trim() || undefined,
+      });
+      onSubmitted(result.customerChangeRequest);
+      onClose();
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(message || 'Could not send your request - please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const categories = useMemo(() => ['All', ...Array.from(new Set((menu?.products || []).map((p) => p.category)))], [menu]);
+  const [category, setCategory] = useState('All');
+  const visibleProducts = (menu?.products || []).filter((p) => category === 'All' || p.category === category);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end bg-black/50 sm:items-center sm:justify-center">
+      <div className="max-h-[92vh] w-full overflow-y-auto rounded-t-[28px] bg-white p-6 sm:max-w-lg sm:rounded-[28px]">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-black text-gray-900">Request a Change</h2>
+          <button type="button" onClick={onClose}><X size={20} className="text-gray-400" /></button>
+        </div>
+
+        <div className={`mb-4 flex items-center gap-2 rounded-xl p-3 text-xs font-bold ${canAdd ? 'bg-indigo-50 text-indigo-800' : 'bg-gray-50 text-gray-500'}`}>
+          <Clock size={14} className="shrink-0" />
+          {canAdd
+            ? `You can still add new items for the next ${formatCountdown(remaining)}.`
+            : "The 5-minute window to add new items has passed - you can still ask to remove items below."}
+        </div>
+
+        {canAdd ? (
+          <div className="mb-5">
+            <p className="mb-2 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Add Items</p>
+            {menuLoading ? (
+              <p className="py-3 text-center text-xs text-gray-400">Loading menu...</p>
+            ) : (
+              <>
+                <div className="mb-2 flex gap-2 overflow-x-auto pb-1">
+                  {categories.map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setCategory(cat)}
+                      className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-black ${category === cat ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+                <div className="space-y-2">
+                  {visibleProducts.map((product) => {
+                    const key = itemKey(product.name, product.variation);
+                    const qty = addQuantities.get(key) || 0;
+                    return (
+                      <div key={key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-black text-gray-900">{product.name}{product.variation ? ` (${product.variation})` : ''}</p>
+                          <p className="text-[11px] text-gray-400">Rs {formatter.format(product.price)}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button type="button" onClick={() => setAddQty(product, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
+                          <span className="w-4 text-center text-xs font-black">{qty}</span>
+                          <button type="button" onClick={() => setAddQty(product, qty + 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={13} /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {visibleProducts.length === 0 ? <p className="py-3 text-center text-xs text-gray-400">No items in this category.</p> : null}
+                </div>
+              </>
+            )}
+          </div>
+        ) : null}
+
+        <div className="mb-5">
+          <p className="mb-2 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Remove Items</p>
+          <div className="space-y-2">
+            {currentItems.map((item) => {
+              const key = itemKey(item.name, item.variation);
+              const qty = removeQuantities.get(key) || 0;
+              return (
+                <div key={key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-black text-gray-900">{item.name}{item.variation ? ` (${item.variation})` : ''}</p>
+                    <p className="text-[11px] text-gray-400">You have {item.quantity} · Rs {formatter.format(item.price)} each</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button type="button" onClick={() => setRemoveQty(item, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
+                    <span className="w-4 text-center text-xs font-black">{qty}</span>
+                    <button type="button" onClick={() => setRemoveQty(item, qty + 1)} disabled={qty >= item.quantity} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Plus size={13} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Anything else to tell the shop about this request..."
+          rows={2}
+          className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none"
+        />
+
+        {error ? <p className="mt-3 text-xs font-bold text-rose-600">{error}</p> : null}
+
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={!canSubmit}
+          className="mt-4 w-full rounded-2xl bg-[#E2F33C] py-3.5 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? 'Sending Request...' : 'Send Request to Shop'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // The customer's own order-tracking section - shown right after placing
 // an order, from a payment-gateway redirect, or automatically whenever
 // this device still has an active order remembered for this shop (see the
-// persistence effect in the default export below). Read-only by design:
-// there is no edit capability here or anywhere in this public API -
-// changing an already-placed order is staff/shop-owner-only, from the
-// Sales dashboard.
+// persistence effect in the default export below). Read-only for the
+// order itself - there's no direct public edit endpoint - but a customer
+// can ASK for changes via ChangeRequestModal above, which staff then has
+// to explicitly approve before anything actually changes.
 function OrderStatusPanel({
   shopId,
   orderId,
@@ -136,6 +417,7 @@ function OrderStatusPanel({
   const [status, setStatus] = useState<PublicOrderStatus | null>(null);
   const [error, setError] = useState('');
   const finishedRef = useRef(false);
+  const [showChangeModal, setShowChangeModal] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -177,6 +459,11 @@ function OrderStatusPanel({
 
   const tracking = TRACKING_LABELS[status.trackingStatus] || TRACKING_LABELS.awaiting_confirmation;
   const isFinished = status.status !== 'pending';
+  // Once the kitchen has actually started on it (preparing/ready) or it's
+  // cancelled, changes stop being requestable at all - same boundary
+  // publicOrderController.js's requestOrderChange enforces server-side.
+  const canRequestChange = !isFinished && ['awaiting_confirmation', 'confirmed'].includes(status.trackingStatus);
+  const changeRequest = status.customerChangeRequest;
   return (
     <div className="min-h-screen bg-[#F8F9FB] p-6">
       <div className="mx-auto max-w-md rounded-[28px] bg-white p-8 text-center shadow-sm">
@@ -202,11 +489,43 @@ function OrderStatusPanel({
           <div className="flex justify-between"><span className="text-gray-500">Payment</span><span className="font-black capitalize">{status.paymentStatus.replace('_', ' ')}</span></div>
         </div>
 
+        {changeRequest && changeRequest.status === 'pending' ? (
+          <div className="mt-3 rounded-2xl bg-amber-50 p-4 text-left text-xs font-bold text-amber-800">
+            <p>Your change request is waiting for the shop's approval:</p>
+            <ul className="mt-1.5 space-y-0.5">
+              {changeRequest.addItems.map((item, index) => (
+                <li key={`add-${index}`}>+ {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</li>
+              ))}
+              {changeRequest.removeItems.map((item, index) => (
+                <li key={`remove-${index}`}>− {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</li>
+              ))}
+            </ul>
+          </div>
+        ) : changeRequest && changeRequest.status === 'rejected' ? (
+          <div className="mt-3 rounded-2xl bg-rose-50 p-4 text-left text-xs font-bold text-rose-700">
+            Your last change request was declined{changeRequest.note ? `: ${changeRequest.note}` : '.'}
+          </div>
+        ) : changeRequest && changeRequest.status === 'approved' ? (
+          <div className="mt-3 rounded-2xl bg-emerald-50 p-4 text-left text-xs font-bold text-emerald-700">
+            Your last change request was approved and is reflected in your order above.
+          </div>
+        ) : null}
+
+        {canRequestChange && (!changeRequest || changeRequest.status !== 'pending') ? (
+          <button
+            type="button"
+            onClick={() => setShowChangeModal(true)}
+            className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#F8F9FB] py-3.5 text-sm font-black text-gray-800"
+          >
+            <Edit3 size={15} /> Add or Remove Items
+          </button>
+        ) : null}
+
         {isFinished ? (
           <button
             type="button"
             onClick={() => navigate(`/order/${shopId}`)}
-            className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-black py-3.5 text-sm font-black text-white"
+            className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl bg-black py-3.5 text-sm font-black text-white"
           >
             <RotateCcw size={15} /> Start a New Order
           </button>
@@ -214,6 +533,15 @@ function OrderStatusPanel({
           <p className="mt-5 text-[11px] font-semibold text-gray-400">This page updates automatically - no need to refresh.</p>
         )}
       </div>
+
+      {showChangeModal ? (
+        <ChangeRequestModal
+          shopId={shopId}
+          status={status}
+          onClose={() => setShowChangeModal(false)}
+          onSubmitted={(request) => setStatus((previous) => (previous ? { ...previous, customerChangeRequest: request } : previous))}
+        />
+      ) : null}
     </div>
   );
 }
@@ -343,7 +671,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerAddress, setCustomerAddress] = useState('');
   const [note, setNote] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'JazzCash' | 'EasyPaisa'>('Cash');
+  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Online' | 'JazzCash' | 'EasyPaisa'>('Cash');
 
   const [tables, setTables] = useState<string[]>([]);
   const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
@@ -506,7 +834,20 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     setPlacing(true);
     setPlaceError('');
     try {
-      const location = orderType === 'Delivery' ? await captureLocation() : null;
+      // Mandatory for Delivery - see publicOrderController.js's createOrder,
+      // which rejects the request server-side either way if this is
+      // missing. Placing the order is blocked entirely until location is
+      // actually captured; there's no "skip" path anymore.
+      let location: { lat: number; lng: number; accuracy?: number } | undefined;
+      if (orderType === 'Delivery') {
+        const locationResult = await captureLocation();
+        if (!locationResult.ok) {
+          setPlaceError(LOCATION_ERROR_MESSAGE[locationResult.reason]);
+          setPlacing(false);
+          return;
+        }
+        location = { lat: locationResult.lat, lng: locationResult.lng, accuracy: locationResult.accuracy };
+      }
       const result = await createPublicOrder(shopId, {
         orderType,
         table: orderType === 'DineIn' ? table : undefined,
@@ -514,7 +855,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         paymentMethod,
         note: note.trim(),
         items: cartLines.map((line) => ({ name: line.product.name, variation: line.product.variation, quantity: line.quantity })),
-        location: location || undefined,
+        location,
       });
 
       // Remembered immediately (not just once the status panel mounts) so
@@ -707,8 +1048,8 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
               {orderType === 'Delivery' ? (
                 <div>
                   <input value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Delivery address" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
-                  <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-gray-400">
-                    <MapPin size={12} /> We'll ask for your live location too, so the rider can find you faster.
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-bold text-amber-700">
+                    <MapPin size={12} /> We'll ask to share your live location when you place the order - this is required for delivery so the rider can find you.
                   </p>
                 </div>
               ) : null}
@@ -756,8 +1097,16 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
               ) : null}
 
               <p className="mt-3 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Payment</p>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => setPaymentMethod('Cash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'Cash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>Cash</button>
+                {/* Always offered, even with no JazzCash/EasyPaisa merchant
+                    credentials configured - the customer just tells the
+                    shop they'll pay online (bank transfer/personal
+                    EasyPaisa-JazzCash account/etc) and staff confirms it
+                    manually, same as they would with cash in hand. See
+                    publicOrderController.js's createOrder for the
+                    isOnlineIntent handling. */}
+                <button type="button" onClick={() => setPaymentMethod('Online')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'Online' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>Online</button>
                 {menu?.paymentMethods.jazzCash ? (
                   <button type="button" onClick={() => setPaymentMethod('JazzCash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'JazzCash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>JazzCash</button>
                 ) : null}
@@ -765,7 +1114,9 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                   <button type="button" onClick={() => setPaymentMethod('EasyPaisa')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'EasyPaisa' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>EasyPaisa</button>
                 ) : null}
               </div>
-              {paymentMethod !== 'Cash' ? (
+              {paymentMethod === 'Online' ? (
+                <p className="text-[11px] font-semibold text-gray-400">You'll pay the shop directly online (bank transfer, EasyPaisa, or JazzCash) - they'll confirm your order once payment is received.</p>
+              ) : paymentMethod === 'JazzCash' || paymentMethod === 'EasyPaisa' ? (
                 <p className="text-[11px] font-semibold text-gray-400">You'll be taken to {paymentMethod}'s secure payment page next - your order is confirmed automatically once payment clears.</p>
               ) : null}
 
@@ -779,7 +1130,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 disabled={!canSubmit || placing || Boolean(activeOrderWarning)}
                 className="w-full rounded-2xl bg-[#E2F33C] py-4 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {placing ? 'Placing Order...' : `Place Order · Rs ${formatter.format(cartTotal)}`}
+                {placing ? (orderType === 'Delivery' ? 'Getting Your Location...' : 'Placing Order...') : `Place Order · Rs ${formatter.format(cartTotal)}`}
               </button>
             </div>
           </div>

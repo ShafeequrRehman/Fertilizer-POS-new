@@ -250,6 +250,25 @@ exports.getOrders = async (req, res) => {
             offlineCreatedAt: 1,
             createdAt: 1,
             updatedAt: 1,
+            // The whole customer-qr/online-ordering feature set - source is
+            // what SalesPage.tsx checks to even show OnlineOrderControls at
+            // all (the "Online - Waiting Acceptance" badge, the accept/
+            // decline buttons, the rider picker, the change-request
+            // approval UI). Missing here meant every one of those silently
+            // vanished from a card the moment this shop's 45-second lean
+            // poll (see SalesPage.tsx's refresh(true)) replaced the `orders`
+            // array with this projection - self-healing only for whichever
+            // ONE order happened to be currently selected (selectOrder's
+            // background refreshOne re-hydrates it), never for the rest of
+            // the grid. This is the actual root cause of "assign rider
+            // option was not showing" - it was never actually broken, the
+            // data just weren't in the list response at all.
+            source: 1,
+            trackingStatus: 1,
+            paymentStatus: 1,
+            deliveryLocation: 1,
+            assignedRider: 1,
+            customerChangeRequest: 1,
             itemCount: { $size: { $ifNull: ["$items", []] } },
           },
         },
@@ -1374,6 +1393,99 @@ exports.assignRider = async (req, res) => {
     const notified = await notifyAssignedRider(order, shop, phone);
 
     res.json({ ...order.toObject(), id: String(order._id), riderNotified: notified });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// PATCH /orders/:id/change-request  body: { action: "approve" | "reject", reason? }
+// A customer-qr order's own request to add/remove items (see
+// publicOrderController.requestOrderChange) sits on the order as
+// customerChangeRequest until staff/shop owner responds here. Approving
+// applies the requested add/remove against the real order.items and
+// recalculates totals the same way applyOrderPatch's own addItems/
+// replaceItems branches do - including queueing the addition onto
+// pendingKitchenUpdate, since the kitchen genuinely does need to know
+// about more food to cook. Rejecting just marks it declined; the order's
+// items are left untouched either way if rejected.
+exports.respondToChangeRequest = async (req, res) => {
+  try {
+    const { action, reason } = req.body || {};
+    if (!["approve", "reject"].includes(action)) {
+      return res.status(400).json({ message: "Invalid action." });
+    }
+
+    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (!order.customerChangeRequest || order.customerChangeRequest.status !== "pending") {
+      return res.status(400).json({ message: "There's no change request waiting on this order." });
+    }
+
+    const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
+    const respondedBy = user?.name || user?.username || "";
+
+    if (action === "reject") {
+      order.customerChangeRequest.status = "rejected";
+      order.customerChangeRequest.respondedAt = new Date();
+      order.customerChangeRequest.respondedBy = respondedBy;
+      if (reason) {
+        order.customerChangeRequest.note = order.customerChangeRequest.note
+          ? `${order.customerChangeRequest.note} — Declined: ${reason}`
+          : `Declined: ${reason}`;
+      }
+      order.version = Number(order.version || 0) + 1;
+      await order.save();
+      return res.json({ ...order.toObject(), id: String(order._id) });
+    }
+
+    // Approve - fold removeItems out of and addItems into the real order,
+    // same shape applyOrderPatch's addItems/replaceItems branches leave
+    // order.items in.
+    const { addItems, removeItems } = order.customerChangeRequest;
+    let items = order.items.map((item) => ({
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+      variation: item.variation || "",
+    }));
+
+    if (removeItems && removeItems.length > 0) {
+      removeItems.forEach((toRemove) => {
+        let remaining = toRemove.quantity;
+        items = items
+          .map((item) => {
+            if (remaining <= 0 || item.name !== toRemove.name || (item.variation || "") !== (toRemove.variation || "")) {
+              return item;
+            }
+            const take = Math.min(item.quantity, remaining);
+            remaining -= take;
+            return { ...item, quantity: item.quantity - take };
+          })
+          .filter((item) => item.quantity > 0);
+      });
+    }
+
+    if (addItems && addItems.length > 0) {
+      const delta = addItems.map((item) => ({ name: item.name, price: item.price, variation: item.variation || "", quantity: item.quantity }));
+      order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
+      items = [...items, ...addItems];
+    }
+
+    order.items = items;
+    const totals = recalculateTotals(order.items, order.discount);
+    order.subtotal = totals.subtotal;
+    order.tax = totals.tax;
+    order.total = totals.total;
+    order.discount = buildDiscountRecord(order.discount, totals.discountAmount);
+    order.remainingAmount = Math.max(order.total - (order.paidAmount || 0), 0);
+
+    order.customerChangeRequest.status = "approved";
+    order.customerChangeRequest.respondedAt = new Date();
+    order.customerChangeRequest.respondedBy = respondedBy;
+    order.version = Number(order.version || 0) + 1;
+    await order.save();
+
+    res.json({ ...order.toObject(), id: String(order._id) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

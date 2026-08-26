@@ -32,6 +32,7 @@ router.get("/:shopId/tables", readLimiter, ctrl.getTables);
 router.get("/:shopId/customer-status", readLimiter, ctrl.getCustomerStatus);
 router.get("/:shopId/orders/:orderId", readLimiter, ctrl.getOrderStatus);
 router.post("/:shopId/orders", orderLimiter, ctrl.createOrder);
+router.post("/:shopId/orders/:orderId/change-request", orderLimiter, ctrl.requestOrderChange);
 
 // Payment gateway: initiatePayment is called by CustomerOrderPage.tsx right
 // after placing an order paid via JazzCash/EasyPaisa, to get the signed

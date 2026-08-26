@@ -66,6 +66,18 @@ export async function fetchPublicCustomerStatus(shopId: string, phone: string): 
 export type TrackingStatus = 'awaiting_confirmation' | 'confirmed' | 'preparing' | 'ready' | 'cancelled';
 export type PaymentStatus = 'unpaid' | 'awaiting_confirmation' | 'paid' | 'failed';
 
+// A customer's own request to add/remove items on an order already placed
+// - see publicOrderController.requestOrderChange / orderController.
+// respondToChangeRequest. Never applied automatically - "pending" until
+// staff approves/rejects it. Only one can be pending at a time.
+export interface PublicChangeRequest {
+  addItems: Array<{ name: string; price: number; quantity: number; variation: string }>;
+  removeItems: Array<{ name: string; variation: string; quantity: number }>;
+  note: string;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedAt: string;
+}
+
 export interface PublicOrderStatus {
   id: string;
   dailyOrderNumber: number;
@@ -76,10 +88,14 @@ export interface PublicOrderStatus {
   paymentStatus: PaymentStatus;
   total: number;
   createdAt: string;
-  // Read-only - see publicOrderController.js's publicOrderShape. There is
-  // no public edit endpoint; changing an already-placed order is staff/
-  // shop-owner-only from the Sales dashboard.
+  // Read-only display of what's actually on the order right now - reflects
+  // any approved change-request automatically, since approval edits the
+  // real order.items server-side. There is no public edit endpoint;
+  // changing an already-placed order always goes through the
+  // request-then-approve flow below, or staff editing it directly from
+  // the Sales dashboard.
   items: Array<{ name: string; price: number; quantity: number; variation: string }>;
+  customerChangeRequest: PublicChangeRequest | null;
 }
 
 export async function fetchPublicOrderStatus(shopId: string, orderId: string): Promise<PublicOrderStatus> {
@@ -87,11 +103,30 @@ export async function fetchPublicOrderStatus(shopId: string, orderId: string): P
   return response.data;
 }
 
+export interface RequestOrderChangePayload {
+  addItems?: Array<{ name: string; variation: string; quantity: number }>;
+  removeItems?: Array<{ name: string; variation: string; quantity: number }>;
+  note?: string;
+}
+
+// The 5-minute add-items cutoff is enforced server-side too (see
+// publicOrderController.js's ADD_ITEMS_WINDOW_MS) - this is just what
+// CustomerOrderPage.tsx's ChangeRequestModal calls once the customer
+// submits either half of a request (add, remove, or both at once).
+export async function requestOrderChange(
+  shopId: string,
+  orderId: string,
+  payload: RequestOrderChangePayload,
+): Promise<{ message: string; customerChangeRequest: PublicChangeRequest }> {
+  const response = await api.post(`/public/${shopId}/orders/${orderId}/change-request`, payload);
+  return response.data;
+}
+
 export interface PublicOrderPayload {
   orderType: 'DineIn' | 'TakeAway' | 'Delivery';
   table?: string;
   customer: { name: string; phone: string; address?: string };
-  paymentMethod: 'Cash' | 'JazzCash' | 'EasyPaisa';
+  paymentMethod: 'Cash' | 'Online' | 'JazzCash' | 'EasyPaisa';
   note?: string;
   items: Array<{ name: string; variation: string; quantity: number }>;
   // Real-time GPS captured from the customer's own phone at order-placement

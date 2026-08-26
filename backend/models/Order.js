@@ -37,6 +37,42 @@ const pendingKitchenUpdateSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A customer-qr order's own request to add/remove items after it's
+// already been placed (see publicOrderController.requestOrderChange /
+// orderController.respondToChangeRequest) - never applied automatically.
+// It just sits here as "pending" until staff/the shop owner explicitly
+// approves or rejects it from the Sales dashboard (SalesPage.tsx's
+// OnlineOrderControls). Only one request can be pending at a time - the
+// customer has to wait for a response before submitting another.
+// addItems is priced at REQUEST time (never trust a re-submitted price,
+// but also don't let the catalog changing between request and approval
+// silently change what the customer agreed to - same principle as
+// publicOrderController.createOrder's own re-pricing). removeItems is
+// just name/variation/quantity - matched back against the real
+// order.items at approval time, since that's the only thing that could
+// have changed between request and approval on the removal side.
+const customerChangeRequestSchema = new mongoose.Schema(
+  {
+    addItems: { type: [orderItemSchema], default: [] },
+    removeItems: {
+      type: [
+        {
+          name: { type: String, required: true },
+          variation: { type: String, default: "" },
+          quantity: { type: Number, required: true, min: 1 },
+        },
+      ],
+      default: [],
+    },
+    note: { type: String, default: "" },
+    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+    requestedAt: { type: Date, default: Date.now },
+    respondedAt: { type: Date, default: null },
+    respondedBy: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", required: true, index: true },
@@ -175,6 +211,7 @@ const orderSchema = new mongoose.Schema(
       phone: { type: String, default: "" },
       assignedAt: { type: Date, default: null },
     },
+    customerChangeRequest: { type: customerChangeRequestSchema, default: null },
   },
   { timestamps: true }
 );

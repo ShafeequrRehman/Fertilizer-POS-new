@@ -67,8 +67,32 @@ function publicOrderShape(order) {
       quantity: item.quantity,
       variation: item.variation || "",
     })),
+    customerChangeRequest: order.customerChangeRequest
+      ? {
+          addItems: (order.customerChangeRequest.addItems || []).map((item) => ({
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            variation: item.variation || "",
+          })),
+          removeItems: (order.customerChangeRequest.removeItems || []).map((item) => ({
+            name: item.name,
+            variation: item.variation || "",
+            quantity: item.quantity,
+          })),
+          note: order.customerChangeRequest.note || "",
+          status: order.customerChangeRequest.status,
+          requestedAt: order.customerChangeRequest.requestedAt,
+        }
+      : null,
   };
 }
+
+// A customer can only ever add NEW items within this window of placing
+// the order - after that the kitchen may already be well underway, so
+// only removals stay available (see requestOrderChange below and its
+// gating in CustomerOrderPage.tsx's ChangeRequestModal).
+const ADD_ITEMS_WINDOW_MS = 5 * 60 * 1000;
 
 // GET /api/public/:shopId/manifest.json
 // A per-shop PWA manifest, so "Add to Home Screen" on CustomerOrderPage.tsx
@@ -212,7 +236,7 @@ exports.getCustomerStatus = async (req, res) => {
 exports.getOrderStatus = async (req, res) => {
   try {
     const order = await Order.findOne({ _id: req.params.orderId, shopId: req.shop._id })
-      .select("dailyOrderNumber orderType table status trackingStatus paymentStatus total createdAt items")
+      .select("dailyOrderNumber orderType table status trackingStatus paymentStatus total createdAt items customerChangeRequest")
       .lean();
     if (!order) return res.status(404).json({ message: "Order not found." });
     res.json(publicOrderShape(order));
@@ -248,6 +272,21 @@ exports.createOrder = async (req, res) => {
     }
     if (orderType === "Delivery" && customerAddress.length < 5) {
       return res.status(400).json({ message: "Please enter a delivery address.", reason: "invalid_address" });
+    }
+    // Real-time GPS location is mandatory for Delivery - not just
+    // best-effort anymore. Re-checked here server-side, not just enforced
+    // by CustomerOrderPage.tsx's own blocking UI, since the whole point of
+    // never trusting the client is that a direct API call could otherwise
+    // skip straight past a frontend-only gate. See deliveryLocation build
+    // below for where this gets stored.
+    const requestedLocation = payload.location;
+    const hasValidLocation =
+      requestedLocation && Number.isFinite(Number(requestedLocation.lat)) && Number.isFinite(Number(requestedLocation.lng));
+    if (orderType === "Delivery" && !hasValidLocation) {
+      return res.status(400).json({
+        message: "Please allow location access so the rider can find you - location is required for delivery orders.",
+        reason: "location_required",
+      });
     }
 
     let table = "";
@@ -332,20 +371,32 @@ exports.createOrder = async (req, res) => {
     const shopUpdate = await Shop.findOneAndUpdate({ _id: shopId }, { $inc: { orderSequenceCounter: 1 } }, { new: true });
     const shopSequenceNumber = shopUpdate ? shopUpdate.orderSequenceCounter : 1;
 
-    const isOnlinePayment = payload.paymentMethod === "JazzCash" || payload.paymentMethod === "EasyPaisa";
-    const paymentMethod = isOnlinePayment ? "E-Wallet" : "Cash";
+    // Two flavors of "not cash": a real gateway (JazzCash/EasyPaisa hosted
+    // checkout - only offered if the shop configured credentials, see
+    // getMenu's paymentMethods flags) that auto-confirms via a verified
+    // webhook, and a plain "Online" option that's always available even
+    // with no gateway set up - the customer is telling the shop they'll
+    // pay by bank transfer/EasyPaisa-JazzCash-personal-account/etc
+    // directly, and staff confirms it manually the same way they'd confirm
+    // cash. Only the gateway kind triggers a redirect/awaiting_confirmation
+    // paymentStatus - "Online" behaves like Cash order-flow-wise, it's just
+    // tagged differently so staff know not to expect cash in hand.
+    const isGatewayPayment = payload.paymentMethod === "JazzCash" || payload.paymentMethod === "EasyPaisa";
+    const isOnlineIntent = isGatewayPayment || payload.paymentMethod === "Online";
+    const paymentMethod = isOnlineIntent ? "E-Wallet" : "Cash";
     const customerNote = String(payload.note || "").trim();
     const noteParts = [];
-    if (isOnlinePayment) noteParts.push(`Customer selected ${payload.paymentMethod} - awaiting online payment confirmation.`);
+    if (isGatewayPayment) noteParts.push(`Customer selected ${payload.paymentMethod} - awaiting online payment confirmation.`);
+    else if (payload.paymentMethod === "Online") noteParts.push("Customer selected to pay online directly - please confirm payment with them.");
     if (customerNote) noteParts.push(customerNote);
 
     // Real-time location, captured once from the customer's own phone -
-    // see models/Order.js's deliveryLocation comment. Only kept for
-    // Delivery orders; silently ignored otherwise.
-    const location = payload.location;
+    // see models/Order.js's deliveryLocation comment. Mandatory (and
+    // already validated above) for Delivery; not collected for the other
+    // order types at all.
     const deliveryLocation =
-      orderType === "Delivery" && location && Number.isFinite(Number(location.lat)) && Number.isFinite(Number(location.lng))
-        ? { lat: Number(location.lat), lng: Number(location.lng), accuracy: Number(location.accuracy) || null, capturedAt: new Date() }
+      orderType === "Delivery" && hasValidLocation
+        ? { lat: Number(requestedLocation.lat), lng: Number(requestedLocation.lng), accuracy: Number(requestedLocation.accuracy) || null, capturedAt: new Date() }
         : null;
 
     const order = await Order.create({
@@ -366,7 +417,7 @@ exports.createOrder = async (req, res) => {
       remainingAmount: total,
       source: "customer-qr",
       trackingStatus: "awaiting_confirmation",
-      paymentStatus: isOnlinePayment ? "awaiting_confirmation" : "unpaid",
+      paymentStatus: isGatewayPayment ? "awaiting_confirmation" : "unpaid",
       deliveryLocation,
     });
 
@@ -390,8 +441,120 @@ exports.createOrder = async (req, res) => {
       status: order.status,
       trackingStatus: order.trackingStatus,
       paymentStatus: order.paymentStatus,
-      requiresOnlinePayment: isOnlinePayment,
-      paymentMethod: isOnlinePayment ? payload.paymentMethod : null,
+      // Only a real gateway needs the frontend to redirect anywhere -
+      // "Online" (no gateway) behaves like Cash from here on, the customer
+      // just goes straight to the tracking view like any other order.
+      requiresOnlinePayment: isGatewayPayment,
+      paymentMethod: isGatewayPayment ? payload.paymentMethod : payload.paymentMethod === "Online" ? "Online" : null,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// POST /api/public/:shopId/orders/:orderId/change-request
+// body: { addItems?: [{name, variation, quantity}], removeItems?: [{name, variation, quantity}], note? }
+// A customer's own request to add/remove items on an order they already
+// placed - never applied directly. It just sits on the order as "pending"
+// until staff approves/rejects it from the Sales dashboard (see
+// orderController.respondToChangeRequest). Only one request can be
+// outstanding at a time.
+exports.requestOrderChange = async (req, res) => {
+  try {
+    const order = await Order.findOne({ _id: req.params.orderId, shopId: req.shop._id });
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (order.source !== "customer-qr") {
+      return res.status(400).json({ message: "This order can't be changed here." });
+    }
+    if (order.status !== "pending") {
+      return res.status(400).json({ message: "This order is already finished and can no longer be changed.", reason: "order_finished" });
+    }
+    if (["preparing", "ready", "cancelled"].includes(order.trackingStatus)) {
+      return res.status(409).json({
+        message: "The kitchen has already started on this order - please contact the shop directly for any changes.",
+        reason: "too_late",
+      });
+    }
+    if (order.customerChangeRequest && order.customerChangeRequest.status === "pending") {
+      return res.status(409).json({ message: "You already have a change request waiting for approval.", reason: "request_pending" });
+    }
+
+    const payload = req.body || {};
+    const requestedAdd = Array.isArray(payload.addItems) ? payload.addItems.slice(0, MAX_ITEM_LINES) : [];
+    const requestedRemove = Array.isArray(payload.removeItems) ? payload.removeItems.slice(0, MAX_ITEM_LINES) : [];
+    const note = String(payload.note || "").trim().slice(0, 300);
+
+    if (requestedAdd.length === 0 && requestedRemove.length === 0) {
+      return res.status(400).json({ message: "Choose at least one item to add or remove.", reason: "empty_request" });
+    }
+
+    // The 5-minute add-items window - re-checked here server-side, not
+    // just hidden client-side once the countdown hits zero.
+    const orderAgeMs = Date.now() - new Date(order.createdAt).getTime();
+    if (requestedAdd.length > 0 && orderAgeMs > ADD_ITEMS_WINDOW_MS) {
+      return res.status(409).json({ message: "You can only add items within 5 minutes of placing your order.", reason: "add_window_expired" });
+    }
+
+    // Never trust client-submitted prices/names - re-look-up every
+    // requested addition against the real catalog, same as createOrder.
+    const addItems = [];
+    if (requestedAdd.length > 0) {
+      const catalog = await Product.find({ shopId: req.shop._id }).lean();
+      const byKey = new Map();
+      catalog.forEach((product) => {
+        const key = `${product.name}::${product.variation || ""}`;
+        byKey.set(key, product);
+        if (!byKey.has(product.name)) byKey.set(product.name, product);
+      });
+      for (const requested of requestedAdd) {
+        const name = String(requested?.name || "");
+        const variation = String(requested?.variation || "");
+        const quantity = Math.min(Math.max(Math.floor(Number(requested?.quantity) || 0), 1), MAX_QTY_PER_LINE);
+        const product = byKey.get(`${name}::${variation}`) || byKey.get(name);
+        if (!product) {
+          return res.status(400).json({ message: `"${name}" is no longer on the menu - please refresh and try again.`, reason: "item_not_found" });
+        }
+        addItems.push({ name: product.name, price: product.price, quantity, variation: product.variation || "" });
+      }
+    }
+
+    // Removals have to actually be part of what's already on the order,
+    // and can't exceed what's currently there.
+    const removeItems = [];
+    if (requestedRemove.length > 0) {
+      const currentQuantities = new Map();
+      (order.items || []).forEach((item) => {
+        const key = `${item.name}::${item.variation || ""}`;
+        currentQuantities.set(key, (currentQuantities.get(key) || 0) + item.quantity);
+      });
+      for (const requested of requestedRemove) {
+        const name = String(requested?.name || "");
+        const variation = String(requested?.variation || "");
+        const key = `${name}::${variation}`;
+        const available = currentQuantities.get(key) || 0;
+        const quantity = Math.min(Math.max(Math.floor(Number(requested?.quantity) || 0), 1), available);
+        if (quantity <= 0) {
+          return res.status(400).json({ message: `"${name}" isn't part of your order.`, reason: "item_not_in_order" });
+        }
+        removeItems.push({ name, variation, quantity });
+      }
+    }
+
+    order.customerChangeRequest = {
+      addItems,
+      removeItems,
+      note,
+      status: "pending",
+      requestedAt: new Date(),
+      respondedAt: null,
+      respondedBy: "",
+    };
+    order.version = Number(order.version || 0) + 1;
+    await order.save();
+
+    res.json({
+      message: "Request sent - waiting for the shop to approve.",
+      customerChangeRequest: publicOrderShape(order).customerChangeRequest,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Globe, Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, type TrackingStatus, type Rider } from '@/lib/pos-api';
+import { Edit3, Globe, Lock, MapPin, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, respondToOrderChangeRequest, type TrackingStatus, type Rider } from '@/lib/pos-api';
 import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
@@ -951,6 +951,30 @@ export default function SalesPage() {
     }
   }
 
+  const [respondingToChangeRequest, setRespondingToChangeRequest] = useState(false);
+
+  // Staff-side approve/reject for a customer's own request to add/remove
+  // items on an order they already placed (see orderController.
+  // respondToChangeRequest). Approving is irreversible - it edits
+  // order.items for real server-side (see OnlineOrderControls below for
+  // the confirm prompt), same as any other order edit.
+  async function handleRespondToChangeRequest(order: SavedOrder, action: 'approve' | 'reject') {
+    setRespondingToChangeRequest(true);
+    try {
+      const updated = await respondToOrderChangeRequest(order.id, action);
+      if (updated) {
+        localEditVersionRef.current += 1;
+        setOrders((previous) => previous.map((o) => (o.id === updated.id ? updated : o)));
+        setSelectedOrder(updated);
+        toast.success(action === 'approve' ? 'Change request approved - order updated.' : 'Change request declined.');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not respond to this request.');
+    } finally {
+      setRespondingToChangeRequest(false);
+    }
+  }
+
   async function addItems(items: Array<{ name: string; price: number; quantity: number; variation: string }>) {
     if (items.length === 0) return setStatus({ tone: 'error', text: 'Select at least one item.' });
     const updated = await saveUpdate({ action: 'addItems', items });
@@ -974,7 +998,7 @@ export default function SalesPage() {
     setIsSendingWA(true);
     try {
       const lines = [];
-      lines.push(`*The Heaven Slice* 🍕`);
+      lines.push(`*The Heaven Slice*`);
       lines.push(`Order No: *${orderNumber(order)}*`);
       lines.push(`Total: *PKR ${order.total}*`);
       lines.push(`--------------------`);
@@ -1075,6 +1099,12 @@ export default function SalesPage() {
                       <span className="truncate">
                         {order.trackingStatus === 'awaiting_confirmation' ? 'Online - Waiting Acceptance' : `Online - ${TRACKING_STEP_LABEL[order.trackingStatus] || order.trackingStatus}`}
                       </span>
+                    </div>
+                  ) : null}
+                  {order.source === 'customer-qr' && order.customerChangeRequest?.status === 'pending' ? (
+                    <div className="mt-1.5 flex animate-pulse items-center gap-1 rounded-lg bg-amber-500 px-2 py-1 text-[9px] font-black uppercase tracking-wide text-white">
+                      <Edit3 size={10} className="shrink-0" />
+                      <span className="truncate">Change Requested</span>
                     </div>
                   ) : null}
                   <h3 className="mt-2 break-words text-sm font-black text-gray-900">{cardHeading(order)}</h3>
@@ -1239,8 +1269,27 @@ export default function SalesPage() {
                   ) : null}
                   <Box label="Order Type" value={prettyType(selectedOrder)} />
                   <Box label="Address" value={selectedOrder.address || 'N/A'} />
+                  <Box label="Payment Method" value={selectedOrder.paymentMethod} />
+                  {selectedOrder.orderType === 'Delivery' ? (
+                    selectedOrder.deliveryLocation?.lat != null && selectedOrder.deliveryLocation?.lng != null ? (
+                      <a
+                        href={`https://maps.google.com/?q=${selectedOrder.deliveryLocation.lat},${selectedOrder.deliveryLocation.lng}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3 transition hover:bg-gray-100"
+                      >
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Delivery Location</p>
+                        <p className="mt-1 flex items-center gap-1.5 text-sm font-bold text-indigo-600">
+                          <MapPin size={12} className="shrink-0" /> Open in Maps
+                        </p>
+                      </a>
+                    ) : (
+                      <Box label="Delivery Location" value="Not shared" />
+                    )
+                  ) : null}
                   <Box label="Previous Dues" value={`Rs ${customerDue}`} />
                   <Box label="Remaining" value={`Rs ${selectedOrder.remainingAmount ?? 0}`} />
+                  {selectedOrder.note ? <Box label="Note" value={selectedOrder.note} /> : null}
                 </div>
 
                 {selectedOrder.source === 'customer-qr' ? (
@@ -1251,6 +1300,8 @@ export default function SalesPage() {
                     riders={riders}
                     assigningRider={assigningRider}
                     onAssignRider={handleAssignRider}
+                    respondingToChangeRequest={respondingToChangeRequest}
+                    onRespondToChangeRequest={handleRespondToChangeRequest}
                   />
                 ) : null}
 
@@ -1439,6 +1490,8 @@ function OnlineOrderControls({
   riders,
   assigningRider,
   onAssignRider,
+  respondingToChangeRequest,
+  onRespondToChangeRequest,
 }: {
   order: SavedOrder;
   updating: boolean;
@@ -1446,9 +1499,13 @@ function OnlineOrderControls({
   riders: Rider[];
   assigningRider: boolean;
   onAssignRider: (order: SavedOrder, rider: Rider) => void;
+  respondingToChangeRequest: boolean;
+  onRespondToChangeRequest: (order: SavedOrder, action: 'approve' | 'reject') => void;
 }) {
   const current = order.trackingStatus || 'awaiting_confirmation';
   const [selectedRiderId, setSelectedRiderId] = useState('');
+  const changeRequest = order.customerChangeRequest;
+  const hasPendingChangeRequest = changeRequest?.status === 'pending';
 
   if (current === 'cancelled') return null;
 
@@ -1530,6 +1587,39 @@ function OnlineOrderControls({
               className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
               {order.assignedRider?.phone ? 'Reassign & Notify' : 'Assign & Notify'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {hasPendingChangeRequest ? (
+        <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-600">Customer Requested a Change</p>
+          <ul className="mt-1.5 space-y-0.5 text-xs font-bold text-amber-900">
+            {changeRequest!.addItems.map((item, index) => (
+              <li key={`add-${index}`}>+ {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''} · Rs {item.price * item.quantity}</li>
+            ))}
+            {changeRequest!.removeItems.map((item, index) => (
+              <li key={`remove-${index}`}>− {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</li>
+            ))}
+          </ul>
+          {changeRequest!.note ? <p className="mt-1.5 text-xs italic text-amber-800">"{changeRequest!.note}"</p> : null}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={respondingToChangeRequest}
+              onClick={() => onRespondToChangeRequest(order, 'approve')}
+              className="rounded-2xl bg-emerald-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              disabled={respondingToChangeRequest}
+              onClick={() => onRespondToChangeRequest(order, 'reject')}
+              className="rounded-2xl bg-rose-100 px-4 py-2 text-xs font-black text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Decline
             </button>
           </div>
         </div>

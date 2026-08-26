@@ -220,6 +220,20 @@ export interface OrderPayload {
   // See orderController.exports.assignRider - which staff member (a
   // "Delivery Rider") this Delivery order was handed to, if any.
   assignedRider?: { id: string; name: string; phone: string; assignedAt?: string | null } | null;
+  // A customer's own request to add/remove items on this order after
+  // placing it (see publicOrderController.requestOrderChange /
+  // orderController.respondToChangeRequest) - null until they ask for
+  // one. SalesPage.tsx's OnlineOrderControls is where staff approve/
+  // reject it.
+  customerChangeRequest?: {
+    addItems: Array<{ name: string; price: number; quantity: number; variation: string }>;
+    removeItems: Array<{ name: string; variation: string; quantity: number }>;
+    note: string;
+    status: 'pending' | 'approved' | 'rejected';
+    requestedAt?: string | null;
+    respondedAt?: string | null;
+    respondedBy?: string;
+  } | null;
 }
 
 export interface SavedOrder extends OrderPayload {

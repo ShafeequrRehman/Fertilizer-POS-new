@@ -21,6 +21,7 @@ const {
   getOccupiedDineInTables,
   updateTrackingStatus,
   assignRider,
+  respondToChangeRequest,
 } = require("../controllers/orderController");
 
 const router = express.Router();
@@ -49,6 +50,7 @@ router.patch("/:id/claim-receipt-print", claimReceiptPrint);
 router.patch("/:id/claim-kitchen-update-print", claimKitchenUpdatePrint);
 router.patch("/:id/tracking-status", updateTrackingStatus);
 router.patch("/:id/assign-rider", assignRider);
+router.patch("/:id/change-request", respondToChangeRequest);
 router.post("/:id/cancel", cancelOrder);
 
 module.exports = router;
