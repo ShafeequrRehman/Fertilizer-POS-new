@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share, RotateCcw, Edit3, Clock } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, X, CheckCircle2, AlertCircle, MapPin, Download, UtensilsCrossed, Share, RotateCcw, Edit3, Clock, Check, Bike, Phone } from 'lucide-react';
 import { getProductImageUrl } from '@/lib/asset-path';
 import {
   createPublicOrder,
@@ -41,6 +41,50 @@ type CartLine = { product: PublicMenuProduct; quantity: number };
 type OrderType = 'DineIn' | 'TakeAway' | 'Delivery';
 
 const formatter = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 });
+
+// Mirrors POSPage.tsx's own ProductGroup exactly, so the customer page
+// browses the catalog the same way desktop does: every Product record
+// that shares the same category+name (Category "Pizza" -> item "Special
+// Pizza") is one product document PER size/variation (see
+// ProductManagementSection.tsx's "Add multiple variations" flow) - the
+// menu groups them back into one tile, and only opens a size/variation
+// picker when there's more than one to choose from. A flat one-card-per-
+// variation grid (the old behavior here) meant "Special Pizza" showed up
+// as three separate, identically-named cards (Small/Medium/Large) instead
+// of one "Special Pizza -> choose a size" tile like desktop.
+type ProductGroup = {
+  key: string;
+  name: string;
+  category: string;
+  image: string;
+  color: string;
+  description: string;
+  isDeal: boolean;
+  variations: PublicMenuProduct[];
+};
+
+function groupMenuProducts(products: PublicMenuProduct[]): ProductGroup[] {
+  const map = new Map<string, ProductGroup>();
+  for (const product of products) {
+    const key = product.isDeal ? `deal:${product.id}` : `${product.category}::${product.name}`;
+    const existing = map.get(key);
+    if (existing) {
+      existing.variations.push(product);
+    } else {
+      map.set(key, {
+        key,
+        name: product.name,
+        category: product.category,
+        image: product.image,
+        color: product.color,
+        description: product.description,
+        isDeal: Boolean(product.isDeal),
+        variations: [product],
+      });
+    }
+  }
+  return Array.from(map.values());
+}
 
 // One entry per shop, holding whatever order this device currently
 // considers "the one I'm tracking" - see the persistence effect in
@@ -163,6 +207,50 @@ function redirectToGateway(redirect: PaymentRedirect) {
   });
   document.body.appendChild(form);
   form.submit();
+}
+
+// Same "choose a size/variation" bottom sheet as desktop's
+// VariationPickerModal (POSPage.tsx) - a single tap adds ONE of that
+// variation straight to the cart and closes the sheet, matching desktop's
+// own tap-to-add behavior exactly (no separate quantity stepper inside
+// here; further quantity changes happen back on the card/cart list, same
+// as everywhere else on this page).
+function VariationPickerSheet({ group, onSelect, onClose }: { group: ProductGroup; onSelect: (variation: PublicMenuProduct) => void; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-end bg-black/50 sm:items-center sm:justify-center" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-t-[28px] bg-white p-6 shadow-2xl sm:rounded-[28px]" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-4 flex items-center gap-3">
+          <div className={`h-14 w-14 shrink-0 overflow-hidden rounded-[16px] ${group.color || 'bg-indigo-50'} p-2`}>
+            {getProductImageUrl(group.image) ? (
+              <img src={getProductImageUrl(group.image)} alt={group.name} className="h-full w-full object-contain" />
+            ) : (
+              <UtensilsCrossed className="h-full w-full text-black/30" strokeWidth={1.5} />
+            )}
+          </div>
+          <div className="min-w-0">
+            <h3 className="truncate text-lg font-black text-gray-900">{group.name}</h3>
+            <p className="text-xs font-bold text-gray-400">Choose a size / variation</p>
+          </div>
+        </div>
+        <div className="max-h-[320px] space-y-2 overflow-y-auto">
+          {group.variations.map((variation) => (
+            <button
+              key={variation.id}
+              type="button"
+              onClick={() => onSelect(variation)}
+              className="flex w-full items-center justify-between rounded-2xl border border-gray-100 bg-[#FAFBFC] px-4 py-3 text-left transition hover:border-[#E2F33C] hover:bg-[#FBFDEB]"
+            >
+              <p className="truncate text-sm font-black text-gray-900">{variation.variation || 'Standard'}</p>
+              <span className="shrink-0 text-sm font-black text-gray-900">Rs {formatter.format(variation.price)}</span>
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={onClose} className="mt-4 w-full rounded-2xl bg-gray-100 py-3 text-sm font-black text-gray-600">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // Lets the customer ask to add and/or remove items on an order they
@@ -288,9 +376,11 @@ function ChangeRequestModal({
     }
   }
 
-  const categories = useMemo(() => ['All', ...Array.from(new Set((menu?.products || []).map((p) => p.category)))], [menu]);
+  const productGroups = useMemo(() => groupMenuProducts(menu?.products || []), [menu]);
+  const categories = useMemo(() => ['All', ...Array.from(new Set(productGroups.map((g) => g.category)))], [productGroups]);
   const [category, setCategory] = useState('All');
-  const visibleProducts = (menu?.products || []).filter((p) => category === 'All' || p.category === category);
+  const visibleGroups = category === 'All' ? productGroups : productGroups.filter((g) => g.category === category);
+  const [pickerGroup, setPickerGroup] = useState<ProductGroup | null>(null);
 
   return (
     <div className="fixed inset-0 z-40 flex items-end bg-black/50 sm:items-center sm:justify-center">
@@ -327,28 +417,62 @@ function ChangeRequestModal({
                   ))}
                 </div>
                 <div className="space-y-2">
-                  {visibleProducts.map((product) => {
-                    const key = itemKey(product.name, product.variation);
-                    const qty = addQuantities.get(key) || 0;
+                  {visibleGroups.map((group) => {
+                    // Same "one tile per name, picker for 2+ sizes" pattern
+                    // as the main menu below and desktop's POSPage.tsx - see
+                    // groupMenuProducts' own comment.
+                    if (group.variations.length <= 1) {
+                      const product = group.variations[0];
+                      const key = itemKey(product.name, product.variation);
+                      const qty = addQuantities.get(key) || 0;
+                      return (
+                        <div key={group.key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-black text-gray-900">{product.name}{product.variation ? ` (${product.variation})` : ''}</p>
+                            <p className="text-[11px] text-gray-400">Rs {formatter.format(product.price)}</p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button type="button" onClick={() => setAddQty(product, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
+                            <span className="w-4 text-center text-xs font-black">{qty}</span>
+                            <button type="button" onClick={() => setAddQty(product, qty + 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={13} /></button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const groupQty = group.variations.reduce((sum, v) => sum + (addQuantities.get(itemKey(v.name, v.variation)) || 0), 0);
+                    const cheapest = Math.min(...group.variations.map((v) => v.price));
                     return (
-                      <div key={key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                      <button
+                        key={group.key}
+                        type="button"
+                        onClick={() => setPickerGroup(group)}
+                        className="flex w-full items-center justify-between rounded-xl bg-[#F8F9FB] p-3 text-left"
+                      >
                         <div className="min-w-0">
-                          <p className="truncate text-xs font-black text-gray-900">{product.name}{product.variation ? ` (${product.variation})` : ''}</p>
-                          <p className="text-[11px] text-gray-400">Rs {formatter.format(product.price)}</p>
+                          <p className="truncate text-xs font-black text-gray-900">{group.name}</p>
+                          <p className="text-[11px] text-gray-400">{group.variations.length} sizes/options - from Rs {formatter.format(cheapest)}</p>
                         </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <button type="button" onClick={() => setAddQty(product, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
-                          <span className="w-4 text-center text-xs font-black">{qty}</span>
-                          <button type="button" onClick={() => setAddQty(product, qty + 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={13} /></button>
-                        </div>
-                      </div>
+                        <span className="shrink-0 rounded-lg bg-black px-2.5 py-1.5 text-[10px] font-black text-white">{groupQty > 0 ? `${groupQty} added` : 'Select'}</span>
+                      </button>
                     );
                   })}
-                  {visibleProducts.length === 0 ? <p className="py-3 text-center text-xs text-gray-400">No items in this category.</p> : null}
+                  {visibleGroups.length === 0 ? <p className="py-3 text-center text-xs text-gray-400">No items in this category.</p> : null}
                 </div>
               </>
             )}
           </div>
+        ) : null}
+
+        {pickerGroup ? (
+          <VariationPickerSheet
+            group={pickerGroup}
+            onSelect={(variation) => {
+              const key = itemKey(variation.name, variation.variation);
+              setAddQty(variation, (addQuantities.get(key) || 0) + 1);
+              setPickerGroup(null);
+            }}
+            onClose={() => setPickerGroup(null)}
+          />
         ) : null}
 
         <div className="mb-5">
@@ -404,6 +528,54 @@ function ChangeRequestModal({
 // order itself - there's no direct public edit endpoint - but a customer
 // can ASK for changes via ChangeRequestModal above, which staff then has
 // to explicitly approve before anything actually changes.
+// Visual step-by-step tracker (Placed -> Confirmed -> Preparing -> Ready ->
+// Completed) - trackingStatus (awaiting_confirmation/confirmed/preparing/
+// ready) covers the first four; the fifth ("Completed") comes from the
+// real `status` field instead, since trackingStatus has no "completed"
+// value of its own (see Order.js's own comment - it only ever reaches
+// "ready" before staff closes the order out for real via Complete
+// Payment). Cancelled orders skip this entirely - the banner above already
+// covers that case clearly.
+const PROGRESS_STEPS: Array<{ key: string; label: string }> = [
+  { key: 'awaiting_confirmation', label: 'Placed' },
+  { key: 'confirmed', label: 'Confirmed' },
+  { key: 'preparing', label: 'Preparing' },
+  { key: 'ready', label: 'Ready' },
+  { key: 'completed', label: 'Completed' },
+];
+
+function OrderProgressStepper({ status }: { status: PublicOrderStatus }) {
+  if (status.status === 'cancelled') return null;
+  const currentIndex =
+    status.status === 'completed'
+      ? PROGRESS_STEPS.length - 1
+      : Math.max(PROGRESS_STEPS.findIndex((step) => step.key === status.trackingStatus), 0);
+
+  return (
+    <div className="mt-5 flex items-start">
+      {PROGRESS_STEPS.map((step, index) => (
+        <div key={step.key} className={`flex items-center ${index < PROGRESS_STEPS.length - 1 ? 'flex-1' : ''}`}>
+          <div className="flex flex-col items-center">
+            <div
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-black ${
+                index <= currentIndex ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'
+              }`}
+            >
+              {index <= currentIndex ? <Check size={13} /> : index + 1}
+            </div>
+            <span className={`mt-1 w-14 text-center text-[9px] font-bold leading-tight ${index <= currentIndex ? 'text-gray-700' : 'text-gray-300'}`}>
+              {step.label}
+            </span>
+          </div>
+          {index < PROGRESS_STEPS.length - 1 ? (
+            <div className={`mx-1 mt-3.5 h-0.5 flex-1 ${index < currentIndex ? 'bg-emerald-500' : 'bg-gray-100'}`} />
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OrderStatusPanel({
   shopId,
   orderId,
@@ -473,6 +645,8 @@ function OrderStatusPanel({
           {status.status === 'cancelled' ? TRACKING_LABELS.cancelled.label : status.status === 'completed' ? 'Order completed - thank you!' : tracking.label}
         </div>
 
+        <OrderProgressStepper status={status} />
+
         <div className="mt-6 space-y-1.5 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
           {status.items.map((item, index) => (
             <div key={`${item.name}-${index}`} className="flex justify-between gap-3">
@@ -483,11 +657,30 @@ function OrderStatusPanel({
         </div>
 
         <div className="mt-3 space-y-2 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
-          <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="font-black">{status.orderType}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="font-black">{status.orderType === 'DineIn' ? 'Dine-In' : status.orderType}</span></div>
           {status.table ? <div className="flex justify-between"><span className="text-gray-500">Table</span><span className="font-black">{formatTableLabel(status.table)}</span></div> : null}
+          {status.address ? <div className="flex justify-between gap-3"><span className="shrink-0 text-gray-500">Address</span><span className="text-right font-black">{status.address}</span></div> : null}
+          <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span className="font-black">Rs {formatter.format(status.subtotal)}</span></div>
+          {status.otherCharges > 0 ? (
+            <div className="flex justify-between"><span className="text-gray-500">Other Charges</span><span className="font-black">Rs {formatter.format(status.otherCharges)}</span></div>
+          ) : null}
           <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-black">Rs {formatter.format(status.total)}</span></div>
-          <div className="flex justify-between"><span className="text-gray-500">Payment</span><span className="font-black capitalize">{status.paymentStatus.replace('_', ' ')}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Payment Method</span><span className="font-black">{status.paymentMethod}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Payment Status</span><span className="font-black capitalize">{status.paymentStatus.replace('_', ' ')}</span></div>
         </div>
+
+        {status.orderType === 'Delivery' && status.assignedRider ? (
+          <div className="mt-3 flex items-center gap-3 rounded-2xl bg-indigo-50 p-4 text-left">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white"><Bike size={16} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-black uppercase tracking-[0.14em] text-indigo-400">Your Rider</p>
+              <p className="truncate text-sm font-black text-indigo-900">{status.assignedRider.name || 'Assigned'}</p>
+            </div>
+            <a href={`tel:${status.assignedRider.phone}`} className="flex shrink-0 items-center gap-1 rounded-xl bg-indigo-600 px-3 py-2 text-[11px] font-black text-white">
+              <Phone size={12} /> Call
+            </a>
+          </div>
+        ) : null}
 
         {changeRequest && changeRequest.status === 'pending' ? (
           <div className="mt-3 rounded-2xl bg-amber-50 p-4 text-left text-xs font-bold text-amber-800">
@@ -542,6 +735,55 @@ function OrderStatusPanel({
           onSubmitted={(request) => setStatus((previous) => (previous ? { ...previous, customerChangeRequest: request } : previous))}
         />
       ) : null}
+    </div>
+  );
+}
+
+// A persistent "Menu" / "Track Order" tab strip - shown whenever this
+// device has an active order, so a customer can flip back and forth
+// between browsing the menu and checking their order's progress without
+// losing either. Previously, having an active order forced the customer
+// straight into (and stuck on) the tracking view with no way back to the
+// menu at all - this just wraps both existing full-page views behind a
+// lightweight local tab instead of a route change, so switching is instant
+// and doesn't re-fetch the menu each time.
+function CustomerShell({
+  shopId,
+  activeOrderId,
+  onOrderFinished,
+}: {
+  shopId: string;
+  activeOrderId: string;
+  onOrderFinished: () => void;
+}) {
+  const [tab, setTab] = useState<'track' | 'menu'>('track');
+  return (
+    <div className="min-h-screen bg-[#F8F9FB]">
+      <div className="sticky top-0 z-30 flex gap-1.5 bg-black p-2">
+        <button
+          type="button"
+          onClick={() => setTab('menu')}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-black transition ${
+            tab === 'menu' ? 'bg-[#E2F33C] text-black' : 'text-white/60'
+          }`}
+        >
+          <UtensilsCrossed size={14} /> Menu
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('track')}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-black transition ${
+            tab === 'track' ? 'bg-[#E2F33C] text-black' : 'text-white/60'
+          }`}
+        >
+          <Clock size={14} /> Track Order
+        </button>
+      </div>
+      {tab === 'track' ? (
+        <OrderStatusPanel shopId={shopId} orderId={activeOrderId} onFinished={onOrderFinished} />
+      ) : (
+        <CustomerOrderingFlow shopId={shopId} />
+      )}
     </div>
   );
 }
@@ -651,7 +893,7 @@ export default function CustomerOrderPage() {
     return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading...</div>;
   }
   if (resolvedOrderId) {
-    return <OrderStatusPanel shopId={shopId} orderId={resolvedOrderId} onFinished={() => clearSavedOrderId(shopId)} />;
+    return <CustomerShell shopId={shopId} activeOrderId={resolvedOrderId} onOrderFinished={() => clearSavedOrderId(shopId)} />;
   }
   return <CustomerOrderingFlow shopId={shopId} />;
 }
@@ -783,11 +1025,17 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
 
   const products = menu?.products || [];
   const tableOptions = getTableOptions(tables);
-  const categories = useMemo(() => ['All', ...Array.from(new Set(products.map((p) => p.category)))], [products]);
-  const visibleProducts = useMemo(
-    () => (category === 'All' ? products : products.filter((p) => p.category === category)),
-    [products, category],
+  // Category -> product name -> size/variation, same three-level browse as
+  // desktop's POSPage.tsx (see groupMenuProducts' own comment) - "Pizza"
+  // (category) contains "Special Pizza" (one tile/group), which opens a
+  // picker for Small/Medium/Large (variations) if it has more than one.
+  const productGroups = useMemo(() => groupMenuProducts(products), [products]);
+  const categories = useMemo(() => ['All', ...Array.from(new Set(productGroups.map((g) => g.category)))], [productGroups]);
+  const visibleGroups = useMemo(
+    () => (category === 'All' ? productGroups : productGroups.filter((g) => g.category === category)),
+    [productGroups, category],
   );
+  const [variationPickerGroup, setVariationPickerGroup] = useState<ProductGroup | null>(null);
 
   const cartLines = Array.from(cart.values());
   const cartCount = cartLines.reduce((sum, line) => sum + line.quantity, 0);
@@ -818,6 +1066,17 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       else next.set(key, { ...existing, quantity });
       return next;
     });
+  }
+
+  // Same behavior as desktop's handleGroupClick - a single-variation group
+  // (the vast majority of items) adds straight to the cart; only a group
+  // with 2+ sizes/options opens the picker.
+  function handleGroupTap(group: ProductGroup) {
+    if (group.variations.length <= 1) {
+      addToCart(group.variations[0]);
+      return;
+    }
+    setVariationPickerGroup(group);
   }
 
   const phoneDigits = customerPhone.replace(/\D/g, '');
@@ -952,41 +1211,68 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 px-5 sm:grid-cols-3">
-        {visibleProducts.map((product) => {
-          const line = cart.get(cartKey(product));
-          const imageUrl = getProductImageUrl(product.image);
+        {visibleGroups.map((group) => {
+          // A single-variation group behaves exactly like before (its own
+          // quantity stepper, unambiguous which product it refers to). A
+          // multi-variation group ("Special Pizza" -> Small/Medium/Large)
+          // shows a "from Rs X" price and always opens the size picker on
+          // tap, same as desktop - no inline stepper on the tile itself
+          // since it wouldn't be clear which size it's adjusting.
+          const hasVariations = group.variations.length > 1;
+          const single = group.variations[0];
+          const line = !hasVariations ? cart.get(cartKey(single)) : undefined;
+          const groupCartCount = hasVariations
+            ? group.variations.reduce((sum, v) => sum + (cart.get(cartKey(v))?.quantity || 0), 0)
+            : 0;
+          const cheapest = Math.min(...group.variations.map((v) => v.price));
+          const imageUrl = getProductImageUrl(group.image);
           return (
-            <div key={product.id} className="rounded-2xl bg-white p-3 shadow-sm">
+            <div key={group.key} className="rounded-2xl bg-white p-3 shadow-sm">
               {/* Same colored icon tile POSPage.tsx's own product grid uses
                   on desktop (see getProductImageUrl's own comment for why a
                   relative path is required, not "/products/...") - keeps
                   this page visually identical to the shop's real catalog
                   instead of a plain photo grid, and still shows a sensible
                   placeholder for the (rare) product with no icon set. */}
-              <div className={`mb-2 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl p-2 ${product.color || 'bg-indigo-50'}`}>
+              <div className={`mb-2 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl p-2 ${group.color || 'bg-indigo-50'}`}>
                 {imageUrl ? (
-                  <img src={imageUrl} alt={product.name} className="h-full w-full object-contain" />
+                  <img src={imageUrl} alt={group.name} className="h-full w-full object-contain" />
                 ) : (
                   <UtensilsCrossed className="text-black/30" size={28} strokeWidth={1.5} />
                 )}
               </div>
-              <p className="text-sm font-black text-gray-900">{product.name}</p>
-              {product.variation ? <p className="text-[11px] text-gray-400">{product.variation}</p> : null}
-              <p className="mt-1 text-sm font-black text-gray-900">Rs {formatter.format(product.price)}</p>
-              {line ? (
+              <p className="text-sm font-black text-gray-900">{group.name}</p>
+              <p className="text-[11px] text-gray-400">{hasVariations ? `${group.variations.length} sizes/options` : single.variation}</p>
+              <p className="mt-1 text-sm font-black text-gray-900">{hasVariations ? `From Rs ${formatter.format(cheapest)}` : `Rs ${formatter.format(single.price)}`}</p>
+              {hasVariations ? (
+                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">
+                  {groupCartCount > 0 ? `${groupCartCount} in cart - Select` : 'Select'}
+                </button>
+              ) : line ? (
                 <div className="mt-2 flex items-center justify-between rounded-xl bg-[#F8F9FB] px-2 py-1.5">
-                  <button type="button" onClick={() => changeQuantity(product, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
+                  <button type="button" onClick={() => changeQuantity(single, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
                   <span className="text-sm font-black">{line.quantity}</span>
-                  <button type="button" onClick={() => changeQuantity(product, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
+                  <button type="button" onClick={() => changeQuantity(single, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
                 </div>
               ) : (
-                <button type="button" onClick={() => addToCart(product)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">Add</button>
+                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">Add</button>
               )}
             </div>
           );
         })}
-        {visibleProducts.length === 0 ? <p className="col-span-full py-10 text-center text-sm text-gray-400">No items in this category.</p> : null}
+        {visibleGroups.length === 0 ? <p className="col-span-full py-10 text-center text-sm text-gray-400">No items in this category.</p> : null}
       </div>
+
+      {variationPickerGroup ? (
+        <VariationPickerSheet
+          group={variationPickerGroup}
+          onSelect={(variation) => {
+            addToCart(variation);
+            setVariationPickerGroup(null);
+          }}
+          onClose={() => setVariationPickerGroup(null)}
+        />
+      ) : null}
 
       {cartCount > 0 ? (
         <button

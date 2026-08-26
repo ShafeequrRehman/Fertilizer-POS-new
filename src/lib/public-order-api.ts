@@ -86,8 +86,15 @@ export interface PublicOrderStatus {
   status: string;
   trackingStatus: TrackingStatus;
   paymentStatus: PaymentStatus;
+  subtotal: number;
+  otherCharges: number;
   total: number;
+  paymentMethod: string;
   createdAt: string;
+  address: string;
+  // Only set once staff has actually handed a Delivery order to a
+  // specific rider - see orderController.assignRider.
+  assignedRider: { name: string; phone: string } | null;
   // Read-only display of what's actually on the order right now - reflects
   // any approved change-request automatically, since approval edits the
   // real order.items server-side. There is no public edit endpoint;

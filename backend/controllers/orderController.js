@@ -760,6 +760,17 @@ exports.getUnprintedKitchenOrders = async (req, res) => {
       ...buildShopScope(req),
       kitchenPrintedAt: null,
       status: { $ne: "cancelled" },
+      // A customer-qr order shouldn't hit the kitchen printer the instant
+      // it's placed - staff (or a verified online-payment webhook, see
+      // publicOrderController.js's jazzCashCallback/easyPaisaCallback)
+      // still has to accept it first (trackingStatus leaving
+      // "awaiting_confirmation" - see updateTrackingStatus). A staff-
+      // placed order is unaffected: trackingStatus defaults to
+      // "awaiting_confirmation" for those too (it's simply never used for
+      // anything on a staff order - see Order.js's own comment), so this
+      // has to key off `source`, not trackingStatus alone, or every normal
+      // till order would stop printing.
+      $or: [{ source: { $ne: "customer-qr" } }, { trackingStatus: { $ne: "awaiting_confirmation" } }],
     }).sort({ createdAt: 1 }).lean();
     res.json(orders.map((order) => ({ ...order, id: String(order._id) })));
   } catch (error) {

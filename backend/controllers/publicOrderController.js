@@ -53,8 +53,21 @@ function publicOrderShape(order) {
     status: order.status,
     trackingStatus: order.trackingStatus,
     paymentStatus: order.paymentStatus,
+    subtotal: order.subtotal,
+    // Same "other charges" slot customerNotificationService.js's WhatsApp
+    // templates use - no dedicated delivery-fee field exists yet, `tax` is
+    // the only "extra line item" today (always 0 for now).
+    otherCharges: order.tax,
     total: order.total,
+    paymentMethod: order.paymentMethod,
     createdAt: order.createdAt,
+    address: order.address || "",
+    // Only meaningful for a Delivery order, once staff has actually handed
+    // it to someone - see orderController.assignRider. null otherwise.
+    assignedRider:
+      order.assignedRider && order.assignedRider.phone
+        ? { name: order.assignedRider.name || "", phone: order.assignedRider.phone }
+        : null,
     // Read-only for the tracking view (CustomerOrderPage.tsx's
     // OrderStatusPanel) - a customer can see exactly what they ordered
     // here, but there's no corresponding public edit endpoint anywhere in
@@ -236,7 +249,9 @@ exports.getCustomerStatus = async (req, res) => {
 exports.getOrderStatus = async (req, res) => {
   try {
     const order = await Order.findOne({ _id: req.params.orderId, shopId: req.shop._id })
-      .select("dailyOrderNumber orderType table status trackingStatus paymentStatus total createdAt items customerChangeRequest")
+      .select(
+        "dailyOrderNumber orderType table status trackingStatus paymentStatus subtotal tax total paymentMethod createdAt address assignedRider items customerChangeRequest",
+      )
       .lean();
     if (!order) return res.status(404).json({ message: "Order not found." });
     res.json(publicOrderShape(order));
