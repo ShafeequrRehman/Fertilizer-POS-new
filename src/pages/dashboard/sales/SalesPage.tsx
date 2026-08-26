@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
+import { Globe, Lock, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, UserRound, XCircle } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOccupiedDineInTables, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, type TrackingStatus } from '@/lib/pos-api';
 import { formatTableLabel, getTableOptions } from '@/lib/table-options';
 import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
@@ -1018,6 +1018,26 @@ export default function SalesPage() {
                     <p className="truncate text-[9px] font-black uppercase tracking-[0.14em] text-gray-400">{age(order.createdAt)}</p>
                     <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-black uppercase ${order.status === 'pending' ? 'bg-amber-100 text-amber-700' : order.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{order.status}</span>
                   </div>
+                  {/* A customer placed this straight from the QR ordering
+                      page (see publicOrderController.js) - staff need to
+                      see "this needs to be accepted" right on the card
+                      itself, not only after clicking in to Order Detail
+                      (see OnlineOrderControls there for the actual
+                      accept/decline actions). Pulses while still
+                      unconfirmed so a new online order is hard to miss in
+                      a busy grid of cards. */}
+                  {order.source === 'customer-qr' && order.trackingStatus && order.trackingStatus !== 'cancelled' ? (
+                    <div
+                      className={`mt-1.5 flex items-center gap-1 rounded-lg px-2 py-1 text-[9px] font-black uppercase tracking-wide ${
+                        order.trackingStatus === 'awaiting_confirmation' ? 'animate-pulse bg-indigo-600 text-white' : 'bg-indigo-100 text-indigo-700'
+                      }`}
+                    >
+                      <Globe size={10} className="shrink-0" />
+                      <span className="truncate">
+                        {order.trackingStatus === 'awaiting_confirmation' ? 'Online - Waiting Acceptance' : `Online - ${TRACKING_STEP_LABEL[order.trackingStatus] || order.trackingStatus}`}
+                      </span>
+                    </div>
+                  ) : null}
                   <h3 className="mt-2 break-words text-sm font-black text-gray-900">{cardHeading(order)}</h3>
                   <p className="mt-0.5 truncate text-[10px] font-semibold text-gray-500">{formatOrderDateTime(order.createdAt)}</p>
                   <div className="mt-2 space-y-0.5 text-[11px] text-gray-600">
