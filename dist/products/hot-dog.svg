@@ -1,0 +1,11 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FFF8EE"/>
+  <!-- Bun Back -->
+  <path d="M70 100C70 80 250 80 250 100V130C250 150 70 150 70 130V100Z" fill="#EAA751"/>
+  <!-- Sausage -->
+  <rect x="60" y="105" width="200" height="30" rx="15" fill="#BC4631"/>
+  <!-- Mustard -->
+  <path d="M80 120C100 100 120 140 140 120C160 100 180 140 200 120C220 100 230 120 240 120" stroke="#F6D978" stroke-width="4" stroke-linecap="round" fill="none"/>
+  <!-- Bun Front -->
+  <path d="M70 125C70 145 250 145 250 125V145C250 165 70 165 70 145V125Z" fill="#F2C17D"/>
+</svg>

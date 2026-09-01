@@ -28,6 +28,12 @@ export interface SessionShop {
   id?: string;
   name?: string;
   status?: "active" | "suspended";
+  // Super Admin-controlled sidebar page visibility (see
+  // lib/dashboard-pages.ts) - null/undefined means no restriction is
+  // configured, so every page the user's own permissions allow stays
+  // visible. Only set once a Super Admin has explicitly saved a selection
+  // for this shop from the Shops page.
+  enabledPages?: string[] | null;
 }
 
 export interface SessionLicense {
@@ -128,12 +134,35 @@ export function hasPermission(key: string): boolean {
   return getPermissions().includes(key);
 }
 
+// Unlike hasPermission, this is NOT role-gated - a Shop Owner is only
+// exempt from their own shop's role/permission rules, not from a Super
+// Admin's platform-level page toggle (see Shop.enabledPages). A null/
+// undefined list (never configured, or the Super Admin explicitly cleared
+// it) means unrestricted - every page passes. This only controls sidebar
+// visibility in DashboardShell.tsx; it is not a backend access boundary.
+export function isPageEnabled(pageKey: string): boolean {
+  const enabledPages = getAuthShop()?.enabledPages;
+  if (!enabledPages) return true;
+  return enabledPages.includes(pageKey);
+}
+
+// Called right after SidebarPagesSection.tsx successfully saves a new
+// selection, so the sidebar can reflect it immediately instead of only
+// after the next login. setAuthSession() only ever runs at login/refresh -
+// this is the one place the cached shop object is patched mid-session.
+export function updateCachedShopEnabledPages(enabledPages: string[]) {
+  if (typeof window === "undefined") return;
+  const current = getAuthShop();
+  if (!current) return;
+  storeBoth(AUTH_SHOP_KEY, JSON.stringify({ ...current, enabledPages }));
+}
+
 export function setAuthSession(payload: LoginSessionPayload) {
   if (typeof window === "undefined") return;
 
   storeBoth(AUTH_TOKEN_KEY, payload.accessToken);
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(payload.accessToken)}; path=/; Max-Age=43200; SameSite=Lax${secure}`;
+  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(payload.accessToken)}; path=/; Max-Age=72000; SameSite=Lax${secure}`;
 
   if (payload.refreshToken) {
     storeBoth(REFRESH_TOKEN_KEY, payload.refreshToken);
@@ -168,7 +197,7 @@ export function updateTokens(accessToken: string, refreshToken?: string) {
   if (typeof window === "undefined") return;
   storeBoth(AUTH_TOKEN_KEY, accessToken);
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(accessToken)}; path=/; Max-Age=43200; SameSite=Lax${secure}`;
+  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(accessToken)}; path=/; Max-Age=72000; SameSite=Lax${secure}`;
   if (refreshToken) {
     storeBoth(REFRESH_TOKEN_KEY, refreshToken);
   }

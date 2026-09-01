@@ -1,0 +1,11 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FFF3E9"/>
+  <!-- Wing 1 -->
+  <path d="M108 96C108 78 148 78 148 100V150C148 168 108 168 108 150V96Z" fill="#E0A24E"/>
+  <path d="M100 92C88 88 78 96 84 108" stroke="#C97A2B" stroke-width="9" stroke-linecap="round"/>
+  <ellipse cx="128" cy="152" rx="24" ry="10" fill="#8B5A2B"/>
+  <!-- Wing 2 -->
+  <path d="M176 106C176 88 216 88 216 110V158C216 176 176 176 176 158V106Z" fill="#EAB56A"/>
+  <path d="M208 102C220 98 230 106 224 118" stroke="#C97A2B" stroke-width="9" stroke-linecap="round"/>
+  <ellipse cx="196" cy="160" rx="24" ry="10" fill="#8B5A2B"/>
+</svg>

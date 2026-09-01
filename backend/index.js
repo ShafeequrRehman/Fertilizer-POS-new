@@ -46,11 +46,18 @@ const purchaseRoutes = require("./routes/purchaseRoutes");
 const expenseRoutes = require("./routes/expenseRoutes");
 const whatsappRoutes = require("./routes/whatsappRoutes");
 const printerRoutes = require("./routes/printerRoutes");
+const appVersionRoutes = require("./routes/appVersionRoutes");
+const publicOrderRoutes = require("./routes/publicOrderRoutes");
+
+const sanitizeInput = require("./middleware/sanitizeInput");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+// See sanitizeInput.js - strips Mongo operator keys ($ne, $gt, etc.) out
+// of every request body/query/params before any route handler runs.
+app.use(sanitizeInput);
 
 // Reachability check for the frontend's real online/offline indicator (see
 // src/lib/network-status.ts). The actual continuous checking happens in
@@ -63,6 +70,19 @@ app.get("/api/health", (req, res) => {
   const status = connectivityMonitor.getStatus();
   res.status(status.isOnline ? 200 : 503).json({ ok: status.isOnline, dbConnected: status.isOnline, lastCheckedAt: status.lastCheckedAt, time: Date.now() });
 });
+
+// Mobile app-update check (see routes/appVersionRoutes.js) - mounted here,
+// same as /api/health above, so it works even when MongoDB Atlas is
+// unreachable and without needing a logged-in session (a phone should be
+// able to tell it needs an update before it can even log in).
+app.use("/api/app-version", appVersionRoutes);
+
+// Static hosting for built pos-mobile APKs - drop a new build into
+// backend/public/apk/ and point `npm run set-app-version` at
+// /apk/<filename> (see backend/scripts/setAppVersion.js). No auth - the
+// file itself isn't sensitive, and a phone needs to download it before it
+// can log in.
+app.use("/apk", express.static(path.join(__dirname, "public", "apk")));
 
 // TEMPORARY DEBUG LOGGING - proves whether a request from the frontend
 // ever actually reaches this Express process at all. Remove once the
@@ -103,6 +123,30 @@ app.use("/api/purchases", purchaseRoutes);
 app.use("/api/expenses", expenseRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 app.use("/api/printers", printerRoutes);
+// Customer-facing QR ordering (menu/tables/order-status/place-order/
+// payment) - no login, see requireShopOrderable.js/publicOrderController.js
+// for why every input there is treated as untrusted. Still mounted under
+// /api so it inherits the DB-readiness check above (matched by prefix),
+// just never the `authenticate` middleware any other /api/* route runs.
+app.use("/api/public", publicOrderRoutes);
+
+// Serves the built pos-web frontend (npm run build's dist/ output) so the
+// customer QR ordering PWA (HashRouter route /order/:shopId - see
+// src/App.tsx) is reachable from a customer's own phone browser at this
+// same public domain, without needing the Electron app at all. Staff still
+// normally use the Electron shell, which loads its own local copy of this
+// same build - this is purely an ADDITIONAL way to reach it, over plain
+// HTTP(S). Because this app is HashRouter-based (see src/main.tsx), every
+// real route lives after the "#" and is resolved entirely client-side -
+// Express only ever needs to serve index.html/manifest.json/sw.js at "/",
+// never a wildcard catch-all for arbitrary paths. Registered BEFORE the
+// plain-text "/" handler below so it actually gets first crack at "/" once
+// dist/ exists; if dist/ doesn't exist yet, express.static just calls
+// next() and the plain-text handler still answers instead of 404ing.
+const distPath = path.join(__dirname, "..", "dist");
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
 
 app.get("/", (req, res) => {
     res.send("POS Backend Running ...");

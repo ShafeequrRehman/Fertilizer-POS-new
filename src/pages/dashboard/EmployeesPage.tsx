@@ -1,31 +1,98 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw } from "lucide-react";
+import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil, WifiOff, Eye } from "lucide-react";
 import { shopApi, type EmployeeSummary, type RoleSummary, type PermissionDef } from "@/lib/shop-api";
+import { STAFF_DESIGNATIONS } from "@/lib/staff-designations";
 import { useToast } from "@/lib/toast";
+import { isDesktopApp } from "@/lib/api";
+import { useNetworkStatus } from "@/lib/network-status";
+import { getReferenceData, queueEmployeeCreate, pushEmployeesCache } from "@/lib/local-hub-api";
+import { loadEmployeesFromLocalHub, saveEmployeeEditOffline, deleteEmployeeOffline } from "@/lib/offline-staff-helpers";
 
-// Shop Owner-only page (see App.tsx route guard) for managing Employees
-// and their Roles - the frontend half of backend/routes/shopOwnerRoutes.js.
-// Employees are created only here, never self-registered (see
-// authController.register - self-service registration is disabled).
+// Shop Owner-only page (see App.tsx route guard) for managing staff -
+// login accounts (Employees tab) and the roles that control what they
+// can see and do (Roles tab). Renamed "Manage Staff" in the UI because it
+// now also holds each staff member's designation (Chief, Manager,
+// Cashier, Order Taker, Waiter, etc.) and directory details (ID card
+// number, address, phone, reference, comment) - the frontend half of
+// backend/routes/shopOwnerRoutes.js. Employees are created only here,
+// never self-registered (see authController.register - self-service
+// registration is disabled).
+//
+// The "Waiter" and "Order Taker" designations are what feed the POS
+// waiter dropdown (see waiterController.getWaiters) - there is no
+// separate waiter list to manage anymore (see SettingsPage.tsx).
 export default function EmployeesPage() {
   const { toast, confirm } = useToast();
+  const { isOnline } = useNetworkStatus();
   const [tab, setTab] = useState<"employees" | "roles">("employees");
   const [employees, setEmployees] = useState<EmployeeSummary[]>([]);
   const [roles, setRoles] = useState<RoleSummary[]>([]);
   const [permissions, setPermissions] = useState<PermissionDef[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateEmployee, setShowCreateEmployee] = useState(false);
+  const [editTarget, setEditTarget] = useState<EmployeeSummary | null>(null);
+  const [viewTarget, setViewTarget] = useState<EmployeeSummary | null>(null);
   const [showRoleEditor, setShowRoleEditor] = useState<RoleSummary | "new" | null>(null);
   const [resetTarget, setResetTarget] = useState<EmployeeSummary | null>(null);
 
-  const load = () => {
-    setLoading(true);
-    Promise.all([shopApi.listEmployees(), shopApi.listRoles(), shopApi.listPermissions()])
-      .then(([e, r, p]) => { setEmployees(e); setRoles(r); setPermissions(p); })
-      .finally(() => setLoading(false));
+  // Desktop + genuinely offline (the network-status hook does a real
+  // backend round-trip, not just navigator.onLine - see network-status.ts)
+  // is when staff create/edit/delete get queued through the Local Hub
+  // instead of calling shopApi directly against the cloud. See
+  // offline-staff-helpers.ts / backend/localHub/localStaff.js.
+  const offline = isDesktopApp() && !isOnline;
+
+  // Cache-first-on-failure load: tries the cloud first (so a normal online
+  // session always shows the truest, most current list), and only falls
+  // back to the Local Hub's cached snapshot + pending queue if that fails -
+  // covers both "known offline" and "looked online a second ago but this
+  // particular request still failed" without a separate code path for each.
+  const loadOffline = async () => {
+    try {
+      const reference = await getReferenceData();
+      const cachedRoles = (reference.roles || []) as RoleSummary[];
+      setRoles(cachedRoles);
+      const merged = await loadEmployeesFromLocalHub(cachedRoles);
+      setEmployees(merged);
+    } catch {
+      toast.error("Could not load staff - Local Hub unreachable.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(load, []);
+  const load = () => {
+    setLoading(true);
+    if (offline) {
+      void loadOffline();
+      return;
+    }
+    Promise.all([shopApi.listEmployees(), shopApi.listRoles(), shopApi.listPermissions()])
+      .then(([e, r, p]) => {
+        setEmployees(e);
+        setRoles(r);
+        setPermissions(p);
+        setLoading(false);
+        // Best-effort - keeps Manage Staff's own offline cache current
+        // every time this till successfully loads the list online. Never
+        // blocks or fails the on-screen load if the Local Hub isn't running.
+        if (isDesktopApp()) void pushEmployeesCache(e).catch(() => {});
+      })
+      .catch(() => {
+        // loadOffline() manages its own setLoading(false) once the Local
+        // Hub read actually resolves - not set here too, or the list would
+        // flash "No staff members yet" for a moment while it's still loading.
+        if (isDesktopApp()) void loadOffline();
+        else { toast.error("Failed to load staff."); setLoading(false); }
+      });
+  };
+
+  // Loads on mount, and again any time connectivity flips (either
+  // direction) rather than waiting for the next manual Refresh - e.g. a
+  // staff member queued while offline should disappear from "queued"
+  // display once it actually syncs shortly after reconnecting.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [isOnline]);
 
   const roleName = (emp: EmployeeSummary) => {
     if (emp.employeeRoleId && typeof emp.employeeRoleId === "object") return emp.employeeRoleId.name;
@@ -33,14 +100,22 @@ export default function EmployeesPage() {
   };
 
   const toggleActive = async (emp: EmployeeSummary) => {
-    await shopApi.updateEmployee(emp._id, { isActive: !emp.isActive });
+    if (offline) {
+      await saveEmployeeEditOffline(emp, { isActive: !emp.isActive }, roles);
+    } else {
+      await shopApi.updateEmployee(emp._id, { isActive: !emp.isActive });
+    }
     load();
   };
 
   const removeEmployee = async (emp: EmployeeSummary) => {
-    const confirmed = await confirm(`Remove employee "${emp.name}"?`, { title: "Remove employee", confirmText: "Remove", tone: "danger" });
+    const confirmed = await confirm(`Remove staff member "${emp.name}"?`, { title: "Remove staff member", confirmText: "Remove", tone: "danger" });
     if (!confirmed) return;
-    await shopApi.deleteEmployee(emp._id);
+    if (offline) {
+      await deleteEmployeeOffline(emp);
+    } else {
+      await shopApi.deleteEmployee(emp._id);
+    }
     load();
     toast.success(`"${emp.name}" removed.`);
   };
@@ -61,8 +136,15 @@ export default function EmployeesPage() {
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Employees</h1>
-          <p className="text-sm text-gray-500">Staff accounts and the roles that control what they can see and do.</p>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold">Manage Staff</h1>
+            {offline ? (
+              <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-700">
+                <WifiOff size={12} /> Offline — changes will sync automatically
+              </span>
+            ) : null}
+          </div>
+          <p className="text-sm text-gray-500">Staff accounts, designations, directory details, and the roles that control what they can see and do.</p>
         </div>
         <div className="flex items-center gap-3">
           <button type="button" onClick={load} disabled={loading} className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-50 disabled:opacity-60">
@@ -70,7 +152,7 @@ export default function EmployeesPage() {
           </button>
           {tab === "employees" ? (
             <button type="button" onClick={() => setShowCreateEmployee(true)} className="flex items-center gap-2 rounded-full bg-black px-4 py-2.5 text-sm font-bold text-white">
-              <Plus size={16} /> New Employee
+              <Plus size={16} /> New Staff Member
             </button>
           ) : (
             <button type="button" onClick={() => setShowRoleEditor("new")} className="flex items-center gap-2 rounded-full bg-black px-4 py-2.5 text-sm font-bold text-white">
@@ -81,7 +163,7 @@ export default function EmployeesPage() {
       </div>
 
       <div className="mb-6 flex gap-2">
-        <TabButton active={tab === "employees"} onClick={() => setTab("employees")}>Employees</TabButton>
+        <TabButton active={tab === "employees"} onClick={() => setTab("employees")}>Staff</TabButton>
         <TabButton active={tab === "roles"} onClick={() => setTab("roles")}>Roles &amp; Permissions</TabButton>
       </div>
 
@@ -91,7 +173,9 @@ export default function EmployeesPage() {
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Designation</th>
                 <th className="px-4 py-3">Username</th>
+                <th className="px-4 py-3">Phone</th>
                 <th className="px-4 py-3">Role</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3 text-right">Actions</th>
@@ -99,14 +183,22 @@ export default function EmployeesPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400">Loading...</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Loading...</td></tr>
               ) : employees.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400">No employees yet.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">No staff members yet.</td></tr>
               ) : (
                 employees.map((emp) => (
                   <tr key={emp._id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-semibold">{emp.name}</td>
+                    <td className="px-4 py-3">
+                      {emp.designation ? (
+                        <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700">{emp.designation}</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-gray-500">@{emp.username}</td>
+                    <td className="px-4 py-3 text-gray-500">{emp.phone || "—"}</td>
                     <td className="px-4 py-3">{roleName(emp)}</td>
                     <td className="px-4 py-3">
                       <button
@@ -119,6 +211,12 @@ export default function EmployeesPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
+                        <button type="button" title="View full details" onClick={() => setViewTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
+                          <Eye size={15} />
+                        </button>
+                        <button type="button" title="Edit staff details" onClick={() => setEditTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
+                          <Pencil size={15} />
+                        </button>
                         <button type="button" title="Reset password" onClick={() => setResetTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
                           <KeyRound size={15} />
                         </button>
@@ -159,7 +257,18 @@ export default function EmployeesPage() {
       )}
 
       {showCreateEmployee ? (
-        <CreateEmployeeModal roles={roles} onClose={() => setShowCreateEmployee(false)} onCreated={load} />
+        <StaffFormModal roles={roles} offline={offline} onClose={() => setShowCreateEmployee(false)} onSaved={load} />
+      ) : null}
+      {editTarget ? (
+        <StaffFormModal roles={roles} offline={offline} employee={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
+      ) : null}
+      {viewTarget ? (
+        <StaffDetailsModal
+          employee={viewTarget}
+          roleLabel={roleName(viewTarget)}
+          onClose={() => setViewTarget(null)}
+          onEdit={() => { setEditTarget(viewTarget); setViewTarget(null); }}
+        />
       ) : null}
       {showRoleEditor ? (
         <RoleEditorModal
@@ -200,53 +309,254 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
   );
 }
 
-function CreateEmployeeModal({ roles, onClose, onCreated }: { roles: RoleSummary[]; onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: "", username: "", password: "", email: "", phone: "", roleId: "" });
+// Read-only view of everything on file for one staff member - the Manage
+// Staff table itself only has room for name/designation/username/phone/
+// role/status, so this is where directory details (ID card, address,
+// vehicle number, reference, salary, comment) actually show up without
+// having to open Edit (and risk accidentally changing something). Rider-
+// specific fields (vehicle number) only render when there's actually a
+// value, same idea as StaffFormModal only offering that field for a
+// Delivery Rider designation.
+function StaffDetailsModal({
+  employee,
+  roleLabel,
+  onClose,
+  onEdit,
+}: {
+  employee: EmployeeSummary;
+  roleLabel: string;
+  onClose: () => void;
+  onEdit: () => void;
+}) {
+  const rows: Array<[string, string]> = [
+    ["Full Name", employee.name || "—"],
+    ["Username", `@${employee.username}`],
+    ["Designation", employee.designation || "—"],
+    ["Role", roleLabel],
+    ["Status", employee.isActive ? "Active" : "Disabled"],
+    ["Email", employee.email || "—"],
+    ["Phone Number", employee.phone || "—"],
+    ["ID Card Number", employee.idCardNumber || "—"],
+    ["Address", employee.address || "—"],
+    ...(employee.vehicleNumber ? ([["Vehicle / Bike Number", employee.vehicleNumber]] as Array<[string, string]>) : []),
+    ["Reference", employee.reference || "—"],
+    ["Monthly Salary", employee.monthlySalary ? `PKR ${employee.monthlySalary.toLocaleString()}` : "—"],
+    ["Comment", employee.comment || "—"],
+  ];
+
+  return (
+    <ModalShell title={`Staff Details — ${employee.name || employee.username}`} onClose={onClose}>
+      <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1 text-sm">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-start justify-between gap-4 border-b border-gray-100 py-2 last:border-0">
+            <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-400">{label}</span>
+            <span className="text-right font-medium text-gray-800">{value}</span>
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onEdit}
+        className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white"
+      >
+        Edit Details
+      </button>
+    </ModalShell>
+  );
+}
+
+// Handles both "New Staff Member" and "Edit Staff Member" - the same
+// fields either way, just pre-filled and PATCHed instead of POSTed when
+// `employee` is passed in.
+function StaffFormModal({
+  roles,
+  employee,
+  offline = false,
+  onClose,
+  onSaved,
+}: {
+  roles: RoleSummary[];
+  employee?: EmployeeSummary;
+  offline?: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isEdit = Boolean(employee);
+  const initialRoleId = employee?.employeeRoleId
+    ? (typeof employee.employeeRoleId === "object" ? employee.employeeRoleId._id : employee.employeeRoleId)
+    : "";
+  const [form, setForm] = useState({
+    name: employee?.name || "",
+    username: employee?.username || "",
+    password: "",
+    email: employee?.email || "",
+    phone: employee?.phone || "",
+    roleId: initialRoleId || "",
+    designation: employee?.designation || "",
+    customDesignation: "",
+    idCardNumber: employee?.idCardNumber || "",
+    address: employee?.address || "",
+    vehicleNumber: employee?.vehicleNumber || "",
+    reference: employee?.reference || "",
+    comment: employee?.comment || "",
+    monthlySalary: employee?.monthlySalary ? String(employee.monthlySalary) : "",
+  });
+  const [useCustomDesignation, setUseCustomDesignation] = useState(
+    Boolean(employee?.designation) && !STAFF_DESIGNATIONS.includes(employee?.designation as any)
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  // Shows the rider-only Vehicle/Bike Number field once the chosen
+  // designation looks like "Delivery Rider" (handles the custom-typed
+  // case too, not just the dropdown pick) - see waiterController.getRiders,
+  // which does the same case-insensitive match on the backend.
+  const currentDesignation = useCustomDesignation ? form.customDesignation : form.designation;
+  const isRider = /delivery rider/i.test(currentDesignation);
 
   const submit = async () => {
     setSubmitting(true);
     setError("");
+    const designation = useCustomDesignation ? form.customDesignation.trim() : form.designation;
+    const payload: Record<string, unknown> = {
+      name: form.name,
+      email: form.email,
+      phone: form.phone,
+      roleId: form.roleId,
+      designation,
+      idCardNumber: form.idCardNumber,
+      address: form.address,
+      vehicleNumber: form.vehicleNumber,
+      reference: form.reference,
+      comment: form.comment,
+      monthlySalary: form.monthlySalary ? Number(form.monthlySalary) : 0,
+    };
     try {
-      await shopApi.createEmployee(form);
-      onCreated();
+      if (isEdit && employee) {
+        if (form.username !== employee.username) payload.username = form.username;
+        if (offline) {
+          await saveEmployeeEditOffline(employee, payload, roles);
+        } else {
+          await shopApi.updateEmployee(employee._id, payload);
+        }
+      } else {
+        payload.username = form.username;
+        payload.password = form.password;
+        if (offline) {
+          // Denormalize the role's name alongside its id purely for
+          // display - the Local Hub queue has no live cloud role lookup to
+          // resolve it from (see offline-staff-helpers.ts's
+          // localEmployeeToSummary). The real roleId is still what actually
+          // gets sent to the cloud once this syncs for real.
+          payload.roleName = roles.find((r) => r._id === form.roleId)?.name || "";
+          payload.isActive = true;
+          await queueEmployeeCreate(payload);
+        } else {
+          await shopApi.createEmployee(payload);
+        }
+      }
+      onSaved();
       onClose();
     } catch (err: any) {
-      setError(err?.response?.data?.message || "Failed to create employee");
+      setError(err?.response?.data?.message || `Failed to ${isEdit ? "update" : "create"} staff member`);
     } finally {
       setSubmitting(false);
     }
   };
 
+  const canSubmit = isEdit
+    ? Boolean(form.username && form.roleId)
+    : Boolean(form.username && form.password && form.roleId);
+
   return (
-    <ModalShell title="New Employee" onClose={onClose}>
-      <div className="space-y-3 text-sm">
+    <ModalShell title={isEdit ? `Edit Staff — ${employee?.name || employee?.username}` : "New Staff Member"} onClose={onClose}>
+      <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1 text-sm">
         <TextField label="Full Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
         <div className="grid grid-cols-2 gap-3">
           <TextField label="Username" value={form.username} onChange={(v) => setForm({ ...form, username: v })} />
-          <TextField label="Password" type="password" value={form.password} onChange={(v) => setForm({ ...form, password: v })} />
+          {isEdit ? (
+            <div className="flex items-end pb-2 text-xs text-gray-400">Use "Reset password" to change the password.</div>
+          ) : (
+            <TextField label="Password" type="password" value={form.password} onChange={(v) => setForm({ ...form, password: v })} />
+          )}
         </div>
         <div className="grid grid-cols-2 gap-3">
           <TextField label="Email (optional)" value={form.email} onChange={(v) => setForm({ ...form, email: v })} />
-          <TextField label="Phone (optional)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
+          <TextField label="Phone Number" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
         </div>
+
         <div>
-          <label className="mb-1 block text-xs text-gray-500">Role</label>
+          <label className="mb-1 block text-xs text-gray-500">Role (permissions)</label>
           <select value={form.roleId} onChange={(e) => setForm({ ...form, roleId: e.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2">
             <option value="">Select a role</option>
             {roles.map((r) => <option key={r._id} value={r._id}>{r.name}</option>)}
           </select>
         </div>
+
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">
+            Designation (job title - Waiter/Order Taker show up in the POS waiter list)
+          </label>
+          {useCustomDesignation ? (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={form.customDesignation}
+                onChange={(e) => setForm({ ...form, customDesignation: e.target.value })}
+                placeholder="e.g. Barista"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/10"
+              />
+              <button type="button" onClick={() => setUseCustomDesignation(false)} className="whitespace-nowrap rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-50">
+                Choose from list
+              </button>
+            </div>
+          ) : (
+            <select
+              value={form.designation}
+              onChange={(e) => {
+                if (e.target.value === "__custom__") { setUseCustomDesignation(true); return; }
+                setForm({ ...form, designation: e.target.value });
+              }}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+            >
+              <option value="">Select a designation</option>
+              {STAFF_DESIGNATIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+              <option value="__custom__">Other (type custom)…</option>
+            </select>
+          )}
+        </div>
+
+        <TextField label="ID Card Number" value={form.idCardNumber} onChange={(v) => setForm({ ...form, idCardNumber: v })} />
+        <TextField label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} />
+        {isRider ? (
+          <TextField
+            label="Vehicle / Bike Number"
+            value={form.vehicleNumber}
+            onChange={(v) => setForm({ ...form, vehicleNumber: v })}
+          />
+        ) : null}
+        <div className="grid grid-cols-2 gap-3">
+          <TextField label="Reference" value={form.reference} onChange={(v) => setForm({ ...form, reference: v })} />
+          <TextField label="Monthly Salary" type="number" value={form.monthlySalary} onChange={(v) => setForm({ ...form, monthlySalary: v })} />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">Comment</label>
+          <textarea
+            value={form.comment}
+            onChange={(e) => setForm({ ...form, comment: e.target.value })}
+            rows={2}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/10"
+          />
+        </div>
       </div>
       {error ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{error}</div> : null}
       <button
         type="button"
-        disabled={submitting || !form.username || !form.password || !form.roleId}
+        disabled={submitting || !canSubmit}
         onClick={submit}
         className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white disabled:opacity-50"
       >
-        {submitting ? "Creating..." : "Create Employee"}
+        {submitting ? "Saving..." : isEdit ? "Save Changes" : "Create Staff Member"}
       </button>
     </ModalShell>
   );
@@ -274,7 +584,7 @@ function ResetEmployeePasswordModal({ employee, onClose }: { employee: EmployeeS
   if (done) {
     return (
       <ModalShell title="Password Reset" onClose={onClose}>
-        <p className="text-sm text-gray-600">The employee's password has been updated.</p>
+        <p className="text-sm text-gray-600">The staff member's password has been updated.</p>
         <button type="button" onClick={onClose} className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white">Done</button>
       </ModalShell>
     );

@@ -19,6 +19,7 @@ router.patch("/shops/:id/status", ctrl.setShopStatus);
 router.patch("/shops/:id/owner", ctrl.updateShopOwner);
 router.patch("/shops/:id/owner/reset-password", ctrl.resetShopOwnerPassword);
 router.patch("/shops/:id/cancel-order-key", ctrl.resetCancelOrderKey);
+router.patch("/shops/:id/page-visibility-key", ctrl.resetPageVisibilityKey);
 
 // License
 router.post("/shops/:id/license/extend", ctrl.extendLicense);

@@ -4,13 +4,30 @@ import { clearAuthSession, getAuthToken, getRefreshToken, updateTokens, type Log
 const DATA_API_BASE_KEY = "api_base_url";
 const CLOUD_API_BASE_KEY = "cloud_api_base_url";
 const LOCAL_API_BASE = "http://localhost:5000/api";
-const IN_APP_POS_API_BASE = "/api/pos";
 const IN_APP_SYSTEM_API_BASE = "/api/system";
-const AXIOS_REQUEST_TIMEOUT_MS = 8000;
+// This was 8000 for a long time and worked fine - it started causing real
+// page failures (Sales/Record timing out, then fetchProducts/
+// fetchShopSessionHistory too) once this shop's order history grew enough
+// that queries + the network round trip to the self-hosted PC no longer
+// reliably finished inside 8 seconds. Rather than keep discovering this
+// one endpoint at a time and special-casing each one's own timeout
+// (ORDERS_FETCH_TIMEOUT_MS in pos-api.ts was the first of those, born from
+// exactly this problem), this raises the floor for every single api.*
+// call in the app at once - including ones nobody's hit yet. 20s is well
+// above every measured real request during the /api/orders investigation
+// (worst case seen was ~11s query time) while still failing fast enough
+// that a genuinely offline/down backend doesn't hang the UI forever.
+const AXIOS_REQUEST_TIMEOUT_MS = 20000;
 
+// VITE_API_URL (pos-web/.env, baked in at `npm run build` time) comes
+// first when set - that's how a till gets pointed at a centrally-hosted
+// backend (see backend/README-deploy.md) instead of the one it used to
+// run in-process (see main.js's startBackendServer, now skipped when this
+// is set). LOCAL_API_BASE stays as a fallback candidate either way, so a
+// shop that never sets VITE_API_URL keeps working exactly as before.
 const DEFAULT_CLOUD_API_BASES = [
-  LOCAL_API_BASE,
   import.meta.env.VITE_API_URL,
+  LOCAL_API_BASE,
 ].filter((value): value is string => Boolean(value));
 
 function unique(values: string[]) {
@@ -19,10 +36,6 @@ function unique(values: string[]) {
 
 function isNonEmptyString(value: string | undefined): value is string {
   return Boolean(value);
-}
-
-function isLocalHostname(hostname: string) {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 export function isDesktopApp() {
@@ -45,8 +58,8 @@ function getRuntimeCloudApiBaseCandidates() {
   }
 
   const browserCandidates = [
-    LOCAL_API_BASE,
     import.meta.env.VITE_API_URL,
+    LOCAL_API_BASE,
   ];
 
   return unique(browserCandidates.filter(isNonEmptyString));
@@ -64,7 +77,7 @@ export function getStoredApiBaseUrl() {
   return getRuntimeCloudApiBaseCandidates()[0];
 }
 
-export function setStoredApiBaseUrl(baseUrl: string) {
+export function setStoredApiBaseUrl(_baseUrl: string) {
   // Disabled: we strictly use the local backend now.
   return;
 }
@@ -77,7 +90,7 @@ export function getStoredCloudApiBaseUrl() {
   return getRuntimeCloudApiBaseCandidates()[0];
 }
 
-export function setStoredCloudApiBaseUrl(baseUrl: string) {
+export function setStoredCloudApiBaseUrl(_baseUrl: string) {
   // Disabled: we strictly use the local backend now.
   return;
 }
@@ -167,8 +180,19 @@ api.interceptors.response.use(
     // Route the user to the License Expired screen instead of leaving them
     // on a broken dashboard full of failed requests.
     if (typeof window !== "undefined" && error?.response?.status === 402 && !isLoginRequest) {
-      if (window.location.pathname !== "/license-expired") {
-        window.location.href = "/license-expired";
+      // This app is HashRouter-based (see src/main.tsx) so the current
+      // route lives in window.location.hash ("#/dashboard"), never in
+      // window.location.pathname - that's always the loaded HTML file's
+      // own path (e.g. "/dist/index.html", or under Electron's packaged
+      // file:// protocol, the drive-root-relative file path). Comparing
+      // pathname against a route name here was always false, and setting
+      // window.location.href to a bare route path ("/license-expired")
+      // made the browser/Electron try to load that as an actual file -
+      // exactly the "Not allowed to load local resource: file:///C:/..."
+      // error seen after packaging. Hash assignment is the fix: it's a
+      // same-document navigation that HashRouter already listens for.
+      if (!window.location.hash.startsWith("#/license-expired")) {
+        window.location.hash = "/license-expired";
       }
       return Promise.reject(error);
     }
@@ -182,7 +206,7 @@ api.interceptors.response.use(
       originalConfig &&
       !(originalConfig as { _retriedAfterRefresh?: boolean })._retriedAfterRefresh
     ) {
-      const refreshed = await tryRefreshAccessToken();
+      const { refreshed, invalidSession } = await tryRefreshAccessToken();
       if (refreshed) {
         try {
           return await api.request({
@@ -194,9 +218,24 @@ api.interceptors.response.use(
         }
       }
 
-      clearAuthSession();
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
+      // Only a genuine "no, this refresh token is invalid/expired" answer
+      // FROM THE SERVER should force a re-login - see tryRefreshAccessToken's
+      // own comment. A shop that's mid-shift on a flaky/unreachable
+      // self-hosted connection would otherwise get bounced to the login
+      // screen and have its work interrupted every time the refresh call
+      // itself simply couldn't get through, even though the session the
+      // cashier is actually using is still perfectly valid and the
+      // till's offline order queue (see local-hub-api.ts/
+      // offline-order-helpers.ts) is specifically built to keep the shop
+      // working through exactly this kind of connectivity gap. Login is a
+      // one-time cost at the start of a shift; after that, only a real
+      // "log back in" answer from the server should ever ask for it again.
+      if (invalidSession) {
+        clearAuthSession();
+        // Same HashRouter fix as the 402 branch above - hash, not pathname/href.
+        if (!window.location.hash.startsWith("#/login")) {
+          window.location.hash = "/login";
+        }
       }
     }
 
@@ -208,11 +247,27 @@ api.interceptors.response.use(
 // backend/controllers/authController.js `refresh`). A single in-flight
 // promise is shared so concurrent 401s from several parallel requests
 // don't each fire their own refresh call.
-let refreshPromise: Promise<boolean> | null = null;
+//
+// Returns `invalidSession: true` only when the SERVER actually answered
+// with a real "no" (401/403 on the refresh call itself) - that's the only
+// case that means this session's refresh token is genuinely dead and a
+// fresh login is actually required. Every other failure (no response at
+// all: timeout, DNS failure, the self-hosted backend being briefly
+// unreachable) means the refresh attempt simply couldn't be completed
+// right now, which says nothing about whether the session itself is still
+// good - treating that the same as "invalid" was the bug: it force-logged
+// the cashier out and threw up the login screen on ordinary network
+// hiccups, interrupting a shift that the app's own offline order queue was
+// specifically built to keep running through. See this function's caller
+// above for where that distinction actually gets acted on.
+let refreshPromise: Promise<{ refreshed: boolean; invalidSession: boolean }> | null = null;
 
-async function tryRefreshAccessToken(): Promise<boolean> {
+async function tryRefreshAccessToken(): Promise<{ refreshed: boolean; invalidSession: boolean }> {
   const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
+  // Nothing to even try refreshing with - this is the one case with no
+  // server round trip involved at all, so it's unambiguous: there's no
+  // session to keep alive.
+  if (!refreshToken) return { refreshed: false, invalidSession: true };
 
   if (!refreshPromise) {
     refreshPromise = axios
@@ -224,9 +279,13 @@ async function tryRefreshAccessToken(): Promise<boolean> {
       .then((response) => {
         const data = response.data as { accessToken: string; refreshToken?: string };
         updateTokens(data.accessToken, data.refreshToken);
-        return true;
+        return { refreshed: true, invalidSession: false };
       })
-      .catch(() => false)
+      .catch((err) => {
+        const status = err instanceof AxiosError ? err.response?.status : undefined;
+        const invalidSession = status === 401 || status === 403;
+        return { refreshed: false, invalidSession };
+      })
       .finally(() => {
         refreshPromise = null;
       });

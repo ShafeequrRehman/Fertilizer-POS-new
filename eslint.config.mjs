@@ -22,5 +22,12 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // A leading underscore is the standard way to mark a parameter as
+      // intentionally unused (e.g. a deliberately-disabled function that
+      // still has to match its callers' call signature) without deleting
+      // it outright - off by default in the base recommended config.
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+    },
   },
 ]);

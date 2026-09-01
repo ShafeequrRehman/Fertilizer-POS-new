@@ -1,6 +1,7 @@
 const Permission = require("../models/Permission");
 const User = require("../models/User");
 const Customer = require("../models/Customer");
+const ShopSession = require("../models/ShopSession");
 const bcrypt = require("bcryptjs");
 const { PERMISSIONS } = require("./permissions");
 
@@ -39,6 +40,59 @@ async function dropLegacyCustomerPhoneIndex() {
   }
 }
 
+// openSession's find-then-create check was not atomic, so two concurrent
+// "Open Shop" requests (double-click, two tabs/devices) could each create
+// their own "open" ShopSession for the same shop before a database-level
+// safeguard existed. Each duplicate starts its own orderCounter at 0, and
+// since createOrder's counter lookup matches on shopId+status:"open" with
+// no way to prefer one over the other pre-fix, order numbers could jump
+// back down to #001 mid-shift instead of continuing - exactly the "already
+// on order #003, next order came back as #001" bug this fixes. A partial
+// unique index now makes this impossible going forward (see
+// models/ShopSession.js), but creating that index requires the data to
+// already satisfy it - so any duplicates already sitting in the database
+// must be merged away FIRST, before ShopSession.syncIndexes() runs.
+async function mergeDuplicateOpenShopSessions() {
+  try {
+    const openSessions = await ShopSession.find({ status: "open" }).sort({ openedAt: 1 });
+    const byShop = new Map();
+    for (const session of openSessions) {
+      const key = String(session.shopId);
+      if (!byShop.has(key)) byShop.set(key, []);
+      byShop.get(key).push(session);
+    }
+
+    for (const [shopId, sessions] of byShop.entries()) {
+      if (sessions.length <= 1) continue;
+
+      // Oldest stays open and canonical - it's the one whose openedAt the
+      // rest of the app (Dashboard/Record/Sales "today" windows, shift
+      // history) has been treating as the real shift start. Carry forward
+      // the HIGHEST orderCounter seen across all the duplicates, so
+      // whichever one actually issued the most recent order numbers isn't
+      // the one that gets discarded.
+      const [canonical, ...extras] = sessions;
+      const maxCounter = Math.max(...sessions.map((s) => Number(s.orderCounter || 0)));
+
+      if (canonical.orderCounter !== maxCounter) {
+        canonical.orderCounter = maxCounter;
+        await canonical.save();
+      }
+
+      for (const extra of extras) {
+        extra.status = "closed";
+        extra.closedAt = new Date();
+        extra.closedByName = extra.closedByName || "Auto-merged duplicate session";
+        await extra.save();
+      }
+
+      console.log(`[Seed] Shop ${shopId} had ${sessions.length} simultaneously-open sessions - merged into one (orderCounter=${maxCounter}), closed ${extras.length} duplicate(s).`);
+    }
+  } catch (error) {
+    console.error("[Seed] Failed to merge duplicate open shop sessions:", error.message);
+  }
+}
+
 // Runs on every backend startup. Responsibilities, all safe to repeat:
 //
 // 1. Keep the Permission catalog collection in sync with
@@ -52,6 +106,9 @@ async function dropLegacyCustomerPhoneIndex() {
 //    can never end up with zero working Super Admin accounts.
 // 3. Drop the legacy global-unique customers.phone index (see
 //    dropLegacyCustomerPhoneIndex above).
+// 4. Merge away any duplicate simultaneously-open shop sessions and put
+//    the new one-open-session-per-shop unique index in place (see
+//    mergeDuplicateOpenShopSessions above).
 module.exports = async function seedDefaults() {
   try {
     for (const permission of PERMISSIONS) {
@@ -76,6 +133,14 @@ module.exports = async function seedDefaults() {
     }
 
     await dropLegacyCustomerPhoneIndex();
+
+    // Must run in this order: merge duplicates away BEFORE syncIndexes()
+    // tries to create the new unique index, since MongoDB will refuse to
+    // build a unique index over data that currently violates it.
+    await mergeDuplicateOpenShopSessions();
+    await ShopSession.syncIndexes().catch((error) => {
+      console.error("[Seed] Failed to sync ShopSession indexes:", error.message);
+    });
   } catch (error) {
     console.error("[Seed] Failed to run startup seed:", error.message);
   }

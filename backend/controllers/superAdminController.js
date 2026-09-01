@@ -8,6 +8,12 @@ const Payment = require("../models/Payment");
 const Role = require("../models/Role");
 const SystemSettings = require("../models/SystemSettings");
 const { DEFAULT_ROLE_PRESETS } = require("../config/permissions");
+// requireLicenseValid caches its shop/license verdict for 30s per shop (see
+// that file's own comment) to keep it from adding two extra DB round trips
+// to nearly every request - every place below that changes a shop's status
+// or its license must drop that shop's cached entry immediately, or a
+// suspend/renew done here wouldn't actually take effect for up to 30s.
+const invalidateLicenseCache = require("../middleware/requireLicenseValid").invalidate;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -45,14 +51,15 @@ exports.listShops = async (req, res) => {
     const result = shops.map((shop) => {
       const license = licenseByShop.get(String(shop._id)) || null;
       const owner = ownerByShop.get(String(shop._id)) || null;
-      // Never send the hash itself to the client - only whether one has
-      // been set, so the Shops table can flag shops that still need a
-      // Cancel Order Key (staff can't cancel orders in the POS without
-      // one) without exposing anything secret.
-      const { cancelOrderKeyHash, ...shopWithoutKeyHash } = shop;
+      // Never send the hashes themselves to the client - only whether one
+      // has been set, so the Shops table can flag shops that still need a
+      // Cancel Order Key or a Page Visibility Key set up, without exposing
+      // anything secret.
+      const { cancelOrderKeyHash, pageVisibilityKeyHash, ...shopWithoutKeyHashes } = shop;
       return {
-        ...shopWithoutKeyHash,
+        ...shopWithoutKeyHashes,
         hasCancelOrderKey: Boolean(cancelOrderKeyHash),
+        hasPageVisibilityKey: Boolean(pageVisibilityKeyHash),
         license: license ? { ...license, isExpired: license.status === "suspended" || new Date(license.expiryDate).getTime() < Date.now() } : null,
         owner: owner ? safeUser(owner) : null,
       };
@@ -247,6 +254,7 @@ exports.deleteShop = async (req, res) => {
       License.deleteMany({ shopId: shop._id }),
       Shop.deleteOne({ _id: shop._id }),
     ]);
+    invalidateLicenseCache(shop._id);
 
     res.json({ message: "Shop and its accounts have been deleted. Business records (products, sales, etc.) were preserved." });
   } catch (error) {
@@ -266,6 +274,7 @@ exports.setShopStatus = async (req, res) => {
 
     shop.status = status;
     await shop.save();
+    invalidateLicenseCache(shop._id);
     res.json(shop);
   } catch (error) {
     res.status(500).json({ message: "Failed to update shop status", detail: error.message });
@@ -319,6 +328,31 @@ exports.resetCancelOrderKey = async (req, res) => {
   }
 };
 
+// PATCH /api/superadmin/shops/:id/page-visibility-key  body: { newKey }
+// Sets (or replaces) the shop's Page Visibility Key - the secret the Shop
+// Owner must enter, from their own Settings page, to change which sidebar
+// pages their dashboard shows (see shopOwnerController.exports.
+// updateEnabledPages). Only ever stored hashed; the plaintext is returned
+// once here so the Super Admin can hand it to the Shop Owner, then never
+// persisted or logged again.
+exports.resetPageVisibilityKey = async (req, res) => {
+  try {
+    const { newKey } = req.body;
+    if (!newKey || String(newKey).length < 4) {
+      return res.status(400).json({ message: "newKey must be at least 4 characters", reason: "validation_error" });
+    }
+    const shop = await Shop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ message: "Shop not found" });
+
+    shop.pageVisibilityKeyHash = await bcrypt.hash(String(newKey), 10);
+    await shop.save();
+
+    res.json({ message: "Page Visibility Key has been set", pageVisibilityKey: newKey });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to set Page Visibility Key", detail: error.message });
+  }
+};
+
 // POST /api/superadmin/shops/:id/license/extend  body: { months, note, planId? }
 // The only way a License's expiryDate ever moves forward. Also flips
 // status back to "active" (out of trial/expired/suspended), and appends a
@@ -354,6 +388,7 @@ exports.extendLicense = async (req, res) => {
     });
 
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to extend license", detail: error.message });
@@ -392,6 +427,7 @@ exports.setLicenseExpiry = async (req, res) => {
     });
 
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to update license expiry", detail: error.message });
@@ -411,6 +447,7 @@ exports.setLicenseStatus = async (req, res) => {
 
     license.status = status;
     await license.save();
+    invalidateLicenseCache(license.shopId);
     res.json(license);
   } catch (error) {
     res.status(500).json({ message: "Failed to update license status", detail: error.message });

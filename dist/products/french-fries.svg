@@ -1,0 +1,14 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FEF3EB"/>
+  <!-- Fries -->
+  <rect x="135" y="60" width="12" height="80" rx="6" fill="#F6D978"/>
+  <rect x="155" y="40" width="12" height="100" rx="6" fill="#F6D978"/>
+  <rect x="175" y="50" width="12" height="90" rx="6" fill="#F6D978"/>
+  <rect x="115" y="80" width="12" height="60" rx="6" fill="#F6D978"/>
+  <rect x="195" y="70" width="12" height="70" rx="6" fill="#F6D978"/>
+  <rect x="145" y="70" width="12" height="70" rx="6" fill="#F1C232"/>
+  <rect x="165" y="60" width="12" height="80" rx="6" fill="#F1C232"/>
+  <!-- Box -->
+  <path d="M100 130H220L190 220H130L100 130Z" fill="#E03C3C"/>
+  <path d="M100 130C120 150 200 150 220 130V150C200 170 120 170 100 150V130Z" fill="#B32424"/>
+</svg>

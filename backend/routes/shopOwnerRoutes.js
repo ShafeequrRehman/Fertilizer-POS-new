@@ -18,6 +18,12 @@ router.patch("/employees/:id", ctrl.updateEmployee);
 router.delete("/employees/:id", ctrl.deleteEmployee);
 router.patch("/employees/:id/reset-password", ctrl.resetEmployeePassword);
 
+// Payroll
+router.get("/payroll", ctrl.listPayroll);
+router.get("/payroll/payments", ctrl.listPayments);
+router.post("/payroll/payments", ctrl.recordPayment);
+router.delete("/payroll/payments/:id", ctrl.deletePayment);
+
 // Roles
 router.get("/roles", ctrl.listRoles);
 router.post("/roles", ctrl.createRole);
@@ -30,5 +36,14 @@ router.get("/permissions", ctrl.listPermissionCatalog);
 // Own shop profile
 router.get("/profile", ctrl.getOwnShop);
 router.patch("/profile", ctrl.updateOwnShop);
+
+// Sidebar page visibility (gated by the Page Visibility Key the Super
+// Admin assigned - see shopOwnerController.exports.updateEnabledPages)
+router.patch("/pages", ctrl.updateEnabledPages);
+
+// Customer QR ordering: rider WhatsApp number(s) + JazzCash/EasyPaisa
+// merchant credentials (see SettingsPage.tsx's Customer Ordering section).
+router.get("/ordering-settings", ctrl.getOrderingSettings);
+router.patch("/ordering-settings", ctrl.updateOrderingSettings);
 
 module.exports = router;

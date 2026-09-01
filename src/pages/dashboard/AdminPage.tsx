@@ -43,7 +43,14 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
-    if (getAuthRole() !== "admin") {
+    // Role is "superadmin" | "shopowner" | "employee" (see lib/auth.ts) -
+    // "admin" was never a valid value, so this check was permanently true
+    // for every possible role and silently redirected everyone away from
+    // this page regardless of who they were. Not currently reachable from
+    // any nav link in the app, but fixed to the closest correct intent
+    // (platform-level user management, so superadmin-only) rather than
+    // left comparing against a role that can never match.
+    if (getAuthRole() !== "superadmin") {
       navigate("/dashboard", { replace: true });
     } else {
       fetchUsers();

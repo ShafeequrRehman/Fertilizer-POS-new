@@ -1,0 +1,11 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#EBF4FF"/>
+  <!-- Cup -->
+  <path d="M120 80L130 200H190L200 80H120Z" fill="#DC4646"/>
+  <!-- Lid -->
+  <rect x="110" y="70" width="100" height="15" rx="5" fill="#EAEAEA"/>
+  <rect x="115" y="65" width="90" height="5" rx="2" fill="#D3D3D3"/>
+  <!-- Straw -->
+  <path d="M160 65L160 30L180 20" stroke="#EAEAEA" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M160 65L160 30L180 20" stroke="#DC4646" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

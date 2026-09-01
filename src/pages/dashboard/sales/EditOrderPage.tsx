@@ -1,27 +1,260 @@
 import { Link, useParams } from 'react-router-dom';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
-import { fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
-import { Product, SavedOrder } from '@/lib/pos-types';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerSearch, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
+import { Customer, Product, SavedOrder } from '@/lib/pos-types';
+import { getStoreSettings } from '@/lib/pos-settings';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { getPendingLocalOrders, getReferenceData } from '@/lib/local-hub-api';
+import { localOrderToSavedOrder, saveOrderEditOffline, computeKitchenIncreaseDelta, loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { reportPrintOutcome, type ToastLike } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
+import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { useToast } from '@/lib/toast';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
+type ElectronWindow = Window & typeof globalThis & {
+  require?: (moduleName: 'electron') => {
+    ipcRenderer: {
+      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    };
+  };
+};
+
+// Fires a "do not prepare / discard" kitchen ticket for items taken off
+// an order that's still otherwise active - same idea as
+// CancelOrderModal.tsx's cancel ticket, but scoped to just the removed
+// items (see main.js's "kitchen-remove" receipt type) instead of saying
+// the whole order is cancelled, since it isn't.
+function printKitchenRemoveTicket(order: SavedOrder, removedItems: DraftItem[], toast: ToastLike, categoryLookup: Map<string, string>) {
+  if (removedItems.length === 0) return;
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter || settings.counterPrinter) {
+      void dispatchKitchenPrints(
+        removedItems,
+        categoryLookup,
+        settings,
+        (groupItems, printerName, label) =>
+          reportPrintOutcome(
+            ipcRenderer.invoke('print-kitchen-remove-receipt-data', { ...order, items: groupItems }, printerName, printLogo, settings),
+            `${label} removal`,
+            toast,
+          ),
+      );
+    } else {
+      console.warn('No kitchen printer configured in settings - removed-items ticket not printed.');
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen remove-items ticket):', err);
+  }
+}
+
+// Fires a normal kitchen ticket for just the items the kitchen needs to
+// prepare MORE of - a brand new item added via Quick Add, or an existing
+// line's quantity bumped up with the +/- stepper. `items` here is already
+// the exact claimed delta from claimKitchenUpdatePrint (see saveOrder
+// below), never the whole order's item list, so the kitchen is never told
+// to re-make something they already started or finished.
+function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items'], toast: ToastLike, categoryLookup: Map<string, string>) {
+  if (items.length === 0) return;
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter || settings.counterPrinter) {
+      void dispatchKitchenPrints(
+        items,
+        categoryLookup,
+        settings,
+        (groupItems, printerName, label) =>
+          reportPrintOutcome(
+            ipcRenderer.invoke('print-kitchen-receipt-data', { ...order, items: groupItems }, printerName, printLogo, settings),
+            label,
+            toast,
+          ),
+      );
+    } else {
+      console.warn('No kitchen printer configured in settings - kitchen update ticket not printed.');
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen update ticket):', err);
+  }
+}
+
 export default function EditOrderPage() {
+  const { toast } = useToast();
   const params = useParams<{ id: string }>();
   const [order, setOrder] = useState<SavedOrder | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [items, setItems] = useState<DraftItem[]>([]);
+  // Items the user clicked "Remove" on since the order was loaded (or
+  // since the last save) - what actually needs printing for the kitchen
+  // to stop, as opposed to diffing the whole list at save time, which
+  // would also misfire on ordinary name/price/qty edits.
+  const [removedItems, setRemovedItems] = useState<DraftItem[]>([]);
   const [category, setCategory] = useState('All');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  // Only set when this page couldn't load an order at all because it's
+  // offline AND the order isn't in this till's local cache either (see the
+  // load effect below) - genuinely rare (older than the 14-day cache
+  // window, or this till has never synced since the order was placed) -
+  // distinct from "Order not found" so the person sees an actionable
+  // reason instead of thinking the order itself is gone.
+  const [offlineUnavailable, setOfflineUnavailable] = useState(false);
+  const { isOnline } = useNetworkStatus();
+
+  // Customer autocomplete for the Order Meta panel below - mirrors
+  // POSPage.tsx's own search-as-you-type dropdown (same offline-cache
+  // fallback via getReferenceData, same online path via
+  // fetchCustomerSearch) so editing a name/phone here surfaces existing
+  // saved customers instead of letting a cashier accidentally create a
+  // near-duplicate customer record by retyping one that already exists.
+  const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
+  const [isSearchingCustomers, setIsSearchingCustomers] = useState(false);
+  const [showCustomerSuggestions, setShowCustomerSuggestions] = useState(false);
+  const customerSuggestionRef = useRef<HTMLDivElement>(null);
+  const customerNameInputRef = useRef<HTMLInputElement>(null);
+  const customerPhoneInputRef = useRef<HTMLInputElement>(null);
+  const customerSearchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        customerSuggestionRef.current &&
+        !customerSuggestionRef.current.contains(event.target as Node) &&
+        !customerNameInputRef.current?.contains(event.target as Node) &&
+        !customerPhoneInputRef.current?.contains(event.target as Node)
+      ) {
+        setShowCustomerSuggestions(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  async function searchCustomers(query: string, searchBy: 'name' | 'phone') {
+    if (!query.trim() || query.trim().length < 2) {
+      setCustomerSuggestions([]);
+      setShowCustomerSuggestions(false);
+      return;
+    }
+    setIsSearchingCustomers(true);
+    try {
+      let result: Customer[];
+      if (isDesktopApp() && !isOnline) {
+        // Offline: filter the Local Hub's cached customer list, same
+        // approach as POSPage.tsx's own offline branch.
+        const snapshot = await getReferenceData();
+        const cached = (snapshot.customers || []) as Customer[];
+        const q = query.trim().toLowerCase();
+        result = cached
+          .filter((customer) => {
+            const matchesName = searchBy === 'name' && (customer.name || '').toLowerCase().includes(q);
+            const matchesPhone = searchBy === 'phone' && (customer.phone || '').toLowerCase().includes(q);
+            return matchesName || matchesPhone;
+          })
+          .slice(0, 20);
+      } else {
+        result = (await fetchCustomerSearch(query, searchBy)) || [];
+      }
+      setCustomerSuggestions(result);
+      setShowCustomerSuggestions(result.length > 0);
+    } catch {
+      setCustomerSuggestions([]);
+      setShowCustomerSuggestions(false);
+    } finally {
+      setIsSearchingCustomers(false);
+    }
+  }
+
+  function debouncedCustomerSearch(query: string, searchBy: 'name' | 'phone') {
+    if (customerSearchTimeoutRef.current) clearTimeout(customerSearchTimeoutRef.current);
+    customerSearchTimeoutRef.current = setTimeout(() => void searchCustomers(query, searchBy), 250);
+  }
+
+  function handleSelectCustomerSuggestion(customer: Customer) {
+    setOrder((previous) => previous ? {
+      ...previous,
+      customer: { ...previous.customer, name: customer.name, phone: customer.phone, address: customer.address },
+      address: customer.address,
+    } : previous);
+    setCustomerSuggestions([]);
+    setShowCustomerSuggestions(false);
+  }
 
   useEffect(() => {
     async function load() {
+      if (!params.id) return;
+      setOfflineUnavailable(false);
       try {
+        if (isDesktopApp() && !isOnline) {
+          // Offline: a still-local (not yet synced) order is reconstructed
+          // straight from the Local Hub's own create queue. An
+          // already-synced order is reconstructed from loadOrdersFromLocalHub
+          // instead - the same cached-cloud-snapshot-plus-pending-edits merge
+          // SalesPage.tsx's order list already relies on (see
+          // offline-order-helpers.ts) - so editing an order that existed
+          // before this till went offline works exactly the same as editing
+          // one placed just now, no internet required either way.
+          if (params.id?.startsWith('local-')) {
+            const localId = params.id.slice('local-'.length);
+            const pending = await getPendingLocalOrders();
+            const record = pending.find((entry) => entry.id === localId);
+            if (record) {
+              const orderData = localOrderToSavedOrder(record);
+              setOrder(orderData);
+              setItems(orderData.items);
+              setRemovedItems([]);
+            } else {
+              setOrder(null);
+            }
+          } else {
+            const merged = await loadOrdersFromLocalHub();
+            const found = merged.find((entry) => entry.id === params.id);
+            if (found) {
+              setOrder(found);
+              setItems(found.items);
+              setRemovedItems([]);
+            } else {
+              // Genuinely never cached - older than the 14-day cache
+              // window, or this till hasn't synced since the order was
+              // placed. The one case still not editable offline.
+              setOrder(null);
+              setOfflineUnavailable(true);
+            }
+          }
+          try {
+            const snapshot = await getReferenceData();
+            setProducts((snapshot.products || []) as Product[]);
+          } catch {
+            setProducts([]);
+          }
+          return;
+        }
+
         const [orderData, productData] = await Promise.all([fetchOrder(params.id), fetchProducts()]);
         setOrder(orderData);
         setItems(orderData.items);
+        setRemovedItems([]);
         setProducts(productData.products);
       } finally {
         setLoading(false);
@@ -29,7 +262,7 @@ export default function EditOrderPage() {
     }
 
     void load();
-  }, [params.id]);
+  }, [params.id, isOnline]);
 
   async function saveOrder() {
     if (!order) return;
@@ -41,8 +274,8 @@ export default function EditOrderPage() {
       ? 0
       : Math.max(subtotal - nextPaidAmount, 0);
 
-    const updated = await updateOrder(order.id, {
-      action: 'replaceItems',
+    const patch = {
+      action: 'replaceItems' as const,
       items,
       status: order.status,
       note: order.note,
@@ -54,7 +287,65 @@ export default function EditOrderPage() {
       paidAmount: nextPaidAmount,
       remainingAmount: nextRemainingAmount,
       discount: order.discount ?? null,
-    });
+    };
+
+    if (isDesktopApp()) {
+      // Always local-first, online or not - queues to the Local Hub and
+      // returns instantly instead of waiting on a live cloud round trip,
+      // same reasoning as SalesPage.tsx's saveUpdate. No kitchen-print
+      // CLAIM here - that coordinates printing ACROSS devices via the
+      // cloud; the tickets themselves still print immediately below
+      // (printKitchenRemoveTicket/printKitchenUpdateTicket are already
+      // self-contained - no-op if no printer's configured), since nothing
+      // else could possibly be racing to print this same delta while it's
+      // still only sitting on this till. Whichever order this targets -
+      // still-local or already-synced (see the load effect above) - gets
+      // replayed for real moments later, once triggerBackgroundSync's
+      // immediate sync attempt lands or, if actually offline, once back
+      // online.
+      const kitchenDelta = computeKitchenIncreaseDelta(order.items, items);
+      const categoryLookup = buildCategoryLookup(products);
+      try {
+        const updated = await saveOrderEditOffline(order, patch, kitchenDelta.length > 0);
+        printKitchenRemoveTicket(updated, removedItems, toast, categoryLookup);
+        if (kitchenDelta.length > 0) {
+          printKitchenUpdateTicket(updated, kitchenDelta, toast, categoryLookup);
+        }
+        setRemovedItems([]);
+        triggerBackgroundSync();
+        setStatus(`Order ${updated.id} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
+        setOrder(updated);
+      } catch (err) {
+        setStatus(err instanceof Error ? err.message : 'Could not save this change.');
+      }
+      return;
+    }
+
+    // Only ever reached from a plain browser tab now (no Local Hub to
+    // queue into).
+    const updated = await updateOrder(order.id, patch);
+    const categoryLookup = buildCategoryLookup(products);
+    printKitchenRemoveTicket(updated, removedItems, toast, categoryLookup);
+    setRemovedItems([]);
+
+    // Claim-before-print, same invariant as everywhere else a kitchen
+    // ticket auto-prints - if a quantity went up or a new item was added
+    // via Quick Add just now, this claims that delta before this same edit
+    // could otherwise be double-printed by DashboardShell's
+    // KitchenUpdateWatcher a few seconds later. A 409 here just means
+    // there was nothing to claim (e.g. only quantities went DOWN, or items
+    // were only removed) - not an error.
+    try {
+      const claimed = await claimKitchenUpdatePrint(updated.id);
+      if (claimed && claimed.items.length > 0) {
+        printKitchenUpdateTicket(claimed.order, claimed.items, toast, categoryLookup);
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 409) {
+        console.error('Kitchen update claim failed:', err);
+      }
+    }
+
     setStatus(`Order ${updated.id} saved successfully.`);
     setOrder(updated);
   }
@@ -69,7 +360,13 @@ export default function EditOrderPage() {
   }
 
   if (!order) {
-    return <div className="rounded-[32px] bg-white p-8 text-sm text-rose-500 shadow-sm">Order not found.</div>;
+    return (
+      <div className="rounded-[32px] bg-white p-8 text-sm text-rose-500 shadow-sm">
+        {offlineUnavailable
+          ? "This order isn't in this till's local cache yet (it's either older than the 14-day offline cache window, or this till hasn't synced since it was placed). Use the order card's Add Items / Complete Payment instead, or try again once back online."
+          : 'Order not found.'}
+      </div>
+    );
   }
 
   return (
@@ -78,14 +375,14 @@ export default function EditOrderPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <Link href="/dashboard/sales" className="text-sm font-bold text-gray-500">
+          <Link to="/dashboard/sales" className="text-sm font-bold text-gray-500">
             <ArrowLeft size={16} className="mr-2 inline" />
             Back to Sales
           </Link>
           <h1 className="mt-2 text-3xl font-black text-gray-900">Edit Order #{order.id.slice(-4)}</h1>
         </div>
         <div className="flex gap-2">
-          <Link href={`/dashboard/sales/print/${order.id}`} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">Print Center</Link>
+          <Link to={`/dashboard/sales/print/${order.id}`} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">Print Center</Link>
           <button type="button" onClick={() => void saveOrder()} className="rounded-2xl bg-[#E2F33C] px-4 py-3 text-sm font-black text-black">
             <Save size={16} className="mr-2 inline" />
             Save Changes
@@ -93,20 +390,46 @@ export default function EditOrderPage() {
         </div>
       </div>
 
-      {/* Order meta / quick-add panel always sits to the right of the item
-          list, at every window size, matching the POS and Sales pages. */}
-      <div className="grid grid-cols-[minmax(0,1fr)_260px] gap-3 sm:grid-cols-[minmax(0,1fr)_320px] sm:gap-4 xl:grid-cols-[minmax(0,1.2fr)_380px] xl:gap-6">
+      {/* Order meta / quick-add panel sits to the right of the item list
+          from tablet width (sm) up, matching the POS and Sales pages;
+          stacks to one column below that for phone screens. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_320px] sm:gap-4 xl:grid-cols-[minmax(0,1.2fr)_380px] xl:gap-6">
         <section className="min-w-0 rounded-[32px] bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Order Items</h2>
           <div className="space-y-3">
             {items.map((item, index) => (
-              <div key={`${item.name}-${index}`} className="rounded-[24px] bg-[#F8F9FB] p-4">
-                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px_90px_90px_50px]">
+              // Keyed by index, not name - the name field is editable, and
+              // keying by its current value meant every keystroke there
+              // changed the key, which made React remount the whole row
+              // (losing input focus) instead of just updating it in place.
+              <div key={index} className="rounded-[24px] bg-[#F8F9FB] p-4">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px_90px_140px_50px]">
                   <input value={item.name} onChange={(event) => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, name: event.target.value } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={item.variation} onChange={(event) => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, variation: event.target.value } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
                   <input value={String(item.price)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, price: Number(event.target.value || 0) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-                  <input value={String(item.quantity)} onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Number(event.target.value || 1) } : entry))} className="rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-                  <button type="button" onClick={() => setItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index))} className="rounded-2xl bg-rose-50 text-rose-600">
+                  <div className="flex items-center justify-between gap-1 rounded-2xl border border-gray-200 bg-white px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Math.max(1, (Number(entry.quantity) || 1) - 1) } : entry))}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F8F9FB] text-lg font-black text-gray-700"
+                    >
+                      −
+                    </button>
+                    <input
+                      value={String(item.quantity)}
+                      onChange={(event) => /^\d*$/.test(event.target.value) && setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: event.target.value === '' ? ('' as unknown as number) : Number(event.target.value) } : entry))}
+                      onBlur={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: Math.max(1, Number(entry.quantity) || 1) } : entry))}
+                      className="w-10 border-0 bg-transparent text-center text-sm font-black text-gray-900 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setItems((previous) => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, quantity: (Number(entry.quantity) || 0) + 1 } : entry))}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F8F9FB] text-lg font-black text-gray-700"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <button type="button" onClick={() => { setRemovedItems((previous) => [...previous, items[index]]); setItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index)); }} className="rounded-2xl bg-rose-50 text-rose-600">
                     <Trash2 size={16} className="mx-auto" />
                   </button>
                 </div>
@@ -119,8 +442,51 @@ export default function EditOrderPage() {
           <div className="rounded-[32px] bg-white p-6 shadow-sm">
             <h2 className="mb-4 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Order Meta</h2>
             <div className="space-y-3">
-              <input value={order.customer.name} onChange={(event) => setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, name: event.target.value } } : previous)} placeholder="Customer name" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
-              <input value={order.customer.phone} onChange={(event) => setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, phone: event.target.value } } : previous)} placeholder="Phone" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
+              <div className="relative">
+                <input
+                  ref={customerNameInputRef}
+                  value={order.customer.name}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, name: value } } : previous);
+                    if (value.trim().length >= 2) debouncedCustomerSearch(value.trim(), 'name');
+                    else { setCustomerSuggestions([]); setShowCustomerSuggestions(false); }
+                  }}
+                  onFocus={() => customerSuggestions.length > 0 && setShowCustomerSuggestions(true)}
+                  placeholder="Customer name"
+                  className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
+                />
+                <input
+                  ref={customerPhoneInputRef}
+                  value={order.customer.phone}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setOrder((previous) => previous ? { ...previous, customer: { ...previous.customer, phone: value } } : previous);
+                    if (value.trim().length >= 2) debouncedCustomerSearch(value.trim(), 'phone');
+                    else { setCustomerSuggestions([]); setShowCustomerSuggestions(false); }
+                  }}
+                  onFocus={() => customerSuggestions.length > 0 && setShowCustomerSuggestions(true)}
+                  placeholder="Phone"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none"
+                />
+                {showCustomerSuggestions && customerSuggestions.length > 0 ? (
+                  <div ref={customerSuggestionRef} className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+                    {isSearchingCustomers ? <div className="p-3 text-xs text-gray-500">Searching customers...</div> : null}
+                    {!isSearchingCustomers ? customerSuggestions.map((customer) => (
+                      <button key={customer.id} type="button" onClick={() => handleSelectCustomerSuggestion(customer)} className="block w-full border-b border-gray-100 px-3 py-2 text-left transition hover:bg-[#F8F9FB]">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-bold text-gray-900">{customer.name}</p>
+                            <p className="text-[11px] text-gray-500">{customer.phone}</p>
+                            <p className="text-[10px] text-gray-400">{customer.address}</p>
+                          </div>
+                          {customer.previousDues > 0 ? <span className="rounded-full bg-rose-50 px-2.5 py-1 text-[10px] font-bold text-rose-600">Due PKR {customer.previousDues}</span> : null}
+                        </div>
+                      </button>
+                    )) : null}
+                  </div>
+                ) : null}
+              </div>
               <input value={order.address} onChange={(event) => setOrder((previous) => previous ? { ...previous, address: event.target.value, customer: { ...previous.customer, address: event.target.value } } : previous)} placeholder="Address" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
               <input value={order.waiter} onChange={(event) => setOrder((previous) => previous ? { ...previous, waiter: event.target.value } : previous)} placeholder="Waiter" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />
               <input value={order.table} onChange={(event) => setOrder((previous) => previous ? { ...previous, table: event.target.value } : previous)} placeholder="Table" className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none" />

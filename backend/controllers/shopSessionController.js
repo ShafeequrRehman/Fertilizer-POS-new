@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const Order = require("../models/Order");
 const ShopSession = require("../models/ShopSession");
+const Shop = require("../models/Shop");
 const { shopScope } = require("../middleware/attachShopScope");
 
 // Orders that shouldn't be silently swept into a closed shift without the
@@ -50,10 +51,19 @@ function summarizeOrders(orders) {
 exports.getCurrent = async (req, res) => {
   try {
     const { shopId } = shopScope(req);
-    const session = await ShopSession.findOne({ shopId, status: "open" }).sort({ openedAt: -1 });
+    const session = await ShopSession.findOne({ shopId, status: "open" }).sort({ openedAt: -1 }).lean();
+
+    // Tr# (see models/Order.js's shopSequenceNumber) - the shop's
+    // permanent, never-resetting order count, unlike session.orderCounter
+    // below which resets every shift. Read regardless of whether the shop
+    // is currently open, same as orderCounter, so the till's Local Hub can
+    // reconcile its own reserved numbers (see local-hub-api.ts's
+    // syncLifetimeCounter) even right after a fresh shop open.
+    const shop = await Shop.findById(shopId).select("orderSequenceCounter").lean();
+    const shopSequenceCounter = shop?.orderSequenceCounter ?? 0;
 
     if (!session) {
-      return res.json({ isOpen: false, session: null });
+      return res.json({ isOpen: false, session: null, shopSequenceCounter });
     }
 
     // Live counts so the header badge / POS lock screen can show progress
@@ -67,7 +77,8 @@ exports.getCurrent = async (req, res) => {
 
     res.json({
       isOpen: true,
-      session: { ...session.toObject(), id: String(session._id), liveSummary },
+      session: { ...session, id: String(session._id), liveSummary },
+      shopSequenceCounter,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -79,7 +90,7 @@ exports.openSession = async (req, res) => {
   try {
     const { shopId } = shopScope(req);
 
-    const existing = await ShopSession.findOne({ shopId, status: "open" });
+    const existing = await ShopSession.findOne({ shopId, status: "open" }).lean();
     if (existing) {
       return res.status(409).json({ error: "The shop is already open." });
     }
@@ -87,13 +98,28 @@ exports.openSession = async (req, res) => {
     const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
     const openedByName = user?.name || user?.username || "";
 
-    const session = await ShopSession.create({
-      shopId,
-      status: "open",
-      openedAt: new Date(),
-      openedBy: req.user?.id ? String(req.user.id) : "",
-      openedByName,
-    });
+    let session;
+    try {
+      session = await ShopSession.create({
+        shopId,
+        status: "open",
+        openedAt: new Date(),
+        openedBy: req.user?.id ? String(req.user.id) : "",
+        openedByName,
+      });
+    } catch (createError) {
+      // The findOne check above is a friendly fast-path, not the real
+      // guarantee - the partial unique index on ShopSession (shopId,
+      // status: "open") is what actually prevents two concurrent opens
+      // (double-click, two tabs/devices) from both succeeding. If that
+      // race happens, this is the same "already open" response the normal
+      // path gives, just reached via the database's own duplicate-key
+      // rejection instead of the earlier find.
+      if (createError?.code === 11000) {
+        return res.status(409).json({ error: "The shop is already open." });
+      }
+      throw createError;
+    }
 
     res.status(201).json({ ...session.toObject(), id: String(session._id) });
   } catch (error) {

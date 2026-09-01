@@ -4,6 +4,17 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
+// Per-shop WhatsApp/Baileys sessions.
+//
+// Previously this whole module was one set of module-level variables
+// (sock, qrBase64, socketReady, ...) - a single shared WhatsApp connection
+// for every shop on the backend, regardless of which shop was actually
+// asking (see whatsappRoutes.js's old comment about this). That meant
+// every shop saw the same QR code and sent messages from the same number.
+// Now every bit of that state lives inside a per-shop ShopWhatsAppSession,
+// keyed by shopId, with its own auth folder so each shop's login is
+// completely isolated from every other shop's - one shop logging out or
+// getting logged out never touches another shop's session.
 let cachedBaileys = null;
 async function getBaileys() {
   if (!cachedBaileys) {
@@ -13,26 +24,18 @@ async function getBaileys() {
       useMultiFileAuthState: baileys.useMultiFileAuthState,
       DisconnectReason: baileys.DisconnectReason,
       fetchLatestBaileysVersion: baileys.fetchLatestBaileysVersion,
-      Browsers: baileys.Browsers
+      Browsers: baileys.Browsers,
     };
   }
   return cachedBaileys;
 }
+
 const isPackaged = process.env.ELECTRON_IS_PACKAGED === "true";
 const basePath = isPackaged ? path.join(os.homedir(), ".pos-system") : path.resolve(__dirname, "../../");
-const AUTH_DIR = path.join(basePath, ".auth_whatsapp");
-
-if (!fs.existsSync(AUTH_DIR)) {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
-}
-
-let sock = null;
-let qrBase64 = null;
-let socketReady = false;
-let initializing = false;
-let serviceInstance = null;
-
-const messageQueue = [];
+// Every shop gets its own subfolder: .auth_whatsapp/<shopId>/ instead of
+// one shared .auth_whatsapp/ - this is the actual on-disk isolation that
+// makes "each shop scans their own WhatsApp" true.
+const AUTH_ROOT_DIR = path.join(basePath, ".auth_whatsapp");
 
 function normalizePhone(phone) {
   if (!phone) return null;
@@ -45,190 +48,207 @@ function normalizePhone(phone) {
   return null;
 }
 
-async function _sendNow(phone, message) {
-  if (!sock || !socketReady) throw new Error("socket-not-ready");
+// One instance of this class per shopId - all the state that used to be
+// module-level globals now lives on `this`, so two shops' sessions can
+// never leak into each other.
+class ShopWhatsAppSession {
+  constructor(shopId) {
+    this.shopId = shopId;
+    this.authDir = path.join(AUTH_ROOT_DIR, String(shopId));
+    if (!fs.existsSync(this.authDir)) {
+      fs.mkdirSync(this.authDir, { recursive: true });
+    }
 
-  const normalized = normalizePhone(phone);
-  if (!normalized) throw new Error("invalid-phone");
+    this.sock = null;
+    this.qrBase64 = null;
+    this.socketReady = false;
+    this.initializing = null; // Promise while connecting, so concurrent callers share one attempt
+    this.messageQueue = [];
+  }
 
-  return sock.sendMessage(`${normalized}@s.whatsapp.net`, { text: message });
-}
-
-async function _sendDocumentNow(phone, filePath, fileName) {
-  const normalized = normalizePhone(phone);
-  if (!normalized) throw new Error("invalid-phone");
-  if (!fs.existsSync(filePath)) throw new Error(`File does not exist: ${filePath}`);
-  if (!sock || !socketReady) throw new Error("socket-not-ready");
-
-  return sock.sendMessage(`${normalized}@s.whatsapp.net`, {
-    document: fs.readFileSync(filePath),
-    mimetype: "application/pdf",
-    fileName,
-  });
-}
-
-function sendMessage(phone, message, { queueIfNotReady = true } = {}) {
-  return new Promise(async (resolve, reject) => {
+  async _sendNow(phone, message) {
+    if (!this.sock || !this.socketReady) throw new Error("socket-not-ready");
     const normalized = normalizePhone(phone);
-    if (!normalized) return reject(new Error("invalid-phone"));
+    if (!normalized) throw new Error("invalid-phone");
+    return this.sock.sendMessage(`${normalized}@s.whatsapp.net`, { text: message });
+  }
 
-    if (!sock || !socketReady) {
-      if (queueIfNotReady) {
-        messageQueue.push({ type: "message", phone, message, resolve, reject });
+  // `fileBuffer` is real file bytes (a Buffer), never a filesystem path -
+  // the backend may be running on a completely different machine than
+  // whatever client generated the PDF (see backend/README-deploy.md), so
+  // a path from the client's disk means nothing here. Callers must read
+  // the file into memory and send the bytes (base64 over HTTP - see
+  // whatsappRoutes.js's /send-document route).
+  async _sendDocumentNow(phone, fileBuffer, fileName) {
+    const normalized = normalizePhone(phone);
+    if (!normalized) throw new Error("invalid-phone");
+    if (!this.sock || !this.socketReady) throw new Error("socket-not-ready");
+
+    return this.sock.sendMessage(`${normalized}@s.whatsapp.net`, {
+      document: fileBuffer,
+      mimetype: "application/pdf",
+      fileName,
+    });
+  }
+
+  sendMessage(phone, message, { queueIfNotReady = true } = {}) {
+    return new Promise((resolve, reject) => {
+      const normalized = normalizePhone(phone);
+      if (!normalized) return reject(new Error("invalid-phone"));
+
+      if (!this.sock || !this.socketReady) {
+        if (queueIfNotReady) {
+          this.messageQueue.push({ type: "message", phone, message, resolve, reject });
+          return;
+        }
+        return reject(new Error("socket-not-ready"));
+      }
+
+      this._sendNow(phone, message).then(() => resolve({ success: true })).catch(reject);
+    });
+  }
+
+  sendDocument(phone, fileBuffer, fileName) {
+    const normalized = normalizePhone(phone);
+    if (!normalized) return Promise.reject(new Error("invalid-phone"));
+
+    return new Promise((resolve, reject) => {
+      if (!this.sock || !this.socketReady) {
+        this.messageQueue.push({ type: "document", phone, fileBuffer, fileName, resolve, reject });
         return;
       }
-
-      return reject(new Error("socket-not-ready"));
-    }
-
-    try {
-      await _sendNow(phone, message);
-      resolve({ success: true });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-async function sendDocument(phone, filePath, fileName) {
-  const normalized = normalizePhone(phone);
-  if (!normalized) throw new Error("invalid-phone");
-  if (!fs.existsSync(filePath)) throw new Error(`File does not exist: ${filePath}`);
-
-  return new Promise(async (resolve, reject) => {
-    if (!sock || !socketReady) {
-      messageQueue.push({ type: "document", phone, filePath, fileName, resolve, reject });
-      return;
-    }
-
-    try {
-      await _sendDocumentNow(phone, filePath, fileName);
-      resolve({ success: true });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-async function initializeWhatsApp() {
-  if (initializing) {
-    return { getQR, getStatus, sendMessage, sendDocument };
+      this._sendDocumentNow(phone, fileBuffer, fileName).then(() => resolve({ success: true })).catch(reject);
+    });
   }
 
-  initializing = true;
+  async _flushQueue() {
+    if (!this.socketReady) return;
 
-  try {
-    const {
-      makeWASocket,
-      useMultiFileAuthState,
-      DisconnectReason,
-      fetchLatestBaileysVersion,
-      Browsers
-    } = await getBaileys();
+    while (this.messageQueue.length > 0) {
+      const job = this.messageQueue.shift();
+      if (!job) continue;
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
-
-    sock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({ level: "silent" }),
-      browser: Browsers.macOS("Pos-desktop"),
-      printQRInTerminal: false,
-    });
-
-    console.log("WhatsApp socket initialized");
-
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        qrBase64 = await QRCode.toDataURL(qr);
-        socketReady = false;
-        console.log("WhatsApp QR generated");
+      try {
+        if (job.type === "document") {
+          await this._sendDocumentNow(job.phone, job.fileBuffer, job.fileName);
+        } else {
+          await this._sendNow(job.phone, job.message);
+        }
+        job.resolve({ success: true });
+      } catch (error) {
+        job.reject(error);
       }
+    }
+  }
 
-      if (connection === "open") {
-        socketReady = true;
-        qrBase64 = null;
-        console.log("WhatsApp connected successfully");
-        await flushQueue();
-      }
+  async initialize() {
+    if (this.initializing) return this.initializing;
 
-      if (connection === "close") {
-        const { DisconnectReason } = await getBaileys();
-        const reasonCode =
-          lastDisconnect?.error?.output?.statusCode ||
-          lastDisconnect?.error?.message ||
-          "unknown";
+    this.initializing = (async () => {
+      const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = await getBaileys();
 
-        socketReady = false;
-        console.log("WhatsApp disconnected:", reasonCode);
+      const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+      const { version } = await fetchLatestBaileysVersion();
 
-        if (reasonCode === DisconnectReason.loggedOut) {
-          console.log("WhatsApp logged out. Deleting .auth_whatsapp to generate new QR.");
-          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-          fs.mkdirSync(AUTH_DIR, { recursive: true });
+      this.sock = makeWASocket({
+        version,
+        auth: state,
+        logger: pino({ level: "silent" }),
+        // Distinguishes shops in WhatsApp Linked Devices UI - was a fixed
+        // "Pos-desktop" name for every shop before, now includes the
+        // shopId so a shop owner can tell their session apart if they
+        // ever look at Linked Devices.
+        browser: Browsers.macOS(`POS-${this.shopId}`),
+        printQRInTerminal: false,
+      });
+
+      console.log(`[whatsapp:${this.shopId}] socket initialized`);
+
+      this.sock.ev.on("connection.update", async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          this.qrBase64 = await QRCode.toDataURL(qr);
+          this.socketReady = false;
+          console.log(`[whatsapp:${this.shopId}] QR generated`);
         }
 
-        setTimeout(() => {
-          serviceInstance = null;
-          initializeWhatsApp().catch((error) => {
-            console.error("WhatsApp re-initialization failed:", error);
-          });
-        }, 5000);
-      }
-    });
+        if (connection === "open") {
+          this.socketReady = true;
+          this.qrBase64 = null;
+          console.log(`[whatsapp:${this.shopId}] connected`);
+          await this._flushQueue();
+        }
 
-    sock.ev.on("creds.update", saveCreds);
+        if (connection === "close") {
+          const { DisconnectReason: DR } = await getBaileys();
+          const reasonCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message || "unknown";
 
-    return { getQR, getStatus, sendMessage, sendDocument };
-  } finally {
-    initializing = false;
-  }
-}
+          this.socketReady = false;
+          console.log(`[whatsapp:${this.shopId}] disconnected:`, reasonCode);
 
-function getQR() {
-  return qrBase64;
-}
+          if (reasonCode === DR.loggedOut) {
+            console.log(`[whatsapp:${this.shopId}] logged out - clearing this shop's session only, generating a fresh QR next time.`);
+            fs.rmSync(this.authDir, { recursive: true, force: true });
+            fs.mkdirSync(this.authDir, { recursive: true });
+          }
 
-function getStatus() {
-  return {
-    isConnected: socketReady,
-    socketReady,
-    hasQR: !!qrBase64,
-  };
-}
+          setTimeout(() => {
+            this.initializing = null;
+            this.initialize().catch((error) => {
+              console.error(`[whatsapp:${this.shopId}] re-initialization failed:`, error);
+            });
+          }, 5000);
+        }
+      });
 
-async function flushQueue() {
-  if (!socketReady) return;
+      this.sock.ev.on("creds.update", saveCreds);
 
-  while (messageQueue.length > 0) {
-    const job = messageQueue.shift();
-    if (!job) {
-      continue;
-    }
-
-    try {
-      if (job.type === "document") {
-        await _sendDocumentNow(job.phone, job.filePath, job.fileName);
-      } else {
-        await _sendNow(job.phone, job.message);
-      }
-      job.resolve({ success: true });
-    } catch (error) {
-      job.reject(error);
-    }
-  }
-}
-
-module.exports = async function createWhatsAppService() {
-  if (!serviceInstance) {
-    serviceInstance = initializeWhatsApp().catch((error) => {
-      serviceInstance = null;
+      return this;
+    })().catch((error) => {
+      this.initializing = null;
       throw error;
     });
+
+    return this.initializing;
   }
 
-  return serviceInstance;
-};
+  getQR() {
+    return this.qrBase64;
+  }
+
+  getStatus() {
+    return {
+      isConnected: this.socketReady,
+      socketReady: this.socketReady,
+      hasQR: !!this.qrBase64,
+    };
+  }
+}
+
+// shopId -> Promise<ShopWhatsAppSession>, so concurrent requests for the
+// same shop while it's still connecting share one in-flight attempt
+// instead of racing to create two sockets for the same shop.
+const sessionsByShop = new Map();
+
+function getWhatsAppServiceForShop(shopId) {
+  if (!shopId) {
+    return Promise.reject(new Error("shopId is required for a WhatsApp session"));
+  }
+
+  const key = String(shopId);
+  let sessionPromise = sessionsByShop.get(key);
+
+  if (!sessionPromise) {
+    const session = new ShopWhatsAppSession(key);
+    sessionPromise = session.initialize().catch((error) => {
+      sessionsByShop.delete(key);
+      throw error;
+    });
+    sessionsByShop.set(key, sessionPromise);
+  }
+
+  return sessionPromise;
+}
+
+module.exports = { getWhatsAppServiceForShop };

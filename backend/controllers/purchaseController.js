@@ -2,12 +2,14 @@ const Purchase = require("../models/Purchase");
 const { shopScope } = require("../middleware/attachShopScope");
 
 exports.getPurchases = async (req, res) => {
-  const purchases = await Purchase.find({ ...shopScope(req) }).sort({ purchaseDate: -1 }).populate("supplierId", "name phone");
+  // .lean() - read-only list (Purchase page), same reasoning as
+  // productController.getProducts.
+  const purchases = await Purchase.find({ ...shopScope(req) }).sort({ purchaseDate: -1 }).populate("supplierId", "name phone").lean();
   res.json(purchases);
 };
 
 exports.getPurchase = async (req, res) => {
-  const purchase = await Purchase.findOne({ _id: req.params.id, ...shopScope(req) }).populate("supplierId", "name phone");
+  const purchase = await Purchase.findOne({ _id: req.params.id, ...shopScope(req) }).populate("supplierId", "name phone").lean();
   if (!purchase) return res.status(404).json({ error: "Purchase not found" });
   res.json(purchase);
 };

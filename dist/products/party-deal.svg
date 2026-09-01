@@ -1,0 +1,17 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#FFF0F5"/>
+  <!-- Large Pizza -->
+  <circle cx="160" cy="120" r="80" fill="#F6D978"/>
+  <circle cx="160" cy="120" r="70" fill="#E49C42"/>
+  <path d="M80 120L240 120" stroke="#F6D978" stroke-width="2"/>
+  <path d="M160 40L160 200" stroke="#F6D978" stroke-width="2"/>
+  <path d="M103 63L217 177" stroke="#F6D978" stroke-width="2"/>
+  <path d="M217 63L103 177" stroke="#F6D978" stroke-width="2"/>
+  
+  <circle cx="130" cy="90" r="6" fill="#E05B5B"/>
+  <circle cx="190" cy="150" r="6" fill="#E05B5B"/>
+  <circle cx="180" cy="80" r="6" fill="#E05B5B"/>
+  <circle cx="140" cy="160" r="6" fill="#E05B5B"/>
+  <circle cx="110" cy="130" r="6" fill="#E05B5B"/>
+  <circle cx="210" cy="110" r="6" fill="#E05B5B"/>
+</svg>

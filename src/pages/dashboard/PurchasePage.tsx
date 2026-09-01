@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { 
-  Truck, ShoppingCart, PackagePlus, Clock, 
+  Truck, PackagePlus, Clock,
   ChevronRight, Search, Filter, AlertCircle,
   CheckCircle2, Box, ArrowRight
 } from 'lucide-react';

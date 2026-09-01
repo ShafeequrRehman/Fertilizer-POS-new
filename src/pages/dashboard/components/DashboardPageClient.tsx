@@ -8,20 +8,20 @@ import {
   Target, Users, CheckCircle2, Clock,
   RotateCcw, XCircle
 } from 'lucide-react';
-import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
+import { fetchOrdersSummary, fetchProducts, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
 import { Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
+import { isDesktopApp } from '@/lib/api';
+import { useNetworkStatus } from '@/lib/network-status';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 
 type EmployeeStat = { name: string; sales: number; count: number };
 type InventoryItem = { id: string | number; name: string; stock: number };
-type BusinessWindow = {
-  start: Date;
-  end: Date;
-  label: string;
-  /** True while the shift backing this window is still open (numbers update live). */
-  isOpen: boolean;
-  /** False when the shop has never been opened at all - nothing to count yet. */
-  hasSession: boolean;
-};
+// Extends the shared window (src/lib/shop-session.ts - the single source
+// of truth for the actual date-math, shared with Record/Sales) with the
+// display label this page renders in the header, which is presentation
+// detail specific to this page rather than something other pages need.
+type BusinessWindow = SessionBusinessWindow & { label: string };
 type ServiceStats = {
   totalRevenue: number;
   totalOrders: number;
@@ -34,19 +34,44 @@ type ServiceStats = {
 };
 
 export default function DashboardPageClient() {
-  const [orders, setOrders] = useState<SavedOrder[]>([]);
+  // SavedOrder from the Local Hub cache-first paint, or the narrower
+  // OrderSummary shape from the live cloud poll below - stats/chart code in
+  // this file only ever reads the fields both shapes have in common
+  // (status/total/createdAt/customer.phone/waiter), so either is fine here.
+  const [orders, setOrders] = useState<(SavedOrder | OrderSummary)[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [chartsReady, setChartsReady] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
+  const { isOnline } = useNetworkStatus();
+  // The shared, cached shop-open state (see shop-session.tsx) - gives this
+  // page something correct to show instantly, before its own (more
+  // complete, but cloud-only) session-history fetch below has a chance to
+  // land.
+  const { session: cachedShopSession } = useShopSession();
 
   useEffect(() => {
-    setChartsReady(true);
+    // Two animation frames, not a plain "run once after mount" - this page
+    // can be reached mid route-transition, so on the very first paint its
+    // own chart containers can still be mid-layout (computed width/height
+    // briefly 0), which is exactly what produces Recharts' "width(-1)
+    // height(-1)" console warning below. One rAF lands right after the
+    // first real paint; the second guards against that same paint still
+    // being mid-layout on slower machines.
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setChartsReady(true));
+    });
 
     const timer = setInterval(() => {
       setCurrentTime(new Date());
     }, 60000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      clearInterval(timer);
+    };
   }, []);
 
   // "Today's" numbers on this dashboard are defined purely by the Open
@@ -56,6 +81,8 @@ export default function DashboardPageClient() {
   // ticks live; once closed, it freezes at [openedAt, closedAt) so the
   // final count for that shift stays visible until the next shift opens.
   useEffect(() => {
+    if (cachedShopSession) setShopSession((current) => current ?? cachedShopSession);
+
     async function loadSession() {
       try {
         const history = await fetchShopSessionHistory();
@@ -68,7 +95,7 @@ export default function DashboardPageClient() {
     void loadSession();
     const intervalId = setInterval(() => void loadSession(), 45000);
     return () => clearInterval(intervalId);
-  }, []);
+  }, [cachedShopSession]);
 
   // Fetch products once on mount for the low-stock widget; only orders
   // (which genuinely need to feel "live" for today's sales numbers) get
@@ -82,10 +109,52 @@ export default function DashboardPageClient() {
   }, []);
 
   useEffect(() => {
+    // Always paints instantly from the Local Hub's cache first (see
+    // offline-order-helpers.ts's loadOrdersFromLocalHub) - never a live
+    // cloud call up front, so this never depends on connectivity or the
+    // (laggy - see network-status.ts) isOnline flag being accurate at this
+    // exact moment. The real cloud fetch below still runs whenever online,
+    // in the background, refining this with up-to-date numbers and
+    // refreshing the cache for next time.
     async function loadOrders() {
+      if (isDesktopApp()) {
+        try {
+          setOrders(await loadOrdersFromLocalHub());
+        } catch (error) {
+          console.error('Dashboard orders cache read error', error);
+        }
+        if (!isOnline) return;
+      }
+
       try {
-        const ordersData = await fetchOrders();
-        if (ordersData) setOrders(ordersData);
+        // This page only ever shows "today's" (current/last shift) numbers
+        // via the business-window filtering below - bounding the fetch to
+        // the last 14 days (a generous margin over any realistic gap
+        // between shifts) keeps this 45-second poll fast regardless of how
+        // much order history this shop has accumulated overall. See
+        // getOrders' `since` handling in orderController.js.
+        //
+        // fetchOrdersSummary (not fetchOrders) - on a shop with real order
+        // history, "fast regardless of history size" turned out to still
+        // mean 10+ seconds once you're transferring hundreds of FULL order
+        // documents (complete items array, full customer object, etc.)
+        // every 45 seconds, measured via debug timing on a live shop. This
+        // page only ever reads status/total/createdAt/customer.phone/waiter
+        // (see the stats/businessWindowData/topEmployees useMemos below),
+        // so asking the server for just those fields cuts the actual data
+        // transferred by roughly the same ratio full documents were bigger
+        // than that. Deliberately NOT pushed into the shared Local Hub
+        // order cache (pushOrdersCache) the way it used to be - that cache
+        // is what Sales/Kitchen/Record's own offline fallbacks depend on
+        // having full order data in, and this summary shape would silently
+        // strip that down for everyone. offline-sync.ts's own periodic
+        // pushCurrentOrdersCache() (full documents, no summary flag)
+        // already keeps that cache fresh independently of this page.
+        const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+        const ordersData = await fetchOrdersSummary({ since });
+        if (ordersData) {
+          setOrders(ordersData);
+        }
       } catch (error) {
         console.error('Dashboard orders fetch error', error);
       }
@@ -98,17 +167,11 @@ export default function DashboardPageClient() {
     }, 45000);
 
     return () => clearInterval(intervalId);
-  }, []);
+  }, [isOnline]);
 
-  const businessWindow = useMemo<BusinessWindow>(() => getBusinessWindow(shopSession, currentTime), [shopSession, currentTime]);
+  const businessWindow = useMemo<BusinessWindow>(() => buildDashboardWindow(shopSession, currentTime), [shopSession, currentTime]);
   const businessOrders = useMemo(
-    () => {
-      if (!businessWindow.hasSession) return [];
-      return orders.filter((order) => {
-        const createdAt = new Date(order.createdAt);
-        return createdAt >= businessWindow.start && createdAt < businessWindow.end;
-      });
-    },
+    () => filterOrdersInBusinessWindow(orders, businessWindow),
     [orders, businessWindow],
   );
 
@@ -160,7 +223,7 @@ export default function DashboardPageClient() {
       }
     });
 
-    return data.map(({ start, end, ...bucket }) => bucket);
+    return data.map(({ start: _start, end: _end, ...bucket }) => bucket);
   }, [businessOrders, businessWindow]);
 
   const topEmployees = useMemo<EmployeeStat[]>(() => {
@@ -205,7 +268,11 @@ export default function DashboardPageClient() {
         <div className="col-span-12 min-w-0 space-y-6 lg:col-span-7">
           <div className="rounded-[32px] bg-white p-6 shadow-sm">
             <h3 className="mb-6 font-bold text-gray-800">Sales Overview</h3>
-            <div className="mb-8 grid grid-cols-2 gap-4">
+            {/* Stacked on phone - a half-width card here (icon + truncated
+                text) had no room left for a real revenue figure like
+                "Rs 1,245,690", so it just showed "Rs 1,245..." with no way
+                to see the rest. Side-by-side again from tablet width up. */}
+            <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <StatCard title={`Rs ${formatter.format(stats.totalRevenue)}`} subtitle="Total Revenue" trend="Live" color="bg-orange-50 text-orange-400" icon={<Target size={20} />} />
               <StatCard title={formatter.format(stats.totalOrders)} subtitle="Total Orders" trend="Live" color="bg-purple-50 text-purple-400" icon={<Users size={20} />} />
             </div>
@@ -244,7 +311,9 @@ export default function DashboardPageClient() {
               </div>
             </div>
 
-            <div className="mt-8 grid grid-cols-3 gap-4">
+            {/* Same reasoning as the StatCard row above - 3-across left
+                almost no width per figure on a phone. */}
+            <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
               <MiniStat label="Business Day Sales" value={`Rs ${formatter.format(stats.businessSales)}`} />
               <MiniStat label="Transactions" value={formatter.format(stats.totalOrders)} />
               <MiniStat label="Avg. Order" value={`Rs ${formatter.format(stats.avgValue)}`} valueColor="text-green-500" />
@@ -282,7 +351,7 @@ export default function DashboardPageClient() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <StatusRing stats={stats} />
             <div className="space-y-4 rounded-[32px] bg-white p-5 shadow-sm">
               <h3 className="text-sm font-bold">Service Stats</h3>
@@ -424,30 +493,23 @@ function formatTime(value: Date) {
   return value.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
-// The dashboard's "today" is exactly one ShopSession (see ShopStatusControl
-// in DashboardShell / backend/controllers/shopSessionController.js) - no
-// fixed clock hours involved. `history[0]` (most recent session, open or
-// closed) is passed in from the effect above.
-function getBusinessWindow(session: ShopSession | null, now: Date): BusinessWindow {
-  if (!session) {
-    return {
-      start: now,
-      end: now,
-      label: 'No shift yet — open the shop to start counting orders',
-      isOpen: false,
-      hasSession: false,
-    };
+// The dashboard's "today" is exactly one ShopSession, computed by the
+// shared getBusinessWindow (src/lib/shop-session.tsx - the single source
+// of truth for this date-math, also used by Record/Sales) - no fixed clock
+// hours involved. This just adds the header label text on top, which is
+// display detail specific to this page. `history[0]` (most recent session,
+// open or closed) is passed in from the effect above.
+function buildDashboardWindow(session: ShopSession | null, now: Date): BusinessWindow {
+  const window = getBusinessWindow(session, now);
+  if (!window.hasSession) {
+    return { ...window, label: 'No shift yet — open the shop to start counting orders' };
   }
 
-  const start = new Date(session.openedAt);
-  const isOpen = session.status === 'open';
-  const end = isOpen ? now : new Date(session.closedAt as string);
+  const label = window.isOpen
+    ? `Open since ${formatWindowDate(window.start)} ${formatTime(window.start)} · Live`
+    : `${formatWindowDate(window.start)} ${formatTime(window.start)} - ${formatWindowDate(window.end)} ${formatTime(window.end)} · Closed`;
 
-  const label = isOpen
-    ? `Open since ${formatWindowDate(start)} ${formatTime(start)} · Live`
-    : `${formatWindowDate(start)} ${formatTime(start)} - ${formatWindowDate(end)} ${formatTime(end)} · Closed`;
-
-  return { start, end, label, isOpen, hasSession: true };
+  return { ...window, label };
 }
 
 function createBusinessHourBuckets(start: Date, end: Date) {

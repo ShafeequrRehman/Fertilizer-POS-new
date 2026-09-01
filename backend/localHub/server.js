@@ -1,0 +1,537 @@
+const express = require("express");
+const cors = require("cors");
+const os = require("os");
+const pairing = require("./pairing");
+const localOrders = require("./localOrders");
+const referenceData = require("./referenceData");
+const orderCache = require("./orderCache");
+const localStaff = require("./localStaff");
+const employeesCache = require("./employeesCache");
+const occupiedTablesCache = require("./occupiedTablesCache");
+
+// The Local Hub: a small, self-contained Express server that runs inside
+// the desktop (Electron) app ALWAYS, independent of whether this till
+// talks to the cloud backend or not (see main.js - unlike the legacy
+// embedded full backend, which only starts when VITE_API_URL is unset and
+// still needs MongoDB Atlas to do anything, this one needs nothing but
+// this machine). Its only jobs: let a paired phone (or this till's own
+// offline POS view) queue orders locally when the internet is down, and
+// let the sync engine (pos-web/src/lib/offline-sync.ts) push them to the
+// cloud once it's back.
+//
+// Security model: NOT the shop's normal JWT. The desktop app's bundled
+// backend and the cloud backend can each have their own independently
+// generated JWT_SECRET (see backend/index.js's ensureJwtSecret - it
+// generates one on first run if missing), so verifying a phone's
+// cloud-issued token's signature here isn't a safe assumption. Instead,
+// every route below (other than /health) requires the shop's Pairing Key
+// (see pairing.js) - shown as a QR code / plain text on the till's
+// Connect Devices page, entered once on the phone. Two routes
+// (/pairing-info, /pairing/rotate) additionally require the caller to be
+// on this same machine (loopback), since they reveal or change the key
+// itself - LAN devices only ever need to already know the key.
+
+const LOCAL_HUB_PORT = Number(process.env.POS_LOCAL_HUB_PORT) || 5057;
+
+const app = express();
+// Without this, every call from the renderer (whether Vite's
+// localhost:5173 in dev, or the packaged app's file:// origin) is a
+// cross-origin request as far as Chromium is concerned - and gets
+// blocked by the browser before it even leaves the process, regardless
+// of whether the Local Hub is actually listening. That's indistinguishable
+// from "unreachable" to axios (no response, just a network error), which
+// is exactly the false negative isLocalHubReachable() was hitting even
+// with the server confirmed up via `netstat`. allow-all mirrors the
+// legacy backend (backend/index.js's own app.use(cors())) - this is a
+// LAN-only, pairing-key-gated server, not a public one, so there's no
+// meaningful origin to restrict to.
+app.use(cors());
+// Default express.json() body limit is 100kb - fine for every other route
+// here (pairing, single-order queue/edit payloads), but /orders-cache
+// pushes this shop's ENTIRE recent cloud order history down for offline
+// caching (see orderCache.js) and blows straight through that once a shop
+// has any real order volume, failing with a 500 on every single push
+// (see the error handler below - it doesn't distinguish PayloadTooLarge's
+// real 413 from anything else). Everything through this app is loopback or
+// LAN-only traffic between this till and its own paired phones, so there's
+// no meaningful cost to allowing a much larger body.
+app.use(express.json({ limit: "50mb" }));
+
+function isLoopback(req) {
+  const ip = req.socket.remoteAddress || "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+function requireLoopback(req, res, next) {
+  if (!isLoopback(req)) {
+    return res.status(403).json({ message: "This action is only available from the till itself." });
+  }
+  next();
+}
+
+function requirePairingKey(req, res, next) {
+  const key = req.headers["x-pairing-key"];
+  if (!pairing.isValidKey(key)) {
+    return res.status(401).json({ message: "Missing or incorrect pairing key.", reason: "invalid_pairing_key" });
+  }
+  next();
+}
+
+// Every non-internal, non-loopback IPv4 address this machine currently
+// has - a LAN can have more than one adapter, and on Windows specifically
+// that's often NOT just "WiFi + Ethernet": Docker Desktop, WSL2, Hyper-V,
+// VMware/VirtualBox, and VPN clients (Tailscale, ZeroTier, work VPNs) all
+// install their own virtual adapter with its own private IP, and
+// os.networkInterfaces() returns all of them with no indication of which
+// one is the real WiFi. Real incident this fixes: a phone on the same
+// physical WiFi as the till still got "could not reach that till" every
+// time, because the till's QR code defaulted to ips[0] - whichever
+// adapter Windows happened to enumerate first - which was a Hyper-V
+// vEthernet adapter, not the WiFi card; the phone was never going to
+// reach that address no matter how correct the WiFi connection was.
+//
+// Sorted (not just listed) so the till's own Connect Devices page can
+// keep defaulting to ips[0] and have a real chance of it being right,
+// while still returning every candidate (each labeled with its adapter
+// name) so a still-wrong guess can be corrected by hand instead of by
+// trial and error.
+const VIRTUAL_ADAPTER_NAME_PATTERN = /vEthernet|Virtual|VMware|VirtualBox|Hyper-V|Docker|WSL|Tailscale|ZeroTier|Loopback|Bluetooth|Npcap|TAP|VPN/i;
+const PHYSICAL_ADAPTER_NAME_PATTERN = /Wi-?Fi|WLAN|Wireless|Ethernet/i;
+
+function scoreAdapterName(name) {
+  // Virtual is checked FIRST and deliberately - "vEthernet" (Hyper-V's own
+  // naming, exactly the adapter in the real incident this fixes) contains
+  // the substring "Ethernet", so checking the physical pattern first would
+  // wrongly score it as a real adapter every time.
+  if (VIRTUAL_ADAPTER_NAME_PATTERN.test(name)) return 0;
+  if (PHYSICAL_ADAPTER_NAME_PATTERN.test(name)) return 2;
+  return 1; // Unrecognized name - neither confidently real nor confidently virtual.
+}
+
+function listLanAddresses() {
+  const interfaces = os.networkInterfaces();
+  const candidates = [];
+  for (const [name, entries] of Object.entries(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.family === "IPv4" && !entry.internal) {
+        candidates.push({ address: entry.address, name, score: scoreAdapterName(name) });
+      }
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, time: Date.now() });
+});
+
+// Desktop's own Connect Devices page calls this (over localhost) to
+// render the QR code / manual pairing details. Loopback-only - this is
+// the one place the key itself is ever revealed.
+app.get("/pairing-info", requireLoopback, (req, res) => {
+  const candidates = listLanAddresses();
+  res.json({
+    // Kept as a plain string array for backward compatibility (older
+    // renderer builds, and anything that just wants "the addresses") -
+    // now sorted best-guess-first instead of whatever order the OS
+    // happened to enumerate adapters in.
+    ips: candidates.map((c) => c.address),
+    // Adapter name per address, so the Connect Devices page can label
+    // each option ("Wi-Fi", "vEthernet (WSL)", ...) instead of a bare IP
+    // list nobody can tell apart - see listLanAddresses' own comment for
+    // why that label is often the only way to tell which one is real.
+    interfaceNames: Object.fromEntries(candidates.map((c) => [c.address, c.name])),
+    port: LOCAL_HUB_PORT,
+    pairingKey: pairing.getOrCreatePairingKey(),
+  });
+});
+
+app.post("/pairing/rotate", requireLoopback, (req, res) => {
+  res.json({ pairingKey: pairing.rotatePairingKey() });
+});
+
+// A phone calls this once, right after typing in / scanning the IP, port,
+// and key, purely to confirm they're correct before saving them - doesn't
+// register the device anywhere, since the key itself (sent on every
+// subsequent request) is the only thing that's actually checked.
+app.post("/pair", (req, res) => {
+  const key = req.body?.key;
+  if (!pairing.isValidKey(key)) {
+    return res.status(401).json({ message: "Incorrect pairing key.", reason: "invalid_pairing_key" });
+  }
+  const reference = referenceData.get();
+  res.json({ ok: true, shopName: reference.shopName || "" });
+});
+
+// Desktop pushes its latest products/customers/staff down while online so
+// they're available for offline order-taking - loopback-only, since only
+// the till itself (already logged into the shop) should ever be the
+// source of truth for this cache.
+app.post("/reference-data", requireLoopback, (req, res) => {
+  const snapshot = referenceData.set(req.body || {});
+  res.json(snapshot);
+});
+
+app.get("/reference-data", requirePairingKey, (req, res) => {
+  res.json(referenceData.get());
+});
+
+// Cloud orders snapshot - see orderCache.js. Pushed down (loopback only)
+// by the till whenever it successfully loads orders from the cloud;
+// merged with the pending order/edit queues below by whoever reads it
+// (see offline-order-helpers.ts's mergeOrdersForDisplay), never here -
+// keeps the "what does an order look like" logic in exactly one place.
+app.post("/orders-cache", requireLoopback, (req, res) => {
+  const snapshot = orderCache.set(req.body?.orders || []);
+  res.json(snapshot);
+});
+
+app.get("/orders-cache", requirePairingKey, (req, res) => {
+  res.json(orderCache.get());
+});
+
+// Manage Staff's own full employee-list cache - see employeesCache.js for
+// why this is separate from /reference-data's lightweight `staff` (waiter
+// dropdown) field. Same push/read shape as /orders-cache above.
+app.post("/employees-cache", requireLoopback, (req, res) => {
+  const snapshot = employeesCache.set(req.body?.employees || []);
+  res.json(snapshot);
+});
+
+app.get("/employees-cache", requirePairingKey, (req, res) => {
+  res.json(employeesCache.get());
+});
+
+// DineIn table-occupancy cache - see occupiedTablesCache.js. Same
+// push/read shape as /orders-cache and /employees-cache above, but
+// deliberately never date-bounded.
+app.post("/occupied-tables-cache", requireLoopback, (req, res) => {
+  const snapshot = occupiedTablesCache.set(req.body?.tables || []);
+  res.json(snapshot);
+});
+
+app.get("/occupied-tables-cache", requirePairingKey, (req, res) => {
+  res.json(occupiedTablesCache.get());
+});
+
+// Queue an order locally - called by a paired phone's Checkout screen, or
+// by the till's own POS page, whenever the cloud is unreachable.
+app.post("/orders", requirePairingKey, (req, res) => {
+  const payload = req.body?.payload;
+  if (!payload || typeof payload !== "object") {
+    return res.status(400).json({ message: "payload is required", reason: "validation_error" });
+  }
+  const record = localOrders.queueOrder(payload, req.body?.actor || null, req.body?.printFlags || null);
+  res.status(201).json(record);
+});
+
+app.get("/orders/pending", requirePairingKey, (req, res) => {
+  res.json(localOrders.listPending());
+});
+
+// Reserves the next ticket number WITHOUT queuing an order record - called
+// by POSPage.tsx right before placing an order straight online, so this
+// till's order numbering is always decided here first, never by the
+// cloud's own counter, whether the order ends up going through the cloud
+// immediately or the offline queue. See localOrders.js's reserveNextNumber.
+app.post("/orders/reserve-number", requirePairingKey, (req, res) => {
+  res.json({ number: localOrders.reserveNextNumber() });
+});
+
+// Tr# / shopSequenceNumber - the shop's permanent, never-resetting order
+// count (see localOrders.js's own comment on nextLifetimeNumber). Same
+// reserve-before-placing-online pattern as reserve-number above.
+app.post("/orders/reserve-lifetime-number", requirePairingKey, (req, res) => {
+  res.json({ number: localOrders.reserveNextLifetimeNumber() });
+});
+
+app.get("/orders/all", requirePairingKey, (req, res) => {
+  res.json(localOrders.listAll());
+});
+
+// Called by the desktop's sync engine after it has successfully imported
+// these orders into the cloud (see src/lib/offline-sync.ts + backend's
+// POST /api/orders/import-offline).
+app.post("/orders/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localOrders.markSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/orders/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localOrders.markFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// Editing an order while offline - see localOrders.js's "Editing an order
+// while offline" section for the full split between these two cases.
+// Called by SalesPage.tsx's saveUpdate() when isDesktopApp() && !isOnline.
+
+// Case 1: the order being edited is itself still only local (its frontend
+// id looks like "local-<uuid>" - see SalesPage.tsx's localOrderToSavedOrder).
+// :localId here is that uuid with the "local-" prefix already stripped by
+// the caller.
+app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
+  const updated = localOrders.updateQueuedOrder(req.params.localId, req.body?.payload || {}, !!req.body?.receiptPrinted);
+  if (!updated) {
+    return res.status(404).json({ message: "No such queued order (it may have already synced)." });
+  }
+  res.json(updated);
+});
+
+// Case 2: the order already has a real cloud _id - queue the edit for the
+// sync engine to replay against the real document.
+app.post("/orders/:orderId/edits", requirePairingKey, (req, res) => {
+  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null, !!req.body?.kitchenPrinted, !!req.body?.receiptPrinted);
+  res.status(201).json(record);
+});
+
+app.get("/orders/edits/pending", requirePairingKey, (req, res) => {
+  res.json(localOrders.listPendingEdits());
+});
+
+app.post("/orders/edits/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localOrders.markEditsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/orders/edits/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localOrders.markEditFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// Cancelling an already-synced order while offline - see localOrders.js's
+// own "Cancelling an ALREADY-SYNCED order while offline" section for why
+// this is a completely separate queue from /orders/:orderId/edits above
+// (a cancellation needs the real Cancel Order Key verified against the
+// cloud, which this queue just carries until sync - see
+// CancelOrderModal.tsx and orderController.js's
+// POST /orders/import-offline-cancellations).
+app.post("/orders/:orderId/cancellations", requirePairingKey, (req, res) => {
+  const record = localOrders.queueOrderCancellation(req.params.orderId, req.body?.key, req.body?.reason, req.body?.actor || null);
+  res.status(201).json(record);
+});
+
+app.get("/orders/cancellations/pending", requirePairingKey, (req, res) => {
+  res.json(localOrders.listPendingCancellations());
+});
+
+app.post("/orders/cancellations/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localOrders.markCancellationsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/orders/cancellations/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localOrders.markCancellationFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// --- Offline Manage Staff - see localStaff.js for the full design. Same
+// "queue it, sync engine replays it for real" shape as orders above, split
+// the same way: a brand-new staff member has no real cloud _id yet
+// (CREATES), while editing/removing one that already exists on the cloud
+// gets queued separately (EDITS/DELETES) to replay against the real
+// document once synced.
+
+app.post("/employees", requirePairingKey, (req, res) => {
+  const payload = req.body?.payload;
+  if (!payload || typeof payload !== "object") {
+    return res.status(400).json({ message: "payload is required", reason: "validation_error" });
+  }
+  const record = localStaff.queueEmployeeCreate(payload);
+  res.status(201).json(record);
+});
+
+app.get("/employees/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingCreates());
+});
+
+app.post("/employees/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markCreatesSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markCreateFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// Case 1: the staff member being edited/removed is itself still only
+// queued locally (its frontend id looks like "local-<uuid>", stripped by
+// the caller before it reaches here - see offline-staff-helpers.ts).
+app.patch("/employees/local/:localId", requirePairingKey, (req, res) => {
+  const updated = localStaff.updateQueuedEmployee(req.params.localId, req.body?.payload || {});
+  if (!updated) {
+    return res.status(404).json({ message: "No such queued staff member (it may have already synced)." });
+  }
+  res.json(updated);
+});
+
+app.delete("/employees/local/:localId", requirePairingKey, (req, res) => {
+  const removed = localStaff.deleteQueuedEmployee(req.params.localId);
+  if (!removed) {
+    return res.status(404).json({ message: "No such queued staff member (it may have already synced)." });
+  }
+  res.json({ ok: true });
+});
+
+// Case 2: the staff member already has a real cloud _id - queue the change
+// for the sync engine to replay against the real document.
+app.post("/employees/:employeeId/edits", requirePairingKey, (req, res) => {
+  const record = localStaff.queueEmployeeEdit(req.params.employeeId, req.body?.payload || {});
+  res.status(201).json(record);
+});
+
+app.get("/employees/edits/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingEdits());
+});
+
+app.post("/employees/edits/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markEditsSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/edits/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markEditFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+app.post("/employees/:employeeId/delete", requirePairingKey, (req, res) => {
+  const record = localStaff.queueEmployeeDelete(req.params.employeeId);
+  res.status(201).json(record);
+});
+
+app.get("/employees/deletes/pending", requirePairingKey, (req, res) => {
+  res.json(localStaff.listPendingDeletes());
+});
+
+app.post("/employees/deletes/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localStaff.markDeletesSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/employees/deletes/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localStaff.markDeleteFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
+});
+
+// Keeps this till's local order counter in step with the cloud's real
+// ShopSession.orderCounter - see localOrders.js's syncOrderCounter for the
+// full reasoning. Loopback-only: only the till itself, which just talked
+// to the cloud, should ever be the source of truth for what the cloud's
+// counter currently is. Called from shop-session.tsx's refresh() and
+// right after any successful online order create/import.
+app.post("/order-counter-sync", requireLoopback, (req, res) => {
+  const { sessionId, orderCounter } = req.body || {};
+  const result = localOrders.syncOrderCounter(sessionId || null, orderCounter);
+  res.json(result);
+});
+
+// Called the instant Open Shop is tapped while OFFLINE (see
+// shop-session.tsx's openLocally()) - there's no cloud round-trip yet at
+// that moment to learn a fresh session's orderCounter from, so this is the
+// only way a brand new shift starting offline gets its order numbering
+// reset to 1 right away instead of wrongly continuing the previous
+// shift's count until the till happens to reconnect. See
+// localOrders.js's resetCounter.
+app.post("/order-counter/reset", requireLoopback, (req, res) => {
+  localOrders.resetCounter();
+  res.json({ ok: true });
+});
+
+// Keeps this till's local Tr#/lifetime counter in step with the cloud's
+// real Shop.orderSequenceCounter - see localOrders.js's syncLifetimeCounter.
+// Loopback-only, same reasoning as order-counter-sync above. No reset
+// endpoint equivalent - this counter is never reset by anything.
+app.post("/lifetime-counter-sync", requireLoopback, (req, res) => {
+  const { value } = req.body || {};
+  const result = localOrders.syncLifetimeCounter(value);
+  res.json(result);
+});
+
+app.get("/sync/status", requirePairingKey, (req, res) => {
+  const all = localOrders.listAll();
+  const pending = all.filter((order) => order.status === "pending");
+  const failed = all.filter((order) => order.status === "failed");
+  const pendingEdits = localOrders.listPendingEdits();
+  const pendingCancellations = localOrders.listPendingCancellations();
+
+  const staffCreates = localStaff.listAllCreates();
+  const pendingStaffCreates = staffCreates.filter((entry) => entry.status === "pending");
+  const failedStaffCreates = staffCreates.filter((entry) => entry.status === "failed");
+  const pendingStaffEdits = localStaff.listPendingEdits();
+  const pendingStaffDeletes = localStaff.listPendingDeletes();
+
+  res.json({
+    pendingCount: pending.length,
+    failedCount: failed.length,
+    totalQueued: all.length,
+    pendingEditCount: pendingEdits.filter((edit) => edit.status === "pending").length,
+    failedEditCount: pendingEdits.filter((edit) => edit.status === "failed").length,
+    // Offline Cancel Order - see localOrders.js's "Cancelling an ALREADY-
+    // SYNCED order while offline" section.
+    pendingCancellationCount: pendingCancellations.filter((entry) => entry.status === "pending").length,
+    failedCancellationCount: pendingCancellations.filter((entry) => entry.status === "failed").length,
+    // Offline Manage Staff - see localStaff.js. Folded into the same
+    // sync-status payload OfflineSyncPage.tsx already reads for orders, so
+    // one screen shows everything still waiting to reach the cloud.
+    pendingStaffCount: pendingStaffCreates.length,
+    failedStaffCount: failedStaffCreates.length,
+    pendingStaffEditCount: pendingStaffEdits.filter((entry) => entry.status === "pending").length,
+    failedStaffEditCount: pendingStaffEdits.filter((entry) => entry.status === "failed").length,
+    pendingStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "pending").length,
+    failedStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "failed").length,
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error("[localHub] error:", err);
+  // Preserve a real status (e.g. body-parser's 413 PayloadTooLarge) instead
+  // of always reporting 500 - makes a future version of this exact bug
+  // class (see express.json() limit above) show up correctly in devtools
+  // instead of looking like a generic server error.
+  res.status(err.status || err.statusCode || 500).json({ message: err.message || "Local hub error" });
+});
+
+let serverInstance = null;
+
+function startLocalHub(port = LOCAL_HUB_PORT) {
+  return new Promise((resolve, reject) => {
+    if (serverInstance) {
+      resolve(serverInstance);
+      return;
+    }
+    // Bind to 0.0.0.0 (default when no host is passed) so LAN devices,
+    // not just this machine, can reach it.
+    serverInstance = app.listen(port, () => {
+      console.log(`[localHub] Local Hub listening on port ${port}`);
+      resolve(serverInstance);
+    });
+    serverInstance.on("error", (err) => {
+      console.error("[localHub] Failed to start:", err.message);
+      serverInstance = null;
+      reject(err);
+    });
+  });
+}
+
+function stopLocalHub() {
+  return new Promise((resolve) => {
+    if (!serverInstance) {
+      resolve();
+      return;
+    }
+    serverInstance.close(() => {
+      serverInstance = null;
+      resolve();
+    });
+  });
+}
+
+module.exports = { app, startLocalHub, stopLocalHub, LOCAL_HUB_PORT };

@@ -1,13 +1,47 @@
 const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
+const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
+const { escapeRegex } = require("../utils/escapeRegex");
+
+// The JWT (req.user) only ever carries id/role/shopId/permissions - never
+// a display name (see auth/tokenService.js) - so recording who made a
+// manual dues change needs one extra lookup, same pattern
+// orderController.cancelOrder already uses for cancelledBy.
+async function currentUserName(req) {
+  if (!req.user?.id) return "";
+  const user = await User.findById(req.user.id).select("name username").lean();
+  return user?.name || user?.username || "";
+}
 
 // Placeholder phone used for walk-in/guest orders (see
 // orderController.createOrder) - these are never upserted into the
 // Customer collection, so they're excluded here too rather than showing
 // up as a phantom "customer".
 const WALKIN_PHONE = "03000000000";
+
+// Every route below used to hand Mongoose documents/`.lean()` objects
+// straight to res.json(), which serialize with `_id`, never `id` - the
+// Customer model has no `toJSON: { virtuals: true }` set, so even
+// non-lean docs don't get the built-in `id` virtual for free. Both
+// frontends' Customer type declares `id` as required (pos-web/src/lib/
+// pos-types.ts, pos-mobile/src/types/models.ts) and use it as their React
+// list key and as the identifier passed back into updateCustomer(id, ...)
+// - with `id` always undefined, list keys collapsed to the same
+// `undefined` value (surfaced as the "each child in a list should have a
+// unique key" warning, most visibly on pos-mobile's DuesScreen where
+// LogBox shows it as a red-screen error) AND POSPage.tsx's "editing an
+// existing selected customer's details" flow silently no-opped, since its
+// `if (!selectedCustomerId || ...) return;` guard saw undefined and bailed
+// every time. This helper is the one place that now guarantees `id` is
+// always present - works on both lean plain objects and real Mongoose
+// documents. `/customers/ledger` (getCustomerLedger below) already built
+// its own response shape by hand and was never affected.
+function serializeCustomer(customer) {
+  const plain = typeof customer.toObject === "function" ? customer.toObject() : customer;
+  return { ...plain, id: String(plain._id) };
+}
 
 exports.searchCustomers = async (req, res) => {
   const query = String(req.query.q || "").trim();
@@ -21,29 +55,37 @@ exports.searchCustomers = async (req, res) => {
   const filters = [];
 
   if (searchBy === "name" || searchBy === "both") {
-    filters.push({ name: { $regex: query, $options: "i" } });
+    // escapeRegex - `query` is whatever the cashier typed into the search
+    // box, handed straight to Mongo's regex engine; unescaped, a crafted
+    // pattern can cause catastrophic backtracking (a same-shop denial of
+    // service) - see utils/escapeRegex.js's own comment.
+    filters.push({ name: { $regex: escapeRegex(query), $options: "i" } });
   }
 
   if ((searchBy === "phone" || searchBy === "both") && phoneQuery) {
+    // phoneQuery was already stripped to digits only above, so it can
+    // never contain a regex metacharacter - no escaping needed here.
     filters.push({ phone: { $regex: phoneQuery, $options: "i" } });
   }
 
   const baseQuery = { ...shopScope(req) };
   if (filters.length) baseQuery.$or = filters;
 
-  const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20);
-  res.json(customers);
+  const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20).lean();
+  res.json(customers.map(serializeCustomer));
 };
 
 exports.getAllCustomers = async (req, res) => {
-  const customers = await Customer.find({ ...shopScope(req) }).sort({ name: 1 });
-  res.json(customers);
+  // .lean() - read-only list (Ledger/Dues pages, customer lookup while
+  // placing an order), same reasoning as productController.getProducts.
+  const customers = await Customer.find({ ...shopScope(req) }).sort({ name: 1 }).lean();
+  res.json(customers.map(serializeCustomer));
 };
 
 
 exports.createCustomer = async (req, res) => {
   const customer = await Customer.create({ ...req.body, shopId: req.user.shopId });
-  res.status(201).json(customer);
+  res.status(201).json(serializeCustomer(customer));
 };
 
 exports.updateCustomer = async (req, res) => {
@@ -56,7 +98,7 @@ exports.updateCustomer = async (req, res) => {
   if (!customer) {
     return res.status(404).json({ error: "Customer not found" });
   }
-  res.json(customer);
+  res.json(serializeCustomer(customer));
 };
 
 // GET /api/customers/ledger
@@ -71,7 +113,18 @@ exports.getCustomerLedger = async (req, res) => {
     const scope = shopScope(req);
     const [customers, orders] = await Promise.all([
       Customer.find(scope).sort({ name: 1 }).lean(),
-      Order.find({ ...scope, "customer.phone": { $exists: true, $ne: "" } })
+      // Projected to just the fields this endpoint actually reads below -
+      // an unprojected find() here pulls every order's full `items` array
+      // and everything else across the shop's ENTIRE order history (this
+      // intentionally isn't date-bounded, since an old unpaid order must
+      // still count towards totalOrderBalance no matter how old it is), so
+      // on a shop with a large order history that was the main cost behind
+      // this endpoint occasionally being slow enough to hit the frontend's
+      // request timeout.
+      Order.find(
+        { ...scope, "customer.phone": { $exists: true, $ne: "" } },
+        "customer.phone dailyOrderNumber createdAt orderType status paymentMethod total paidAmount remainingAmount"
+      )
         .sort({ createdAt: -1 })
         .lean(),
     ]);
@@ -112,6 +165,23 @@ exports.getCustomerLedger = async (req, res) => {
         totalOrderBalance,
         totalDue: totalOrderBalance + previousDues,
         lastOrderAt: customerOrders[0]?.createdAt || null,
+        // Manual add/settle entries (with whatever note the cashier typed)
+        // - newest first. Merged client-side (DuesPage.tsx's History
+        // dropdown) with the `orders` array below, which already carries
+        // its own per-order trail (dailyOrderNumber, total, paid,
+        // remaining) - so between the two, every rupee that makes up
+        // totalDue traces back to either a note or an order number.
+        duesHistory: (customer.duesHistory || [])
+          .slice()
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+          .map((entry) => ({
+            type: entry.type,
+            amount: entry.amount,
+            note: entry.note || "",
+            balanceAfter: entry.balanceAfter,
+            createdBy: entry.createdBy || "",
+            createdAt: entry.createdAt,
+          })),
         orders: customerOrders.map((order) => ({
           id: String(order._id),
           dailyOrderNumber: order.dailyOrderNumber,
@@ -179,16 +249,134 @@ exports.getCustomerOutstanding = async (req, res) => {
   }
 };
 
+// PATCH /api/customers/dues/:phone  body: { previousDues, note? }
+// `previousDues` is still the new TOTAL lump-sum figure (not a delta) -
+// kept exactly as before so pos-mobile's DuesScreen (which also calls this
+// same endpoint) keeps working unchanged. The note - and the history entry
+// recording this change - are new and optional: if the caller doesn't send
+// a note, this behaves identically to before. The delta (new total minus
+// whatever it was) is what actually gets recorded as the entry's `amount`
+// so "+Rs 500 (note)" in the History dropdown always matches what really
+// changed, not just whatever number happened to be typed into the field.
 exports.updateCustomerDues = async (req, res) => {
-  const customer = await Customer.findOneAndUpdate(
-    { phone: req.params.phone, ...shopScope(req) },
-    { previousDues: Number(req.body.previousDues || 0) },
-    { new: true }
-  );
+  const nextPreviousDues = Number(req.body.previousDues || 0);
+  const note = String(req.body.note || "").trim();
 
+  const customer = await Customer.findOne({ phone: req.params.phone, ...shopScope(req) });
   if (!customer) {
     return res.status(404).json({ error: "Customer not found" });
   }
 
-  res.json(customer);
+  const delta = nextPreviousDues - Number(customer.previousDues || 0);
+  customer.previousDues = nextPreviousDues;
+  // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
+  // worth a history row - only a real change is.
+  if (delta !== 0) {
+    customer.duesHistory.push({
+      type: delta > 0 ? "add" : "settle",
+      amount: Math.abs(delta),
+      note,
+      balanceAfter: nextPreviousDues,
+      createdBy: await currentUserName(req),
+    });
+  }
+  await customer.save();
+
+  res.json(serializeCustomer(customer));
+};
+
+// POST /api/customers/:phone/settle-dues  body: { amount }
+// A real cash-in-hand payment against everything this customer owes -
+// unlike updateCustomerDues above (which only ever moves the manual
+// previousDues number and never touches an order), this is money actually
+// collected, so it has to land the same way completing an order's payment
+// does: the older lump-sum previousDues first, then this customer's
+// unpaid orders oldest-first, same distribution as completeAndSettle's own
+// cascade in orderController.js (kept deliberately identical so "pay
+// Rs500 off what they owe" behaves the same whether it's collected here or
+// alongside completing one of their orders). An order that reaches
+// remainingAmount 0 this way is marked "completed" the same way that
+// cascade already does - not a new kind of side effect, just the same one
+// reachable from a second place.
+exports.settleCustomerDues = async (req, res) => {
+  try {
+    const phone = req.params.phone;
+    const amount = Math.max(Number(req.body.amount) || 0, 0);
+    const note = String(req.body.note || "").trim();
+    if (amount <= 0) {
+      return res.status(400).json({ message: "amount must be greater than 0", reason: "validation_error" });
+    }
+
+    const scope = shopScope(req);
+    const customer = await Customer.findOne({ phone, ...scope });
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    let remaining = amount;
+    let previousDues = Number(customer.previousDues || 0);
+
+    if (previousDues > 0 && remaining > 0) {
+      const applied = Math.min(previousDues, remaining);
+      previousDues -= applied;
+      remaining -= applied;
+    }
+
+    // Tracked purely so the History dropdown's settle entry can say which
+    // order(s) this payment actually paid down, same "from order, then
+    // order number" tracking the note field covers for manual entries.
+    const touchedOrders = [];
+
+    if (remaining > 0) {
+      const orders = await Order.find({
+        ...scope,
+        "customer.phone": phone,
+        status: { $ne: "cancelled" },
+      }).sort({ createdAt: 1 });
+
+      for (const order of orders) {
+        if (remaining <= 0) break;
+        const due = typeof order.remainingAmount === "number"
+          ? order.remainingAmount
+          : Math.max((order.total || 0) - (order.paidAmount || 0), 0);
+        if (due <= 0) continue;
+
+        const applied = Math.min(due, remaining);
+        order.paidAmount = Number(order.paidAmount || 0) + applied;
+        order.remainingAmount = Math.max(due - applied, 0);
+        if (order.remainingAmount === 0) order.status = "completed";
+        order.version = Number(order.version || 0) + 1;
+        await order.save();
+        touchedOrders.push({ dailyOrderNumber: order.dailyOrderNumber, applied });
+        remaining -= applied;
+      }
+    }
+
+    customer.previousDues = previousDues;
+
+    const appliedAmount = amount - remaining;
+    if (appliedAmount > 0) {
+      const orderRefs = touchedOrders
+        .map((entry) => (entry.dailyOrderNumber !== undefined && entry.dailyOrderNumber !== null ? `#${entry.dailyOrderNumber} (Rs ${entry.applied})` : null))
+        .filter(Boolean)
+        .join(", ");
+      customer.duesHistory.push({
+        type: "settle",
+        amount: appliedAmount,
+        note: [note, orderRefs ? `Applied to orders: ${orderRefs}` : ""].filter(Boolean).join(" - "),
+        balanceAfter: previousDues,
+        createdBy: await currentUserName(req),
+      });
+    }
+
+    await customer.save();
+
+    // appliedAmount can be less than the requested amount if it exceeded
+    // everything this customer actually owed - the frontend caps the input
+    // at totalDue before ever sending this, but this stays defensive
+    // rather than trusting that.
+    res.json({ appliedAmount, unapplied: remaining });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to settle dues", detail: error.message });
+  }
 };

@@ -1,74 +1,61 @@
-const Waiter = require("../models/Waiter");
+const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 
+// Waiter names shown in POS order placement now come straight from the
+// Manage Staff directory (User docs with role: "employee"), filtered to
+// whichever designation is doing the "waiter" job at this shop - Waiter
+// or Order Taker. There is no separate waiter-creation UI anymore (see
+// EmployeesPage.tsx / SidebarPagesSection... actually SettingsPage.tsx -
+// "Manage Staff" is the only place staff, including waiters, get added).
+// Response shape is kept identical to the old Waiter-collection version
+// ({ id, name, isActive }) so POSPage.tsx/EditOrderPage.tsx and their
+// mobile equivalents need no changes.
+const WAITER_DESIGNATIONS = ["waiter", "order taker"];
+
 exports.getWaiters = async (req, res) => {
-  const waiters = await Waiter.find({ ...shopScope(req) }).sort({ name: 1 });
-  res.json(waiters.map((waiter) => ({ ...waiter.toObject(), id: String(waiter._id) })));
-};
-
-exports.createWaiter = async (req, res) => {
-  const name = String(req.body?.name || "").trim();
-
-  if (!name) {
-    return res.status(400).json({ error: "Waiter name is required" });
-  }
-
-  const existingWaiter = await Waiter.findOne({
+  const staff = await User.find({
     ...shopScope(req),
-    name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-  });
-  if (existingWaiter) {
-    return res.status(409).json({ error: "A waiter with this name already exists" });
-  }
+    role: "employee",
+    designation: { $in: WAITER_DESIGNATIONS.map((d) => new RegExp(`^${d}$`, "i")) },
+  }).sort({ name: 1 }).lean();
 
-  const waiter = await Waiter.create({
-    name,
-    isActive: req.body?.isActive !== false,
-    shopId: req.user.shopId,
-  });
-
-  res.status(201).json({ ...waiter.toObject(), id: String(waiter._id) });
+  res.json(
+    staff.map((member) => ({
+      id: String(member._id),
+      name: member.name || member.username,
+      isActive: member.isActive,
+    }))
+  );
 };
 
-exports.updateWaiter = async (req, res) => {
-  const patch = {};
+// Same pattern as getWaiters above, but for "Delivery Rider" - the
+// designation already offered in EmployeesPage.tsx's Manage Staff form
+// (see src/lib/staff-designations.ts). Lets SalesPage.tsx's
+// OnlineOrderControls build a real "assign this delivery to ___" picker
+// from the shop's own staff directory, instead of the old flat
+// Shop.riderPhones broadcast list (still used as a fallback - see
+// orderController.assignRider) - phone is included here (unlike
+// getWaiters, which never needed it) since that's what the WhatsApp
+// notification is actually sent to.
+exports.getRiders = async (req, res) => {
+  const staff = await User.find({
+    ...shopScope(req),
+    role: "employee",
+    designation: /^delivery rider$/i,
+  }).sort({ name: 1 }).lean();
 
-  if (req.body?.name !== undefined) {
-    const name = String(req.body.name || "").trim();
-    if (!name) {
-      return res.status(400).json({ error: "Waiter name is required" });
-    }
-
-    const existingWaiter = await Waiter.findOne({
-      ...shopScope(req),
-      _id: { $ne: req.params.id },
-      name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-    });
-
-    if (existingWaiter) {
-      return res.status(409).json({ error: "A waiter with this name already exists" });
-    }
-
-    patch.name = name;
-  }
-
-  if (req.body?.isActive !== undefined) {
-    patch.isActive = Boolean(req.body.isActive);
-  }
-
-  const waiter = await Waiter.findOneAndUpdate({ _id: req.params.id, ...shopScope(req) }, patch, { new: true });
-  if (!waiter) {
-    return res.status(404).json({ error: "Waiter not found" });
-  }
-
-  res.json({ ...waiter.toObject(), id: String(waiter._id) });
-};
-
-exports.deleteWaiter = async (req, res) => {
-  const waiter = await Waiter.findOneAndDelete({ _id: req.params.id, ...shopScope(req) });
-  if (!waiter) {
-    return res.status(404).json({ error: "Waiter not found" });
-  }
-
-  res.status(204).send();
+  res.json(
+    staff.map((member) => ({
+      id: String(member._id),
+      name: member.name || member.username,
+      phone: member.phone || "",
+      isActive: member.isActive,
+      // Directory details from the Manage Staff form (EmployeesPage.tsx) -
+      // included here so the rider-assignment picker can show more than
+      // just a name/phone if it ever wants to (e.g. vehicle number).
+      vehicleNumber: member.vehicleNumber || "",
+      idCardNumber: member.idCardNumber || "",
+      address: member.address || "",
+    }))
+  );
 };

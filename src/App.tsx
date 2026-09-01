@@ -4,6 +4,7 @@ import PublicOnlyRoute from '@/routes/PublicOnlyRoute';
 import LoginPage from '@/pages/LoginPage';
 import LicenseExpiredPage from '@/pages/LicenseExpiredPage';
 import ReceiptPrintPage from '@/pages/ReceiptPrintPage';
+import CustomerOrderPage from '@/pages/CustomerOrderPage';
 import DashboardShell from '@/pages/dashboard/components/DashboardShell';
 import DashboardPageClient from '@/pages/dashboard/components/DashboardPageClient';
 import POSPage from '@/pages/dashboard/pos/POSPage';
@@ -18,6 +19,7 @@ import LedgerPage from '@/pages/dashboard/LedgerPage';
 import RecordPage from '@/pages/dashboard/RecordPage';
 import ShiftsPage from '@/pages/dashboard/ShiftsPage';
 import PayrollPage from '@/pages/dashboard/PayrollPage';
+import OfflineSyncPage from '@/pages/dashboard/OfflineSyncPage';
 import ReportsPage from '@/pages/dashboard/ReportsPage';
 import AdminPage from '@/pages/dashboard/AdminPage';
 import EmployeesPage from '@/pages/dashboard/EmployeesPage';
@@ -61,6 +63,8 @@ export default function App() {
 
         <Route path="/license-expired" element={<LicenseExpiredPage />} />
         <Route path="/receipt/print/:id" element={<ReceiptPrintPage />} />
+        <Route path="/order/:shopId" element={<CustomerOrderPage />} />
+        <Route path="/order/:shopId/status/:orderId" element={<CustomerOrderPage />} />
 
         <Route element={<ProtectedRoute allowedRoles={['shopowner', 'employee']} />}>
           <Route path="/dashboard" element={<DashboardShell />}>
@@ -76,6 +80,7 @@ export default function App() {
             <Route path="ledger" element={<LedgerPage />} />
             <Route path="record" element={<RecordPage />} />
             <Route path="shifts" element={<ShiftsPage />} />
+            <Route path="offline" element={<OfflineSyncPage />} />
             <Route path="payroll" element={<PayrollPage />} />
             <Route path="reports" element={<ReportsPage />} />
             <Route path="admin" element={<AdminPage />} />

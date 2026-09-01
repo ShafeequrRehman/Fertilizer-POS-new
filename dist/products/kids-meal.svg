@@ -1,0 +1,10 @@
+<svg width="320" height="240" viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="240" rx="28" fill="#E6FAEA"/>
+  <!-- Box -->
+  <path d="M100 120H220L200 200H120L100 120Z" fill="#F05A5A"/>
+  <path d="M100 120L130 80H190L220 120H100Z" fill="#E04848"/>
+  <!-- Smile -->
+  <path d="M140 160C140 170 180 170 180 160" stroke="#FFF" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="145" cy="145" r="4" fill="#FFF"/>
+  <circle cx="175" cy="145" r="4" fill="#FFF"/>
+</svg>

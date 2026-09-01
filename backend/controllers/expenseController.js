@@ -2,12 +2,12 @@ const Expense = require("../models/Expense");
 const { shopScope } = require("../middleware/attachShopScope");
 
 exports.getExpenses = async (req, res) => {
-  const expenses = await Expense.find({ ...shopScope(req) }).sort({ date: -1 });
+  const expenses = await Expense.find({ ...shopScope(req) }).sort({ date: -1 }).lean();
   res.json(expenses);
 };
 
 exports.getExpense = async (req, res) => {
-  const expense = await Expense.findOne({ _id: req.params.id, ...shopScope(req) });
+  const expense = await Expense.findOne({ _id: req.params.id, ...shopScope(req) }).lean();
   if (!expense) return res.status(404).json({ error: "Expense not found" });
   res.json(expense);
 };

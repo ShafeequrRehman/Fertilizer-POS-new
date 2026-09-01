@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
-  BarChart, LineChart, PieChart, Calendar, 
-  Download, Share2, Filter, ArrowUpRight, 
+  BarChart, LineChart, PieChart, Calendar,
+  Share2, Filter, ArrowUpRight,
   ArrowDownRight, FileSpreadsheet, FileText,
   TrendingUp, Target, Layers
 } from 'lucide-react';

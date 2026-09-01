@@ -22,8 +22,17 @@ export default function ThermalReceipt({
   }, []);
 
   const itemsTotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, itemsTotal) : undefined;
-  const dueAmount = Math.max(itemsTotal - (amountTendered ?? 0), 0);
+  // order.total is the real, backend-computed total - once a discount has
+  // been applied (see SalesPage.tsx's completeOrder) that's already
+  // subtracted out of it, unlike itemsTotal above which is always the raw,
+  // pre-discount sum of the item lines. Falling back to itemsTotal only
+  // covers an order printed before order.total was ever set (shouldn't
+  // happen for a completed order, but matches ItemizedBillReceipt.tsx's
+  // same defensive fallback).
+  const billTotal = order.total ?? itemsTotal;
+  const discountAmount = order.discount?.amount || 0;
+  const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
+  const dueAmount = Math.max(billTotal - (amountTendered ?? 0), 0);
   const date = order.createdAt ? new Date(order.createdAt) : null;
   const dateString = date
     ? date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()
@@ -33,8 +42,23 @@ export default function ThermalReceipt({
     : '--:--:--';
   const orderNumber = String(order.dailyOrderNumber ?? order.id.slice(-3)).padStart(3, '0');
 
+  // Scoped to this one shop only, per an explicit request not to change
+  // anything for other shops - see KitchenKotReceipt.tsx's matching
+  // comment for why left-flush instead of centered. Checks
+  // loginUsername/shopName, not businessEmail - see pos-settings.ts's
+  // comment on those fields for why.
+  const shopHaystack = `${settings.loginUsername || ''} ${settings.shopName || ''} ${settings.businessEmail || ''}`.toLowerCase();
+  const isHeavenSlice = shopHaystack.includes('heavenslice') || shopHaystack.includes('heaven slice');
+  const receiptMargin = isHeavenSlice ? '0 8mm 0 2mm' : '0 auto';
+
   return (
-    <div className="thermal-receipt w-[72mm] max-w-[72mm] bg-white text-black font-mono text-[12px] leading-[14px] pb-2">
+    <div className="thermal-receipt w-[70mm] max-w-[70mm] bg-white text-black font-mono text-[12px] leading-[14px] pb-2">
+      {/* 70mm content inside an 80mm page (5mm margin each side) - widened
+          from the old 72mm/4mm to leave headroom for bold text rendering a
+          touch wider than regular weight (synthetic bold glyph widening),
+          which was clipping the rightmost digit of bold right-aligned
+          totals on a real thermal printout even though it looked fine
+          on-screen. See ItemizedBillReceipt.tsx's matching comment. */}
       <style dangerouslySetInnerHTML={{ __html: `
         .thermal-receipt {
           box-sizing: border-box;
@@ -57,25 +81,25 @@ export default function ThermalReceipt({
           }
 
           .thermal-receipt {
-            width: 72mm !important;
-            max-width: 72mm !important;
-            margin: 0 auto !important;
+            width: 70mm !important;
+            max-width: 70mm !important;
+            margin: ${receiptMargin} !important;
           }
         }
       ` }} />
       {type === 'cashier' && logoSrc ? (
-        <div className="mb-3 flex justify-center">
+        <div className="flex justify-center">
           <img
             src={logoSrc}
             alt="Print logo"
-            className="max-h-[72px] w-auto max-w-[190px] object-contain"
+            className="max-h-[100px] w-auto max-w-[220px] object-contain"
           />
         </div>
       ) : null}
 
       {/* Header */}
       <div className="text-center mb-2">
-        <h1 className="text-[18px] leading-[20px] font-bold uppercase mb-1">{settings.receiptHeader || 'Store Name'}</h1>
+        <h1 className="text-[18px] leading-[20px] font-bold uppercase mb-[5px]">{settings.receiptHeader || 'Store Name'}</h1>
         {settings.receiptSubHeader && <p>{settings.receiptSubHeader}</p>}
         {settings.receiptAddress && <p>{settings.receiptAddress}</p>}
         {settings.receiptContact && <p>{settings.receiptContact}</p>}
@@ -101,6 +125,22 @@ export default function ThermalReceipt({
         {order.customer && order.customer.name && order.customer.name !== 'Walk-in Customer' && (
           <p>CUSTOMER: {order.customer.name.toUpperCase()}</p>
         )}
+        {/* Phone/address only belong on the customer's own copy, not the
+            kitchen ticket. Phone stays gated on a real (non-Walk-in) name -
+            validateOrderForm in POSPage.tsx never lets a phone through
+            without a name alongside it, so this is always consistent - plus
+            the walk-in placeholder phone (03000000000) is excluded since it
+            was never a real number the customer gave. Address is
+            DELIBERATELY NOT gated on name being present: a Delivery order
+            can be placed with an address but no typed name (name/phone are
+            optional there too), and the address is exactly the information
+            the delivery needs - it must still print even then. */}
+        {type === 'cashier' && order.customer && order.customer.name && order.customer.name !== 'Walk-in Customer' && order.customer.phone && order.customer.phone !== '03000000000' && (
+          <p>PHONE: {order.customer.phone}</p>
+        )}
+        {type === 'cashier' && order.customer?.address && (
+          <p>ADDRESS: {order.customer.address}</p>
+        )}
       </div>
 
       {/* Dashed Separator */}
@@ -117,7 +157,7 @@ export default function ThermalReceipt({
             <div key={idx} className="mb-1">
               <div className="flex justify-between items-start">
                 <span className="flex-1 pr-1">{item.quantity}x {item.name.toUpperCase()} {priceLine}</span>
-                {type === 'cashier' && <span className="text-right">Rs {itemTotal}</span>}
+                {type === 'cashier' && <span className="text-right pr-[1mm] shrink-0">Rs {itemTotal}</span>}
               </div>
               {item.variation && <p className="ml-4 text-[10px] text-gray-700 uppercase">- {item.variation}</p>}
             </div>
@@ -135,9 +175,19 @@ export default function ThermalReceipt({
             <span>Items Total:</span>
             <span>Rs {itemsTotal.toFixed(2)}</span>
           </div>
-          <div className="flex justify-between font-bold text-[14px] mt-1">
+          {/* This used to print itemsTotal again here too, meaning a
+              discount never showed up anywhere on this receipt - the
+              customer just saw the same figure twice with no explanation
+              for why it was less than the item lines added up to. */}
+          {discountAmount > 0 && (
+            <div className="flex justify-between">
+              <span>Discount {order.discount?.type === 'percent' ? `(${order.discount.value}% - Percentage)` : '(Fixed Value)'}:</span>
+              <span>-Rs {discountAmount.toFixed(2)}</span>
+            </div>
+          )}
+          <div className="flex justify-between gap-2 font-bold text-[13px] mt-1">
             <span>TOTAL:</span>
-            <span>Rs {itemsTotal.toFixed(2)}</span>
+            <span className="shrink-0 pr-[1mm]">Rs {billTotal.toFixed(2)}</span>
           </div>
 
           <div className="mt-3">
@@ -149,9 +199,25 @@ export default function ThermalReceipt({
               <p>DUE: Rs {dueAmount.toFixed(2)}</p>
             )}
             {previousDues > 0 && (
+              // Full arrears breakdown - only for a customer who actually
+              // has previous dues (see this component's own doc comment
+              // on `previousDues`); a customer with none never sees any
+              // of this, everything else on the receipt stays exactly as
+              // it was.
               <>
-                <p className="mt-1">PREVIOUS DUES: Rs {previousDues.toFixed(2)}</p>
-                <p className="font-bold">TOTAL OUTSTANDING: Rs {(itemsTotal + previousDues).toFixed(2)}</p>
+                <p className="mt-1">ARREARS: Rs {previousDues.toFixed(2)}</p>
+                <div className="flex justify-between">
+                  <span>ARREARS+INV BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {(previousDues + billTotal).toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>INVOICE BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {dueAmount.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between font-bold">
+                  <span>ACCOUNT BALANCE:</span>
+                  <span className="pr-[1mm]">Rs {(previousDues + dueAmount).toFixed(2)}</span>
+                </div>
               </>
             )}
           </div>

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en" class="h-full antialiased">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#2F9E75" />
+    <title>POS System</title>
+    <meta name="description" content="Restaurant POS dashboard with installable offline-ready support." />
+    <meta name="application-name" content="POS System" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="POS System" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" href="./icon-192.png" sizes="192x192" type="image/png" />
+    <link rel="icon" href="./icon-512.png" sizes="512x512" type="image/png" />
+    <link rel="apple-touch-icon" href="./icon-192.png" sizes="192x192" />
+    <style>
+      /* Plain, JS-framework-free CSS for #boot-loading below - this has to
+         paint correctly the INSTANT this document loads, before Tailwind's
+         stylesheet or any React code has run, so it can't depend on
+         anything outside this one <style> tag. Prefixed "bootload-" so
+         nothing here can collide with a Tailwind utility class name. */
+      #boot-loading {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        display: grid;
+        place-items: center;
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(247, 179, 43, 0.18), transparent 32%),
+          linear-gradient(135deg, #f5efe4 0%, #fff9f1 55%, #f2f6fb 100%);
+        color: #18212f;
+      }
+      .bootload-shell {
+        width: min(520px, calc(100vw - 48px));
+        padding: 32px 28px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.86);
+        border: 1px solid rgba(24, 33, 47, 0.08);
+        box-shadow: 0 24px 64px rgba(24, 33, 47, 0.14);
+        box-sizing: border-box;
+      }
+      .bootload-eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(195, 112, 42, 0.1);
+        color: #8c3d16;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .bootload-shell h1 {
+        margin: 18px 0 10px;
+        font-size: clamp(28px, 5vw, 42px);
+        line-height: 1.05;
+      }
+      .bootload-shell p {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.7;
+        color: #4c5667;
+      }
+      .bootload-meter {
+        margin-top: 24px;
+        height: 10px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(24, 33, 47, 0.09);
+      }
+      .bootload-meter::before {
+        content: "";
+        display: block;
+        width: 42%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #d95f1a, #f2b84b);
+        animation: bootload-progress 1.15s ease-in-out infinite;
+      }
+      .bootload-pulse {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        background: #d95f1a;
+        box-shadow: 0 0 0 rgba(217, 95, 26, 0.45);
+        animation: bootload-pulse 1.6s infinite;
+      }
+      #boot-loading-reload {
+        display: none;
+        margin-top: 18px;
+        padding: 10px 20px;
+        border: none;
+        border-radius: 999px;
+        background: #18212f;
+        color: #fff;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      @keyframes bootload-progress {
+        0% { transform: translateX(-120%); }
+        100% { transform: translateX(320%); }
+      }
+      @keyframes bootload-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(217, 95, 26, 0.42); }
+        70% { box-shadow: 0 0 0 14px rgba(217, 95, 26, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(217, 95, 26, 0); }
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-BKcE60IH.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-sw17LrgE.css">
+  </head>
+  <body class="min-h-full flex flex-col">
+    <!-- Rendered from plain HTML/CSS (no JS needed to paint it), so the
+         instant Electron navigates here from main.js's splash screen there
+         is NEVER a blank/white frame - this picks up visually right where
+         that splash left off, and stays up until src/main.tsx's mount
+         actually finishes (see window.__hideBootOverlay below, called from
+         main.tsx) or the reload button is used. Previously the window's
+         document was swapped straight to an empty `#root` the moment HTML
+         navigation finished, well before React had actually mounted
+         anything into it - that gap was the white screen. -->
+    <div id="boot-loading">
+      <main class="bootload-shell">
+        <div class="bootload-eyebrow">
+          <span class="bootload-pulse"></span>
+          Starting POS System
+        </div>
+        <h1>Preparing your workspace</h1>
+        <p id="boot-loading-message">The desktop app is loading local data, syncing essential services, and opening your dashboard.</p>
+        <div class="bootload-meter"></div>
+        <button type="button" id="boot-loading-reload" onclick="location.reload()">Reload</button>
+      </main>
+    </div>
+    <script>
+      // Deliberately a plain, non-module inline script - it must run
+      // immediately on parse, with zero dependency on ES module resolution
+      // (main.tsx below is `type="module"` and does its own dynamic
+      // import()s, which is exactly the kind of thing that can stall on a
+      // cold cache - this script must not be able to stall the same way).
+      (function () {
+        var messageEl = document.getElementById('boot-loading-message');
+        var reloadBtn = document.getElementById('boot-loading-reload');
+
+        var slowTimer = setTimeout(function () {
+          if (messageEl) messageEl.textContent = 'Still working - this can take a little longer on a slow connection...';
+        }, 8000);
+
+        var stuckTimer = setTimeout(function () {
+          if (messageEl) messageEl.textContent = 'This is taking unusually long. You can keep waiting, or reload.';
+          if (reloadBtn) reloadBtn.style.display = 'inline-block';
+        }, 20000);
+
+        // Called once by src/main.tsx right after the React app actually
+        // mounts - see the Promise.all(...).then(...) there.
+        window.__hideBootOverlay = function () {
+          clearTimeout(slowTimer);
+          clearTimeout(stuckTimer);
+          var el = document.getElementById('boot-loading');
+          if (el && el.parentNode) el.parentNode.removeChild(el);
+        };
+      })();
+    </script>
+    <div id="root"></div>
+  </body>
+</html>

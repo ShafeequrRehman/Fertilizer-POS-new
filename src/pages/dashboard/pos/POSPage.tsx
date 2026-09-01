@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { checkPendingOrder, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchTables, fetchTableSettings, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchShopProfile, fetchTables, fetchTableSettings, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Table, Waiter } from '@/lib/pos-types';
 import { resolveProductImage } from '@/lib/food-images';
 import { getTableTimerRemainingMs, type TableTimerOrder } from '@/lib/table-timer';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
-import { hasPermission } from '@/lib/auth';
+import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
+import { useNetworkStatus } from '@/lib/network-status';
+import { isDesktopApp } from '@/lib/api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOrdersCache, pushOrdersCache } from '@/lib/local-hub-api';
+import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
+import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
 
 type ElectronWindow = Window & typeof globalThis & {
@@ -74,8 +79,9 @@ function formatTableCountdown(remainingMs: number) {
 }
 
 export default function POSPage() {
-  const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession } = useShopSession();
+  const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
   const { toast: shopToast, popup } = useToast();
+  const { isOnline } = useNetworkStatus();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
@@ -125,24 +131,125 @@ export default function POSPage() {
   const [isManualEntry, setIsManualEntry] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [variationPickerGroup, setVariationPickerGroup] = useState<ProductGroup | null>(null);
+  // Product grid pagination - starts at 10, grows by 10 each "Load More"
+  // tap instead of rendering the entire catalog at once (a busy shop's full
+  // product list was a long scroll before this).
+  const [visibleProductCount, setVisibleProductCount] = useState(10);
 
   const suggestionRef = useRef<HTMLDivElement>(null);
   const phoneInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Loads the product grid + waiter dropdown from the local hub's cached
+  // reference data instead of the cloud - what makes the POS screen itself
+  // usable while this till has no internet. That cache is only ever as
+  // fresh as the last successful online load (see the push at the bottom
+  // of loadProducts below, plus the 5-minute background push in
+  // lib/offline-sync.ts) - if this till has genuinely never been online
+  // since install, there's nothing to fall back to yet.
+  // `silent` is used for the cache-first warm-paint below (isOnline case) -
+  // no point telling the cashier "Offline" for the split second before the
+  // real cloud refresh lands right after.
+  async function loadProductsFromLocalHub(silent = false) {
+    const reachable = await isLocalHubReachable();
+    if (!reachable) {
+      setCategories(['All']);
+      setProducts([]);
+      if (silent) return;
+      const diagnostics = await getLocalHubStartDiagnostics();
+      const reason = diagnostics && !diagnostics.started
+        ? ` (${diagnostics.error || 'failed to start'})`
+        : '';
+      setStatusMessage({ tone: 'error', text: `Offline, and the Local Hub isn't reachable either${reason} - restart the app to enable offline mode.` });
+      return;
+    }
+    const snapshot = await getReferenceData();
+    const offlineProducts = (snapshot.products || []) as Product[];
+    const offlineWaiters = (snapshot.staff || []) as Waiter[];
+    const derivedCategories = Array.from(new Set(offlineProducts.map((p) => p.category).filter(Boolean)));
+    setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
+    setProducts(offlineProducts);
+    setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+    if (silent) return;
+    if (offlineProducts.length === 0) {
+      setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
+    } else {
+      setStatusMessage({ tone: 'info', text: `Offline - showing the product list as of the last sync${snapshot.updatedAt ? ` (${new Date(snapshot.updatedAt).toLocaleTimeString()})` : ''}.` });
+    }
+  }
+
   useEffect(() => {
+    // The real source of truth whenever this till can reach it - fetched
+    // in the background on desktop (see loadProducts below) so a cloud
+    // round trip never blocks the cashier from seeing products at all, and
+    // is the only path at all for a plain browser tab (no Local Hub cache
+    // to have shown a moment ago there).
+    async function refreshFromCloud() {
+      const [productResponse, waiterResponse, shopProfile, tableResponse] = await Promise.all([
+        fetchProducts(),
+        fetchWaiters(),
+        // Best-effort - a shop with no custom table layout (the default)
+        // just keeps using the plain numbered list if this fails, same as
+        // any other network hiccup here.
+        fetchShopProfile().catch(() => null),
+        // The real Table records (name + isFamily) that drive the rich
+        // table grid below - see TableManagementSection.tsx/Table model.
+        fetchTables().catch(() => []),
+      ]);
+      setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
+      setProducts(productResponse?.products ?? []);
+      setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
+      setTables(sortTables((tableResponse ?? []).filter((table) => table.isActive)));
+      setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
+
+      // Best-effort - keeps the Local Hub's offline copy fresh the moment
+      // this till has real data, instead of only ever updating it on the
+      // 5-minute background tick (see lib/offline-sync.ts).
+      if (isDesktopApp()) {
+        void pushReferenceData({
+          shopName: getAuthShop()?.name || '',
+          products: productResponse?.products || [],
+          customers: [],
+          staff: waiterResponse,
+          tables: shopProfile?.tables || [],
+          // `roles` deliberately omitted (not sent as []) - this call site
+          // only ever refreshes products/waiters; referenceData.js's set()
+          // preserves whatever roles offline-sync.ts's own less-frequent
+          // full push last put there instead of wiping it out.
+        }).catch(() => {});
+      }
+    }
+
     async function loadProducts() {
+      if (isDesktopApp()) {
+        // Cache-first, always - paint instantly from whatever this till
+        // already has locally (see lib/local-hub-api.ts) instead of ever
+        // making the cashier wait on a cloud round trip just to see the
+        // product grid. If we're online, a real refresh then happens
+        // quietly in the background and swaps in the moment it lands; if
+        // that refresh fails (e.g. isOnline read stale-true for a moment),
+        // the cache already on screen simply stays put - no spinner, no
+        // visible failure, nothing slowing the cashier down.
+        setIsLoadingProducts(true);
+        try {
+          await loadProductsFromLocalHub(isOnline);
+        } finally {
+          setIsLoadingProducts(false);
+        }
+        if (isOnline) {
+          refreshFromCloud().catch(() => {
+            // Best-effort - the cache already on screen is still valid,
+            // and the next isOnline flip or 5-minute sync tick will retry.
+          });
+        }
+        return;
+      }
+
+      // Plain browser tab - no Local Hub, no offline story at all.
+      setIsLoadingProducts(true);
       try {
-        const [productResponse, waiterResponse, tableResponse] = await Promise.all([
-          fetchProducts(),
-          fetchWaiters(),
-          fetchTables(),
-        ]);
-        setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
-        setProducts(productResponse?.products ?? []);
-        setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
-        setTables(sortTables((tableResponse ?? []).filter((table) => table.isActive)));
+        await refreshFromCloud();
       } catch (error) {
         setCategories(['All']);
         setProducts([]);
@@ -152,7 +259,14 @@ export default function POSPage() {
       }
     }
     void loadProducts();
-  }, []);
+  }, [isOnline]);
+
+  // The hidden auto-print iframe (see printReadyUrl below) loads
+  // PrintOrderPage.tsx in its own separate React tree - a toast shown from
+  // inside it would render invisibly in that hidden iframe. It posts a
+  // message up here instead once it's actually called window.print(); this
+  // is what shows the popup for real, on screen. See print-notify.ts.
+  useEffect(() => listenForPrintSentMessages(shopToast), [shopToast]);
 
   useEffect(() => {
     void fetchTableSettings().then((settings) => {
@@ -300,6 +414,17 @@ export default function POSPage() {
     return matchesCategory && matchesSearch;
   });
 
+  // Changing category or search re-filters the whole list, so a stale
+  // "load more" position from the previous filter would otherwise leave
+  // the grid showing an arbitrary/inconsistent slice - always restart at
+  // 10 whenever the filters themselves change.
+  useEffect(() => {
+    setVisibleProductCount(10);
+  }, [activeCategory, productSearchQuery]);
+
+  const visibleGroups = filteredGroups.slice(0, visibleProductCount);
+  const hasMoreProducts = filteredGroups.length > visibleGroups.length;
+
   function handleGroupClick(group: ProductGroup) {
     // Deals and single-variation products (the vast majority - drinks,
     // sides, anything never given a size/flavor breakdown) add straight
@@ -366,7 +491,27 @@ export default function POSPage() {
     setSearchQuery(query);
 
     try {
-      const result = await fetchCustomerSearch(query, searchBy);
+      let result: Customer[];
+      if (isDesktopApp() && !isOnline) {
+        // Offline: filter the Local Hub's cached customer list (kept
+        // fresh in the background by offline-sync.ts's periodic
+        // pushCurrentReferenceData) client-side instead of a live cloud
+        // search - same instant, no-network-required story as the
+        // product grid above, instead of this autocomplete just failing
+        // outright with nothing to fall back to.
+        const snapshot = await getReferenceData();
+        const cached = (snapshot.customers || []) as Customer[];
+        const q = query.trim().toLowerCase();
+        result = cached
+          .filter((customer) => {
+            const matchesName = searchBy !== 'phone' && (customer.name || '').toLowerCase().includes(q);
+            const matchesPhone = searchBy !== 'name' && (customer.phone || '').toLowerCase().includes(q);
+            return matchesName || matchesPhone;
+          })
+          .slice(0, 20);
+      } else {
+        result = await fetchCustomerSearch(query, searchBy);
+      }
       if (result.length > 0) {
         setSuggestions(result);
         setShowNewCustomerPrompt(false);
@@ -473,14 +618,25 @@ export default function POSPage() {
 
     if (orderFormData.orderType === 'DineIn') {
       if (!orderFormData.table) return showValidationError('Please select a table before saving a dine-in order.');
+      // Defensive re-check - the table grid already disables a locked
+      // table's button, but this catches the rare case where it became
+      // occupied (another terminal) in the moment between selecting it
+      // and tapping Save.
+      if (isTableLocked(orderFormData.table)) return showValidationError(`Table ${orderFormData.table} already has an active order - complete/pay it, or use "Clear Table" on the timer alert to free it up.`);
       if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty for dine-in.');
       if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a dine-in phone number is entered.');
       return true;
     }
 
-    if (!orderFormData.customer.trim()) return showValidationError('Customer name is required for takeaway and delivery orders.');
-    if (!/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX for takeaway and delivery orders.');
-    if (orderFormData.orderType === 'Delivery' && !orderFormData.address.trim()) return showValidationError('Address is required for delivery orders.');
+    // TakeAway and Delivery: name, phone, and address are all optional now -
+    // a walk-in counter customer or a quick phone order can check out with
+    // none of them, same as DineIn already allowed. If a phone IS entered
+    // though, it still has to be a real, valid number, and a name is
+    // required alongside it - a phone with no name (or an invalid one) is
+    // more likely a typo than a deliberate walk-in, and a due left on a
+    // phone-but-no-name order can't reliably be found again later.
+    if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty.');
+    if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a phone number is entered.');
     return true;
   }
 
@@ -490,29 +646,64 @@ export default function POSPage() {
     isSavingOrderRef.current = true;
     setIsSavingOrder(true);
 
-    try {
-      await updateExistingCustomerIfNeeded();
+    // Guards the background pending-bill toast below (see checkPendingOrder
+    // call) from overwriting the real "Order saved" confirmation if that
+    // cloud lookup happens to resolve after the order itself already went
+    // through - the order finishing is always the more important message.
+    let orderFinalized = false;
 
-      // A customer is allowed to place a new order even while an older one
-      // of theirs is still pending - the old order stays exactly as-is
-      // (its own line in the order history / kitchen queue) and the
-      // outstanding amount on it is folded into "Previous Dues" the next
-      // time any of their bills is paid (see Sales page's Complete
-      // Payment panel), instead of blocking checkout outright like before.
-      if (orderFormData.phone) {
-        try {
-          const pendingOrder = await checkPendingOrder(orderFormData.phone);
-          if (pendingOrder.exists) {
-            shopToast.info('Note: this customer has an earlier pending bill. It will be added to their next payment.');
-          }
-        } catch {
-          // Non-blocking - if this lookup fails for any reason, still let
-          // the order go through.
+    try {
+      // Both of these are cloud lookups/writes - skipped entirely while
+      // offline (the till has no way to reach them, and neither is
+      // essential to actually ringing up the order), and now fire-and-
+      // forget even while online. Neither one feeds into orderPayload
+      // below (the order embeds the customer's name/phone/address exactly
+      // as typed, not a re-fetched record, and the pending-bill check is
+      // purely an informational toast) - so there's nothing for the
+      // cashier to gain by waiting on either cloud round trip before the
+      // order itself gets built and saved. Previously these were awaited
+      // in sequence, which meant a slow or flaky connection to the remote
+      // backend added its full round-trip time (or, worse, a thrown error
+      // from updateCustomer) to every single online checkout - up to and
+      // including silently failing to place the order at all. Now both
+      // just run in the background; if either fails, it's logged and
+      // otherwise ignored.
+      if (!(isDesktopApp() && !isOnline)) {
+        void updateExistingCustomerIfNeeded().catch((err) => {
+          console.error('Background customer profile update failed (order still proceeds):', err);
+        });
+
+        // A customer is allowed to place a new order even while an older
+        // one of theirs is still pending - the old order stays exactly
+        // as-is (its own line in the order history / kitchen queue) and
+        // the outstanding amount on it is folded into "Previous Dues" the
+        // next time any of their bills is paid (see Sales page's Complete
+        // Payment panel), instead of blocking checkout outright like
+        // before.
+        if (orderFormData.phone) {
+          void checkPendingOrder(orderFormData.phone)
+            .then((pendingOrder) => {
+              if (pendingOrder?.exists && !orderFinalized) {
+                shopToast.info('Note: this customer has an earlier pending bill. It will be added to their next payment.');
+              }
+            })
+            .catch(() => {
+              // Non-blocking - if this lookup fails for any reason, the
+              // order has already gone through regardless.
+            });
         }
       }
 
-      const customerName = orderFormData.orderType === 'DineIn' && !orderFormData.customer.trim() ? 'Dine-In Customer' : orderFormData.customer.trim();
-      const customerPhone = orderFormData.orderType === 'DineIn' && !orderFormData.phone ? '03000000000' : orderFormData.phone;
+      // Name/phone/address are optional for every order type now (see
+      // validateOrderForm above) - an empty name falls back to the same
+      // placeholder every other page in this app already uses to display a
+      // nameless order ('Dine-In Customer' for DineIn, 'Walk-in Customer'
+      // otherwise - see RecordPage.tsx/SalesPage.tsx's own label()
+      // functions), and an empty phone falls back to the walk-in
+      // placeholder number (03000000000) that Customer Dues/Ledger already
+      // knows to exclude from tracking.
+      const customerName = orderFormData.customer.trim() || (orderFormData.orderType === 'DineIn' ? 'Dine-In Customer' : 'Walk-in Customer');
+      const customerPhone = orderFormData.phone || '03000000000';
       const now = new Date().toISOString();
       const clientSyncId = crypto.randomUUID();
 
@@ -536,13 +727,187 @@ export default function POSPage() {
         version: 1,
       };
 
-      const savedOrder = await createOrder(orderPayload) as SavedOrder;
+      // Offline mode: only ever attempted inside the desktop app (the
+      // Local Hub - see lib/local-hub-api.ts - only exists there). A
+      // paired phone's own offline fallback lives in CheckoutScreen.tsx on
+      // pos-mobile; this branch is specifically the till's own POS screen
+      // placing an order straight into its own Local Hub queue.
+      let isOfflineOrder = isDesktopApp() && !isOnline;
+      let savedOrder: SavedOrder;
+
+      async function queueLocally() {
+        // Any order that takes this path prints locally, immediately,
+        // right below (no cloud record exists yet to claim first - see
+        // that block's own comment) - whenever a printer is actually
+        // configured for it. Telling the Local Hub about that NOW, at
+        // queue time, is what lets importOfflineOrders mark the eventual
+        // cloud record as already-printed, so DashboardShell.tsx's
+        // background KitchenPrintWatcher/ReceiptPrintWatcher don't print
+        // this same order a second time the moment it syncs.
+        const printSettings = getStoreSettings();
+        const isElectronNow = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+        // receipt is always false here now - every order type, TakeAway
+        // included, only ever prints its kitchen ticket at placement (see
+        // this function's own header comment below and the removed
+        // TakeAway-specific block further down this file). The customer
+        // receipt prints once, at Complete Order, same as DineIn/Delivery.
+        // Either printer counts here ONLY for Urban Crunch (the one shop
+        // with category-based counter routing enabled - see
+        // kitchen-print-routing.ts) - its orders might route entirely to
+        // the counter printer (Ice Cream/Drinks/Shwarma) with no kitchen-
+        // printer item at all, but the till still handles all of this
+        // order's kitchen-side printing itself at placement below, so the
+        // background watcher must stay hands-off either way. Every other
+        // shop still only ever prints to kitchenPrinter, so only that flag
+        // should count for them.
+        const printFlags = {
+          kitchen: isElectronNow && !!(printSettings.kitchenPrinter || (isCategoryPrintRoutingEnabled() && printSettings.counterPrinter)),
+          receipt: false,
+        };
+        const localRecord = await createLocalOrder(orderPayload, { name: getAuthUser()?.name || getAuthUser()?.username }, printFlags);
+        return {
+          ...orderPayload,
+          id: `local-${localRecord.id}`,
+          dailyOrderNumber: localRecord.localOrderNumber,
+          // Tr# - assigned automatically by queueOrder alongside
+          // localOrderNumber above, so it's ready to print on the receipt
+          // immediately, same as dailyOrderNumber.
+          shopSequenceNumber: localRecord.shopSequenceNumber,
+        } as SavedOrder;
+      }
+
+      // If this till already has offline orders queued and not yet synced,
+      // a brand new order MUST also queue locally - never go straight to
+      // the cloud - even if we're clearly online right now. Otherwise the
+      // cloud's own ticket counter (still sitting wherever it was before
+      // this till went offline, since the backlog hasn't synced yet) would
+      // hand out a number that collides with one already given to a
+      // customer offline (e.g. 20 orders queued offline as #1-20, then a
+      // new "online" order also getting #1 because the cloud counter never
+      // advanced past 0). Queuing this one locally too keeps every order
+      // in ONE unbroken sequence - it becomes #21, and gets its real cloud
+      // number in the correct order once the whole backlog syncs together
+      // (see orderController.importOfflineOrders' oldest-first ordering).
+      let hasLocalBacklog = false;
+      if (isDesktopApp() && !isOfflineOrder) {
+        try {
+          const status = await getSyncStatus();
+          hasLocalBacklog = status.pendingCount > 0;
+        } catch {
+          // Local Hub unreachable is its own problem, handled below by the
+          // normal cloud-vs-local race - not a reason to block here.
+        }
+      }
+
+      if (isOfflineOrder) {
+        savedOrder = await queueLocally();
+      } else if (isDesktopApp() && hasLocalBacklog) {
+        savedOrder = await queueLocally();
+        isOfflineOrder = true;
+      } else if (isDesktopApp()) {
+        // Order numbering must never depend on whether this particular
+        // order happens to go through the cloud or not - see
+        // orderController.js's createOrder for the backend half of this.
+        // Reserve the ticket number from THIS till's own Local Hub FIRST,
+        // exactly like an offline order would get one, and send it along
+        // so the cloud honors it instead of handing out its own. If the
+        // Local Hub can't be reached for some reason, orderPayload simply
+        // goes without one and the cloud falls back to its own counter,
+        // same as before this existed. These are two completely
+        // independent counters (see reserveLifetimeOrderNumber's own
+        // comment), so there's no reason to reserve them one after the
+        // other and pay for two sequential LAN round trips - running them
+        // together via Promise.allSettled halves the time this step adds
+        // before the cloud-create race below even starts.
+        const [dailyNumberResult, lifetimeNumberResult] = await Promise.allSettled([
+          reserveLocalOrderNumber(),
+          reserveLifetimeOrderNumber(),
+        ]);
+        if (dailyNumberResult.status === 'fulfilled') {
+          orderPayload.requestedDailyOrderNumber = dailyNumberResult.value;
+        }
+        if (lifetimeNumberResult.status === 'fulfilled') {
+          orderPayload.requestedShopSequenceNumber = lifetimeNumberResult.value;
+        }
+
+        // isOnline only re-checks every 5s (see network-status.ts) and can
+        // still read stale-true for a moment right after this till
+        // actually loses its connection - racing a short timeout here
+        // means a genuinely offline till still gets its order queued
+        // (with a real ticket number) within a few seconds, instead of the
+        // cashier standing at the till waiting out the full 8-second
+        // default request timeout first. When actually online (the
+        // overwhelming majority of the time) this resolves in well under a
+        // second and nothing changes. Safe even if the abandoned cloud
+        // request eventually completes in the background anyway -
+        // createOrder is idempotent on clientSyncId (see
+        // orderController.js), so whichever of the two paths lands first
+        // wins and the other is a no-op, never a duplicate order.
+        try {
+          savedOrder = await Promise.race([
+            createOrder(orderPayload) as Promise<SavedOrder>,
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('Cloud order create timed out')), 4000);
+            }),
+          ]);
+        } catch {
+          savedOrder = await queueLocally();
+          isOfflineOrder = true;
+        }
+      } else {
+        savedOrder = await createOrder(orderPayload) as SavedOrder;
+      }
+
+      // Best-effort reconciliation, not the primary numbering mechanism any
+      // more (see the reservation above) - just keeps the Local Hub's
+      // counter honest in case it was ever unreachable a moment ago (or on
+      // pos-mobile's own direct-online path, once that's wired up). See
+      // local-hub-api.ts's syncOrderCounter.
+      if (isDesktopApp() && !isOfflineOrder && shopSession?.id && typeof savedOrder.dailyOrderNumber === 'number') {
+        void syncOrderCounter(shopSession.id, savedOrder.dailyOrderNumber);
+      }
+      // Same best-effort reconciliation for Tr# - see local-hub-api.ts's
+      // syncLifetimeCounter.
+      if (isDesktopApp() && !isOfflineOrder && typeof savedOrder.shopSequenceNumber === 'number') {
+        void syncLifetimeCounter(savedOrder.shopSequenceNumber);
+      }
+
+      // An order queued via createLocalOrder (the offline/backlog branches
+      // above) is already instantly visible everywhere - Sales/Dashboard/
+      // Kitchen's own loadOrdersFromLocalHub merges in whatever's still
+      // sitting in the Local Hub's pending-new-orders queue (see
+      // offline-order-helpers.ts's mergeOrdersForDisplay). An order that
+      // went straight to the cloud (this branch) has NO such queue entry -
+      // it exists in MongoDB the instant createOrder() above resolved, but
+      // the Local Hub's own orders CACHE (a separate thing - a snapshot of
+      // recent cloud orders, see orderCache.js) doesn't know about it yet.
+      // That snapshot only otherwise refreshes on Sales/Dashboard's own
+      // 45-second poll or a manual Refresh click - which is exactly the
+      // "I have to wait or refresh again and again" gap: the order is
+      // real and paid-for, just not in the one place every other page
+      // actually reads from yet. Patching it in here, the moment this till
+      // knows the order exists, closes that gap without waiting on
+      // anything - best-effort and never blocks the UI (the cashier's
+      // already been told the order saved by this point).
+      if (isDesktopApp() && !isOfflineOrder) {
+        void (async () => {
+          try {
+            const cache = await getOrdersCache();
+            const withoutDuplicate = cache.orders.filter((cached) => (cached as SavedOrder).id !== savedOrder.id);
+            await pushOrdersCache([savedOrder, ...withoutDuplicate]);
+          } catch {
+            // Best-effort - the next natural cache refresh (any page's
+            // poll, or a manual Refresh) still picks this order up fine.
+          }
+        })();
+      }
 
       setCart([]);
       resetOrderForm();
       // Lock the table this order just used right away, instead of
       // waiting up to TABLE_STATUS_POLL_MS for the next poll to notice it.
       if (savedOrder.orderType === 'DineIn' && savedOrder.table) void loadActiveTableOrders();
+      orderFinalized = true;
       // "content based on activity context" (Technical Requirements #1): a
       // dine-in order mentions its table, and a customer-sync failure gets
       // its own warning-toned popup instead of pretending everything went
@@ -552,7 +917,9 @@ export default function POSPage() {
         ? `Table ${savedOrder.table} - kitchen receipt is printing now.`
         : 'Kitchen receipt is printing now.';
 
-      if (savedOrder.customerSyncWarning) {
+      if (isOfflineOrder) {
+        popup({ tone: 'success', title: 'Order Saved Successfully', message: `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.` });
+      } else if (savedOrder.customerSyncWarning) {
         popup({ tone: 'error', title: 'Order Saved, With a Warning', message: `${savedOrderLabel} was saved, but: ${savedOrder.customerSyncWarning}` });
       } else {
         popup({ tone: 'success', title: 'Order Saved Successfully', message: `${savedOrderLabel} saved! ${contextLine}` });
@@ -566,19 +933,76 @@ export default function POSPage() {
           const settings = getStoreSettings();
           const printLogo = localStorage.getItem('preferred-print-logo');
 
-          if (settings.kitchenPrinter) {
-            ipcRenderer.invoke('print-kitchen-receipt-data', savedOrder, settings.kitchenPrinter, printLogo, settings).catch(console.error);
+          // An offline order has no cloud record yet (nothing to claim,
+          // and nothing else could possibly be racing to print it - no
+          // other till/process can even see it until it syncs), so this
+          // till just prints straight away instead of claiming first.
+          const claimKitchen = isOfflineOrder ? Promise.resolve() : claimKitchenPrint(savedOrder.id);
+
+          if (settings.kitchenPrinter || settings.counterPrinter) {
+            // Claim before printing, same rule the background poll follows
+            // (see DashboardShell.tsx) - guarantees this order can never
+            // get printed twice even if this till's own immediate-print
+            // path and the poll loop somehow race on the same order.
+            claimKitchen
+              .then(() => {
+                // Ice Cream/Drinks and Shwarma items print on the counter
+                // printer (Ice Cream+Drinks combined on one slip, Shwarma
+                // on its own separate slip) - everything else still prints
+                // on the kitchen printer, same as before this split
+                // existed. See kitchen-print-routing.ts.
+                const categoryLookup = buildCategoryLookup(products);
+                void dispatchKitchenPrints(
+                  savedOrder.items,
+                  categoryLookup,
+                  settings,
+                  (groupItems, printerName, label) =>
+                    reportPrintOutcome(
+                      ipcRenderer.invoke('print-kitchen-receipt-data', { ...savedOrder, items: groupItems }, printerName, printLogo, settings),
+                      label,
+                      shopToast,
+                    ),
+                );
+              })
+              .catch((err) => {
+                // 409 just means something else already claimed it (the
+                // background poll almost certainly beat this to it by a
+                // few hundred ms) - not an error, nothing to do.
+                if (!(err instanceof ApiError) || err.status !== 409) {
+                  console.error('Kitchen print claim failed:', err);
+                }
+              });
           } else {
             console.warn("No kitchen printer configured in settings.");
           }
 
-          void sendOrderPlacedMessage(savedOrder, settings);
+          // Every order type - TakeAway included - only ever prints its
+          // kitchen ticket right here at placement now. The customer/
+          // cashier receipt (and, previously, a small order-number token
+          // alongside it) used to print immediately for TakeAway on the
+          // reasoning that "they pay and collect right away" - in
+          // practice that meant an extra token slip AND a full receipt
+          // came out before the order was even paid for. It now prints
+          // exactly once, for every order type alike, at Complete Order on
+          // the Sales page (or via DashboardShell.tsx's ReceiptPrintWatcher
+          // for an order completed from a phone with no printer of its
+          // own) - see orderController.js's getUnprintedReceiptOrders.
+
+          // WhatsApp needs the cloud (the session lives on the server) and
+          // a real order id to link to - skipped for offline orders; the
+          // customer gets notified once this order syncs and creates its
+          // real cloud record instead.
+          if (!isOfflineOrder) {
+            void sendOrderPlacedMessage(savedOrder, settings);
+          }
         } catch (err) {
           console.error("Electron print error:", err);
-          setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
-          void sendOrderPlacedMessage(savedOrder, getStoreSettings());
+          if (!isOfflineOrder) {
+            setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
+            void sendOrderPlacedMessage(savedOrder, getStoreSettings());
+          }
         }
-      } else {
+      } else if (!isOfflineOrder) {
         setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
         void sendOrderPlacedMessage(savedOrder, getStoreSettings());
       }
@@ -593,6 +1017,14 @@ export default function POSPage() {
   async function handleOpenShopFromPOS() {
     setIsOpeningShop(true);
     try {
+      if (isDesktopApp() && !isOnline) {
+        // No cloud to reach - open locally and let the sync engine turn
+        // this into a real ShopSession the moment the till is back online
+        // (see offline-sync.ts's reconciliation step).
+        openShopLocally();
+        shopToast.success('Shop opened offline. Will sync once back online.');
+        return;
+      }
       await openShopSession();
       await refreshShopSession();
       shopToast.success('Shop opened. Orders can now be taken.');
@@ -640,10 +1072,14 @@ export default function POSPage() {
   return (
     <div className="space-y-6">
       {statusMessage ? <StatusBanner tone={statusMessage.tone} text={statusMessage.text} /> : null}
-      {/* Checkout must always sit to the right of the products, at every
-          window size - never stack below - even if that means the product
-          grid drops to fewer/narrower columns on smaller screens. */}
-      <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
+      {/* Checkout sits to the right of the products from tablet width (sm,
+          640px) up - never stacking there, even if that means the product
+          grid drops to fewer/narrower columns. Below that (a real phone
+          screen) there simply isn't room for a 240px+ fixed sidebar next to
+          a usable product grid at the same time - that combination doesn't
+          fit and used to overflow/break - so it stacks to one column
+          instead: full-width product grid, checkout panel underneath. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
         <section className="space-y-5">
           <div className="glass rounded-[32px] p-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -656,7 +1092,11 @@ export default function POSPage() {
                 <IconToggleButton active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={18} /></IconToggleButton>
               </div>
             </div>
-            <div className="mt-4 flex gap-3 overflow-x-auto pb-1">
+            {/* Wraps onto as many lines as needed instead of scrolling
+                sideways - every category is visible and one tap away
+                instead of needing to drag a horizontal scrollbar to find
+                it, which is what this replaces. */}
+            <div className="mt-4 flex flex-wrap gap-1.5">
               {categories.map((category) => (
                 <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-5 py-2.5 text-sm font-bold transition ${activeCategory === category ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>
                   {category}
@@ -673,7 +1113,7 @@ export default function POSPage() {
           <div className={viewMode === 'grid' ? 'grid grid-cols-3 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
-            {!isLoadingProducts && filteredGroups.length > 0 ? filteredGroups.map((group) => {
+            {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group) => {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
@@ -713,15 +1153,31 @@ export default function POSPage() {
                         </div>
                       ) : null}
                     </div>
-                    <div className={`flex items-center justify-between gap-1 ${viewMode === 'list' ? '' : 'mt-3 pt-2 border-t border-gray-50'}`}>
-                      <span className="min-w-0 truncate text-[12px] font-black text-gray-900">{hasVariations ? `From PKR ${cheapestPrice}` : `PKR ${group.variations[0].price}`}</span>
-                      <span className="shrink-0 rounded-[8px] flex items-center justify-center bg-black h-[22px] px-2 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? 'Select' : 'Add'}</span>
+                    {/* Price gets its own line instead of sharing a row with
+                        the Select/Add button - squeezed side by side the two
+                        were fighting for width and the price (the important
+                        part) was the one getting truncated ("From PKR ..."). */}
+                    <div className={`${viewMode === 'list' ? '' : 'mt-3 pt-2 border-t border-gray-50'}`}>
+                      <p className="truncate text-[12px] font-black text-gray-900">{hasVariations ? `From PKR ${cheapestPrice}` : `PKR ${group.variations[0].price}`}</p>
+                      <span className="mt-1.5 inline-flex w-fit shrink-0 items-center justify-center rounded-[8px] bg-black h-[22px] px-2.5 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? 'Select' : 'Add'}</span>
                     </div>
                   </div>
                 </button>
               );
             }) : null}
           </div>
+
+          {hasMoreProducts ? (
+            <div className="flex justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setVisibleProductCount((previous) => previous + 10)}
+                className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
+              >
+                Load More ({filteredGroups.length - visibleGroups.length} more)
+              </button>
+            </div>
+          ) : null}
         </section>
 
         <aside className="glass sticky top-6 rounded-[24px]">
@@ -735,6 +1191,9 @@ export default function POSPage() {
                 <Trash2 size={16} />
               </button>
             </div>
+            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="mt-3 w-full rounded-[20px] bg-[#E2F33C] px-5 py-3 text-base font-black text-black shadow-lg shadow-yellow-200/60 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
+              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
+            </button>
           </div>
 
           <div className="space-y-3 border-b border-white/40 bg-white/25 p-4">
@@ -922,9 +1381,6 @@ export default function POSPage() {
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
               <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
-            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
-              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
-            </button>
           </div>
         </aside>
       </div>

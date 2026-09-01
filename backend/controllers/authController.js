@@ -2,6 +2,7 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const Shop = require("../models/Shop");
 const License = require("../models/License");
+const { isLicenseExpired } = License;
 const Role = require("../models/Role");
 const {
   signAccessToken,
@@ -30,7 +31,7 @@ function redirectPathFor(role) {
 // see auth/tokenService.js for the tradeoffs of that approach.
 async function resolveEmployeePermissions(user) {
   if (user.role !== "employee" || !user.employeeRoleId) return [];
-  const role = await Role.findById(user.employeeRoleId);
+  const role = await Role.findById(user.employeeRoleId).lean();
   return role ? role.permissions : [];
 }
 
@@ -155,7 +156,7 @@ exports.login = async (req, res) => {
     }
 
     // Shop Owner / Employee: shop + license must both check out.
-    const shop = await Shop.findById(user.shopId);
+    const shop = await Shop.findById(user.shopId).lean();
     if (!shop) {
       return res.status(403).json({ message: "No shop is associated with this account. Contact the software provider.", reason: "shop_not_found" });
     }
@@ -170,8 +171,8 @@ exports.login = async (req, res) => {
     }
 
     // 5. verify license has not expired
-    const license = await License.findOne({ shopId: shop._id });
-    if (!license || license.isExpired()) {
+    const license = await License.findOne({ shopId: shop._id }).lean();
+    if (!license || isLicenseExpired(license)) {
       return res.status(402).json({
         message: "Your license has expired. Please contact the software provider to renew your subscription before continuing.",
         reason: license ? "license_expired" : "license_missing",
@@ -190,7 +191,7 @@ exports.login = async (req, res) => {
       refreshToken,
       refreshTokenExpiresAt,
       user: safeUser(user),
-      shop: { id: shop._id, name: shop.name, status: shop.status },
+      shop: { id: shop._id, name: shop.name, status: shop.status, enabledPages: shop.enabledPages ?? null },
       license: { status: license.status, expiryDate: license.expiryDate },
       permissions,
       redirectTo: redirectPathFor(user.role),
@@ -224,12 +225,12 @@ exports.refresh = async (req, res) => {
     }
 
     if (user.role !== "superadmin") {
-      const shop = await Shop.findById(user.shopId);
+      const shop = await Shop.findById(user.shopId).lean();
       if (!shop || shop.status === "suspended") {
         return res.status(402).json({ message: "Your shop has been suspended.", reason: "shop_suspended" });
       }
-      const license = await License.findOne({ shopId: shop._id });
-      if (!license || license.isExpired()) {
+      const license = await License.findOne({ shopId: shop._id }).lean();
+      if (!license || isLicenseExpired(license)) {
         return res.status(402).json({ message: "Your license has expired.", reason: license ? "license_expired" : "license_missing" });
       }
     }
@@ -273,13 +274,13 @@ exports.me = async (req, res) => {
       return res.json({ user: safeUser(user) });
     }
 
-    const shop = await Shop.findById(user.shopId);
-    const license = shop ? await License.findOne({ shopId: shop._id }) : null;
+    const shop = await Shop.findById(user.shopId).lean();
+    const license = shop ? await License.findOne({ shopId: shop._id }).lean() : null;
 
     res.json({
       user: safeUser(user),
-      shop: shop ? { id: shop._id, name: shop.name, status: shop.status } : null,
-      license: license ? { status: license.status, expiryDate: license.expiryDate, isExpired: license.isExpired() } : null,
+      shop: shop ? { id: shop._id, name: shop.name, status: shop.status, enabledPages: shop.enabledPages ?? null } : null,
+      license: license ? { status: license.status, expiryDate: license.expiryDate, isExpired: isLicenseExpired(license) } : null,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", detail: error.message });
