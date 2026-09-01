@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { checkPendingOrder, createOrder, fetchCustomerSearch, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
-import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
-import { getProductImageUrl } from '@/lib/asset-path';
+import { checkPendingOrder, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchTables, fetchTableSettings, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { CartItem, Customer, OrderFormData, OrderPayload, Product, Table, Waiter } from '@/lib/pos-types';
+import { resolveProductImage } from '@/lib/food-images';
+import { getTableTimerRemainingMs, type TableTimerOrder } from '@/lib/table-timer';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
@@ -39,13 +40,65 @@ type ProductGroup = {
   variations: Product[];
 };
 
+// Numeric table names ("1".."20", the default seeded set) sort in natural
+// order instead of lexicographically; any custom non-numeric name (e.g.
+// "VIP-1") sorts after the numeric ones, then alphabetically.
+function sortTables(tables: Table[]) {
+  return [...tables].sort((left, right) => {
+    const leftNumber = Number(left.name);
+    const rightNumber = Number(right.name);
+    const leftIsNumeric = left.name.trim() !== '' && !Number.isNaN(leftNumber);
+    const rightIsNumeric = right.name.trim() !== '' && !Number.isNaN(rightNumber);
+
+    if (leftIsNumeric && rightIsNumeric) return leftNumber - rightNumber;
+    if (leftIsNumeric) return -1;
+    if (rightIsNumeric) return 1;
+    return left.name.localeCompare(right.name);
+  });
+}
+
+// How often the Dine-In screen re-checks which tables have an active order
+// (see loadActiveTableOrders below). There's no push/websocket channel in
+// this app, so a short poll is how a second terminal finds out a table
+// just got occupied or freed up; navigating back to this screen also
+// re-fetches immediately (the effect below re-runs on mount), which is
+// what makes payment completion on the Sales page feel instant in the
+// common single-terminal workflow.
+const TABLE_STATUS_POLL_MS = 5000;
+
+function formatTableCountdown(remainingMs: number) {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 export default function POSPage() {
   const { isOpen: shopIsOpen, loading: shopSessionLoading, refresh: refreshShopSession } = useShopSession();
-  const { toast: shopToast } = useToast();
+  const { toast: shopToast, popup } = useToast();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
   const [waiters, setWaiters] = useState<Waiter[]>([]);
+  const [tables, setTables] = useState<Table[]>([]);
+  // Estimated combined prep + dining duration (minutes) - a shop-wide
+  // setting from TableManagementSection.tsx, defaulting to 45. Drives both
+  // this screen's countdown display and (mirrored server-side in
+  // orderController.createOrder) whether a table can be selected at all.
+  const [tableTurnoverMinutes, setTableTurnoverMinutes] = useState(45);
+  // tableName -> the most recent still-pending, not-yet-cleared DineIn
+  // order occupying it (createdAt + any staff-granted extension). A table
+  // stays locked for as long as it has an entry here at all - see
+  // getTableRemainingMs/isTableLocked below. Refreshed on a timer
+  // (TABLE_STATUS_POLL_MS) rather than a push channel, since this app has
+  // no websocket/live channel to the backend; the same data also feeds the
+  // real-time table-timer alert popup (TableTimerAlertWatcher.tsx, mounted
+  // in DashboardShell) which fires when one of these crosses its deadline.
+  const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
+  // Ticks every second purely to force the countdown labels (and the
+  // locked/unlocked state derived from them) to re-render - the underlying
+  // truth is always "now vs. activeTableOrders", never this value itself.
+  const [tableClockTick, setTableClockTick] = useState(() => Date.now());
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -81,13 +134,15 @@ export default function POSPage() {
   useEffect(() => {
     async function loadProducts() {
       try {
-        const [productResponse, waiterResponse] = await Promise.all([
+        const [productResponse, waiterResponse, tableResponse] = await Promise.all([
           fetchProducts(),
           fetchWaiters(),
+          fetchTables(),
         ]);
         setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
         setProducts(productResponse?.products ?? []);
         setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
+        setTables(sortTables((tableResponse ?? []).filter((table) => table.isActive)));
       } catch (error) {
         setCategories(['All']);
         setProducts([]);
@@ -98,6 +153,97 @@ export default function POSPage() {
     }
     void loadProducts();
   }, []);
+
+  useEffect(() => {
+    void fetchTableSettings().then((settings) => {
+      if (settings?.tableTurnoverMinutes) setTableTurnoverMinutes(settings.tableTurnoverMinutes);
+    });
+  }, []);
+
+  // Which tables currently have an active (pending, un-expired) DineIn
+  // order, so the table grid below can lock them out. Called once
+  // immediately on mount, again right after this screen creates a new
+  // order (so the table it just used locks without waiting for the next
+  // poll), and on a short interval so a second terminal picks up changes
+  // too - navigating back to this screen after completing payment on the
+  // Sales page also re-runs the mount call, which is what makes a freed
+  // table feel instant in the common single-terminal workflow.
+  async function loadActiveTableOrders() {
+    try {
+      const orders = await fetchOrders({ status: 'pending', orderType: 'DineIn' });
+      const nextActiveTableOrders: Record<string, TableTimerOrder> = {};
+      // Re-check status/orderType/table client-side instead of trusting the
+      // query params alone - a paid/completed/cancelled order must never
+      // keep a table locked, and this way a mismatched or stale backend
+      // (e.g. one that hasn't picked up a filter change yet) can't silently
+      // leave a freed table stuck showing a countdown. A tableTimerCleared
+      // order (staff dismissed it via the real-time alert's "Clear Table")
+      // never locks the table either, even though it's still "pending".
+      (orders ?? [])
+        .filter((order) => order.status === 'pending' && order.orderType === 'DineIn' && order.table && !order.tableTimerCleared)
+        .forEach((order) => {
+          const existing = nextActiveTableOrders[order.table];
+          if (!existing || new Date(order.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
+            nextActiveTableOrders[order.table] = { createdAt: order.createdAt, timerExtendedMinutes: order.timerExtendedMinutes };
+          }
+        });
+      setActiveTableOrders(nextActiveTableOrders);
+    } catch (error) {
+      // Non-blocking - table locks/countdowns just skip this refresh; the
+      // next poll (or the next visit to this screen) retries. Logged
+      // (instead of swallowed entirely) so a persistently failing poll is
+      // at least visible in devtools rather than silently freezing every
+      // table's lock state at whatever it last successfully loaded.
+      console.error('Failed to refresh table occupancy:', error);
+    }
+  }
+
+  useEffect(() => {
+    void loadActiveTableOrders();
+    const interval = setInterval(() => void loadActiveTableOrders(), TABLE_STATUS_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => setTableClockTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // null = table isn't occupied at all. Otherwise the raw milliseconds left
+  // on the countdown - which CAN be negative once the timer has expired.
+  // Unlike the earlier "hard cutoff" behavior, an expired timer no longer
+  // silently frees the table on its own: it stays locked until staff act on
+  // the real-time alert popup (TableTimerAlertWatcher.tsx) with either
+  // "Clear Table" or "Extend +10 Minutes" - see isTableLocked below, which
+  // is what actually gates table selection.
+  function getTableRemainingMs(tableName: string): number | null {
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return null;
+    void tableClockTick; // re-evaluated every second purely to re-render the live countdown
+    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
+  }
+
+  // Whether a table can be selected for a new order right now - true for as
+  // long as it has any occupying entry at all, regardless of whether its
+  // countdown has already reached zero (see getTableRemainingMs above).
+  function isTableLocked(tableName: string): boolean {
+    return Boolean(activeTableOrders[tableName]);
+  }
+
+  // If the table currently selected in the form gets taken by another
+  // order (a second terminal, most likely) while this cashier is still
+  // building the cart, drop the now-stale selection instead of letting them
+  // submit straight into the 409 the backend would return.
+  useEffect(() => {
+    if (!orderFormData.table) return;
+    if (!isTableLocked(orderFormData.table)) return;
+    const takenTable = orderFormData.table;
+    setOrderFormData((previous) => (previous.table === takenTable ? { ...previous, table: '' } : previous));
+    popup({ tone: 'error', title: 'Table No Longer Available', message: `Table ${takenTable} was just taken by another order. Pick a different table.` });
+    // Only re-checks when the underlying lock data changes, not on every
+    // orderFormData edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTableOrders, tableClockTick]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -170,10 +316,6 @@ export default function POSPage() {
   const tax = (subtotal * taxRate) / 100;
   const total = subtotal + tax;
 
-  function showMessage(tone: 'success' | 'error' | 'info', text: string) {
-    setStatusMessage({ tone, text });
-  }
-
   function addToCart(product: Product) {
     // Same product and same variation merge into one cart row, matching your older POS logic.
     setCart((previousCart) => {
@@ -235,7 +377,7 @@ export default function POSPage() {
         setShowSuggestions(query.trim().length >= 3);
       }
     } catch (error) {
-      showMessage('error', error instanceof Error ? error.message : 'Failed to search customers.');
+      shopToast.error(error instanceof Error ? error.message : 'Failed to search customers.');
       setSuggestions([]);
       setShowNewCustomerPrompt(false);
       setShowSuggestions(false);
@@ -257,7 +399,7 @@ export default function POSPage() {
     setShowNewCustomerPrompt(false);
     setSearchQuery('');
     setShowSuggestions(false);
-    showMessage('success', `Customer "${customer.name}" loaded into the order form.`);
+    shopToast.success(`Customer "${customer.name}" loaded into the order form.`);
   }
 
   function formatPhoneToDigits(value: string) {
@@ -309,7 +451,7 @@ export default function POSPage() {
     setShowSuggestions(false);
     if (isPhoneSearch) nameInputRef.current?.focus();
     else phoneInputRef.current?.focus();
-    showMessage('info', 'No saved customer matched. Fill the remaining fields to create one during checkout.');
+    shopToast.info('No saved customer matched. Fill the remaining fields to create one during checkout.');
   }
 
   async function updateExistingCustomerIfNeeded() {
@@ -317,19 +459,28 @@ export default function POSPage() {
     await updateCustomer(selectedCustomerId, { name: orderFormData.customer.trim(), phone: orderFormData.phone, address: orderFormData.address, previousDues: orderFormData.previousDues });
   }
 
+  // Every validation failure surfaces as the same centered popup (title
+  // "Can't Save Order") instead of the old top-bar banner - see Technical
+  // Requirements for Dynamic Popups #1, whose own example is exactly this:
+  // trying to save a dine-in order without picking a table.
+  function showValidationError(message: string) {
+    popup({ tone: 'error', title: "Can't Save Order", message });
+    return false;
+  }
+
   function validateOrderForm() {
-    if (cart.length === 0) return showMessage('error', 'Add at least one product before saving the order.'), false;
+    if (cart.length === 0) return showValidationError('Add at least one product before saving the order.');
 
     if (orderFormData.orderType === 'DineIn') {
-      if (!orderFormData.table) return showMessage('error', 'Table number is required for dine-in orders.'), false;
-      if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX, or leave it empty for dine-in.'), false;
-      if (orderFormData.phone && !orderFormData.customer.trim()) return showMessage('error', 'Customer name is required when a dine-in phone number is entered.'), false;
+      if (!orderFormData.table) return showValidationError('Please select a table before saving a dine-in order.');
+      if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty for dine-in.');
+      if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a dine-in phone number is entered.');
       return true;
     }
 
-    if (!orderFormData.customer.trim()) return showMessage('error', 'Customer name is required for takeaway and delivery orders.'), false;
-    if (!/^03\d{9}$/.test(orderFormData.phone)) return showMessage('error', 'Use phone format 03XXXXXXXXX for takeaway and delivery orders.'), false;
-    if (orderFormData.orderType === 'Delivery' && !orderFormData.address.trim()) return showMessage('error', 'Address is required for delivery orders.'), false;
+    if (!orderFormData.customer.trim()) return showValidationError('Customer name is required for takeaway and delivery orders.');
+    if (!/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX for takeaway and delivery orders.');
+    if (orderFormData.orderType === 'Delivery' && !orderFormData.address.trim()) return showValidationError('Address is required for delivery orders.');
     return true;
   }
 
@@ -338,7 +489,6 @@ export default function POSPage() {
     if (!validateOrderForm()) return;
     isSavingOrderRef.current = true;
     setIsSavingOrder(true);
-    setStatusMessage(null);
 
     try {
       await updateExistingCustomerIfNeeded();
@@ -353,7 +503,7 @@ export default function POSPage() {
         try {
           const pendingOrder = await checkPendingOrder(orderFormData.phone);
           if (pendingOrder.exists) {
-            showMessage('info', 'Note: this customer has an earlier pending bill. It will be added to their next payment.');
+            shopToast.info('Note: this customer has an earlier pending bill. It will be added to their next payment.');
           }
         } catch {
           // Non-blocking - if this lookup fails for any reason, still let
@@ -369,7 +519,7 @@ export default function POSPage() {
       const orderPayload: OrderPayload = {
         orderId: clientSyncId,
         clientSyncId,
-        items: cart.map((item) => ({ name: item.name, price: item.price, quantity: item.quantity, variation: item.variation })),
+        items: cart.map((item) => ({ name: item.name, price: item.price, quantity: item.quantity, variation: item.variation, image: item.image })),
         total,
         subtotal,
         tax: tax,
@@ -390,10 +540,22 @@ export default function POSPage() {
 
       setCart([]);
       resetOrderForm();
+      // Lock the table this order just used right away, instead of
+      // waiting up to TABLE_STATUS_POLL_MS for the next poll to notice it.
+      if (savedOrder.orderType === 'DineIn' && savedOrder.table) void loadActiveTableOrders();
+      // "content based on activity context" (Technical Requirements #1): a
+      // dine-in order mentions its table, and a customer-sync failure gets
+      // its own warning-toned popup instead of pretending everything went
+      // perfectly - the order itself is still saved fine either way.
+      const savedOrderLabel = `Order #${savedOrder.dailyOrderNumber || savedOrder.id}`;
+      const contextLine = savedOrder.orderType === 'DineIn' && savedOrder.table
+        ? `Table ${savedOrder.table} - kitchen receipt is printing now.`
+        : 'Kitchen receipt is printing now.';
+
       if (savedOrder.customerSyncWarning) {
-        showMessage('error', `Order ${savedOrder.dailyOrderNumber || savedOrder.id} saved, but: ${savedOrder.customerSyncWarning}`);
+        popup({ tone: 'error', title: 'Order Saved, With a Warning', message: `${savedOrderLabel} was saved, but: ${savedOrder.customerSyncWarning}` });
       } else {
-        showMessage('success', `Order ${savedOrder.dailyOrderNumber || savedOrder.id} saved! Printing kitchen receipt and notifying customer...`);
+        popup({ tone: 'success', title: 'Order Saved Successfully', message: `${savedOrderLabel} saved! ${contextLine}` });
       }
 
       const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
@@ -421,7 +583,7 @@ export default function POSPage() {
         void sendOrderPlacedMessage(savedOrder, getStoreSettings());
       }
     } catch (error) {
-      showMessage('error', error instanceof Error ? error.message : 'Failed to save the order. Check your internet connection and try again.');
+      popup({ tone: 'error', title: "Order Wasn't Saved", message: error instanceof Error ? error.message : 'Failed to save the order. Check your internet connection and try again.' });
     } finally {
       isSavingOrderRef.current = false;
       setIsSavingOrder(false);
@@ -450,8 +612,8 @@ export default function POSPage() {
   if (!shopSessionLoading && !shopIsOpen) {
     const canManage = hasPermission('shop.session.manage');
     return (
-      <div className="flex min-h-[70vh] flex-col items-center justify-center rounded-[32px] bg-white p-10 text-center shadow-sm">
-        <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+      <div className="glass flex min-h-[70vh] flex-col items-center justify-center rounded-[32px] p-10 text-center">
+        <div className="glass-pill mb-5 flex h-16 w-16 items-center justify-center rounded-full text-gray-400">
           <Store size={28} />
         </div>
         <h2 className="text-xl font-black text-gray-900">The shop is closed</h2>
@@ -463,7 +625,7 @@ export default function POSPage() {
             type="button"
             onClick={() => void handleOpenShopFromPOS()}
             disabled={isOpeningShop}
-            className="mt-6 flex items-center gap-2 rounded-full bg-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+            className="mt-6 flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Store size={16} />
             {isOpeningShop ? 'Opening...' : 'Open Shop'}
@@ -483,20 +645,20 @@ export default function POSPage() {
           grid drops to fewer/narrower columns on smaller screens. */}
       <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
         <section className="space-y-5">
-          <div className="rounded-[32px] bg-white p-4 shadow-sm">
+          <div className="glass rounded-[32px] p-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-4 pl-12 pr-4 outline-none transition focus:border-[#D6E332]" />
+                <input type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none transition focus:border-[#D6E332]" />
               </div>
-              <div className="flex items-center gap-2 self-end rounded-full bg-[#F6F7FB] p-1.5">
+              <div className="glass-pill flex items-center gap-2 self-end rounded-full p-1.5">
                 <IconToggleButton active={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid size={18} /></IconToggleButton>
                 <IconToggleButton active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={18} /></IconToggleButton>
               </div>
             </div>
             <div className="mt-4 flex gap-3 overflow-x-auto pb-1">
               {categories.map((category) => (
-                <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-5 py-2.5 text-sm font-bold transition ${activeCategory === category ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500 hover:bg-gray-100'}`}>
+                <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-5 py-2.5 text-sm font-bold transition ${activeCategory === category ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>
                   {category}
                 </button>
               ))}
@@ -508,7 +670,7 @@ export default function POSPage() {
               and the browser fits as many columns as the available width
               (which varies since the checkout panel is always pinned to the
               right) actually allows. */}
-          <div className={viewMode === 'grid' ? 'grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-2' : 'space-y-2'}>
+          <div className={viewMode === 'grid' ? 'grid grid-cols-3 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
             {!isLoadingProducts && filteredGroups.length > 0 ? filteredGroups.map((group) => {
@@ -516,9 +678,10 @@ export default function POSPage() {
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
               return (
-                <button key={group.key} type="button" onClick={() => handleGroupClick(group)} className={`group overflow-hidden rounded-[20px] border border-transparent bg-white p-2.5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-[#E2F33C] hover:shadow-md ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex flex-col'}`}>
-                  <div className={`relative overflow-hidden rounded-[14px] ${group.color || 'bg-indigo-500'} shrink-0 object-contain p-2 ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 aspect-[4/3] w-full'}`}>
-                    <img src={getProductImageUrl(group.image)} alt={group.name} className="w-full h-full object-contain transition duration-300 group-hover:scale-105" />
+                <button key={group.key} type="button" onClick={() => handleGroupClick(group)} className={`group overflow-hidden rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-2.5 text-left backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:border-[#E2F33C]/70 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.35)] ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex flex-col'}`}>
+                  <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 aspect-[4/3] w-full'}`}>
+                    <img src={resolveProductImage(group)} alt={group.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-110" />
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent" />
                   </div>
                   <div className={`flex flex-col justify-between ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
                     <div>
@@ -561,21 +724,21 @@ export default function POSPage() {
           </div>
         </section>
 
-        <aside className="rounded-[24px] bg-white shadow-sm sticky top-6">
-          <div className="border-b border-gray-100 p-4">
+        <aside className="glass sticky top-6 rounded-[24px]">
+          <div className="border-b border-white/40 p-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-gray-400">Current Order</p>
                 <h2 className="text-xl font-black text-gray-900">POS Checkout</h2>
               </div>
-              <button type="button" onClick={clearCart} disabled={cart.length === 0} className="rounded-xl bg-gray-50 p-2.5 text-gray-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-50">
+              <button type="button" onClick={clearCart} disabled={cart.length === 0} className="glass-pill rounded-xl p-2.5 text-gray-400 transition hover:bg-rose-50/70 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-50">
                 <Trash2 size={16} />
               </button>
             </div>
           </div>
 
-          <div className="space-y-3 border-b border-gray-100 bg-[#F8F9FB] p-4">
-            <select name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none">
+          <div className="space-y-3 border-b border-white/40 bg-white/25 p-4">
+            <select name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
               <option value="DineIn">Dine In</option>
               <option value="TakeAway">Take Away</option>
               <option value="Delivery">Delivery</option>
@@ -583,17 +746,17 @@ export default function POSPage() {
 
             <div className="relative space-y-3">
               <FormField label="Phone Number">
-                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
               </FormField>
               <FormField label="Customer Name">
-                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
               </FormField>
 
               {showSuggestions && (suggestions.length > 0 || showNewCustomerPrompt) ? (
-                <div ref={suggestionRef} className="absolute left-0 right-0 top-[124px] z-20 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+                <div ref={suggestionRef} className="glass-strong absolute left-0 right-0 top-[124px] z-20 overflow-hidden rounded-2xl">
                   {isSearching ? <div className="p-3 text-xs text-gray-500">Searching customers...</div> : null}
                   {!isSearching ? suggestions.map((customer) => (
-                    <button key={customer.id} type="button" onClick={() => handleSelectCustomer(customer)} className="block w-full border-b border-gray-100 px-3 py-2 text-left transition hover:bg-[#F8F9FB]">
+                    <button key={customer.id} type="button" onClick={() => handleSelectCustomer(customer)} className="block w-full border-b border-white/40 px-3 py-2 text-left transition hover:bg-white/50">
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <p className="text-sm font-bold text-gray-900">{customer.name}</p>
@@ -605,7 +768,7 @@ export default function POSPage() {
                     </button>
                   )) : null}
                   {!isSearching && showNewCustomerPrompt ? (
-                    <button type="button" onClick={handleCreateNewCustomer} className="flex w-full items-center gap-2 bg-emerald-50 px-3 py-2 text-left text-emerald-700 transition hover:bg-emerald-100">
+                    <button type="button" onClick={handleCreateNewCustomer} className="flex w-full items-center gap-2 bg-emerald-50/60 px-3 py-2 text-left text-emerald-700 transition hover:bg-emerald-100/70">
                       <UserPlus size={16} />
                       <div>
                         <p className="text-sm font-bold">Add New Customer</p>
@@ -618,30 +781,96 @@ export default function POSPage() {
             </div>
 
             <FormField label="Address">
-              <input name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+              <input name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
             <FormField label="Order Note">
-              <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none" />
+              <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
             {orderFormData.orderType === 'DineIn' ? (
               <>
                 <FormField label="Waiter">
-                  <select name="waiter" value={orderFormData.waiter} onChange={handleFormChange} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none">
+                  <select name="waiter" value={orderFormData.waiter} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
                     <option value="">Select waiter</option>
                     {waiters.map((waiter) => <option key={waiter.id} value={waiter.name}>{waiter.name}</option>)}
                   </select>
                 </FormField>
                 <FormField label="Table Number">
-                  <select name="table" value={orderFormData.table} onChange={handleFormChange} className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm outline-none">
-                    <option value="">Select table</option>
-                    {Array.from({ length: 20 }).map((_, index) => <option key={index + 1} value={String(index + 1)}>Table {index + 1}</option>)}
-                  </select>
+                  {tables.length === 0 ? (
+                    <p className="rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-xs font-bold text-gray-400 shadow-inner">No tables configured yet.</p>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-5 gap-2">
+                        {tables.map((table) => {
+                          const isSelected = orderFormData.table === table.name;
+                          const remainingMs = getTableRemainingMs(table.name);
+                          const isLocked = isTableLocked(table.name);
+                          // Once the countdown reaches zero the table stays
+                          // locked (no more silent auto-unlock) - it just
+                          // switches from a live countdown to an "Expired"
+                          // state until staff clear or extend it from the
+                          // real-time alert popup elsewhere on the Dashboard.
+                          const isExpired = isLocked && remainingMs !== null && remainingMs <= 0;
+                          return (
+                            <button
+                              key={table.id}
+                              type="button"
+                              disabled={isLocked}
+                              onClick={() => setOrderFormData((previous) => ({ ...previous, table: previous.table === table.name ? '' : table.name }))}
+                              title={
+                                isExpired
+                                  ? `Table ${table.name} - timer expired, awaiting staff to clear or extend it`
+                                  : isLocked
+                                    ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
+                                    : table.isFamily
+                                      ? `Table ${table.name} - Family Table`
+                                      : `Table ${table.name}`
+                              }
+                              className={`relative flex flex-col items-center justify-center gap-0.5 rounded-xl border px-2 py-2 text-xs font-black leading-tight backdrop-blur-md transition ${
+                                isExpired
+                                  ? 'cursor-not-allowed border-rose-300/70 bg-rose-50/50 text-rose-500 shadow-inner'
+                                  : isLocked
+                                    ? 'cursor-not-allowed border-white/40 bg-white/30 text-gray-400 shadow-inner'
+                                    : isSelected
+                                      ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]'
+                                      : table.isFamily
+                                        ? 'border-pink-200/70 bg-pink-50/60 text-pink-700 shadow-inner hover:border-pink-300'
+                                        : 'border-white/50 bg-white/50 text-gray-600 shadow-inner hover:border-[#E2F33C]/70'
+                              }`}
+                            >
+                              <span>{table.name}</span>
+                              {isExpired ? (
+                                <span className="text-[9px] font-black normal-case text-rose-500">Expired</span>
+                              ) : isLocked ? (
+                                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
+                              ) : null}
+                              {table.isFamily ? (
+                                <span className={`absolute -right-1.5 -top-1.5 rounded-full px-1 text-[8px] font-black leading-[14px] text-white ${isLocked ? 'bg-gray-400' : 'bg-pink-500'}`}>F</span>
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-bold">
+                        {tables.some((table) => table.isFamily) ? (
+                          <p className="flex items-center gap-1.5 text-pink-600">
+                            <span className="inline-block h-2 w-2 rounded-full bg-pink-500" /> Family Table
+                          </p>
+                        ) : null}
+                        <p className="flex items-center gap-1.5 text-gray-400">
+                          <span className="inline-block h-2 w-2 rounded-full bg-gray-300" /> Occupied (frees up when paid, cleared, or extended)
+                        </p>
+                        <p className="flex items-center gap-1.5 text-rose-500">
+                          <span className="inline-block h-2 w-2 rounded-full bg-rose-400" /> Expired - awaiting staff decision
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </FormField>
               </>
             ) : null}
 
             {selectedCustomerId ? (
-              <div className="rounded-xl border border-sky-200 bg-sky-50 p-2.5 text-[11px] text-sky-700">
+              <div className="rounded-xl border border-sky-200/70 bg-sky-50/60 p-2.5 text-[11px] text-sky-700 shadow-inner">
                 <div className="flex items-start gap-1.5">
                   <AlertCircle size={14} className="mt-0.5" />
                   <span>{isManualEntry ? 'Editing an existing customer. Saving the order will also update that customer record.' : 'Customer details were loaded from saved records.'}</span>
@@ -652,7 +881,7 @@ export default function POSPage() {
 
           <div className="max-h-[300px] 2xl:max-h-[380px] space-y-3 overflow-y-auto p-4">
             {cart.length === 0 ? (
-              <div className="flex min-h-[160px] flex-col items-center justify-center gap-2 rounded-[20px] border border-dashed border-gray-200 bg-[#FAFBFC] text-center text-gray-400">
+              <div className="flex min-h-[160px] flex-col items-center justify-center gap-2 rounded-[20px] border border-dashed border-white/60 bg-white/30 text-center text-gray-400">
                 <ShoppingBag size={40} strokeWidth={1.4} />
                 <div>
                   <p className="text-sm font-bold text-gray-500">Your cart is empty</p>
@@ -660,19 +889,19 @@ export default function POSPage() {
                 </div>
               </div>
             ) : cart.map((item, index) => (
-              <div key={`${item.id}-${item.variation}-${index}`} className="flex items-center gap-2.5 rounded-[20px] bg-[#FAFBFC] p-2.5">
-                <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-[14px] bg-indigo-50 p-1">
-                  <img src={getProductImageUrl(item.image)} alt={item.name} className="w-full h-full object-contain drop-shadow-sm" />
+              <div key={`${item.id}-${item.variation}-${index}`} className="flex items-center gap-2.5 rounded-[20px] bg-white/45 p-2.5 shadow-inner">
+                <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-[14px] bg-slate-100 shadow-inner">
+                  <img src={resolveProductImage({ image: item.image, name: item.name })} alt={item.name} loading="lazy" className="h-full w-full object-cover" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
                   <p className="truncate text-[10px] text-gray-400">{item.variation}</p>
                   <p className="text-[10px] font-semibold text-gray-500">PKR {item.price} each</p>
                 </div>
-                <div className="flex items-center gap-1 rounded-full bg-white p-1">
-                  <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-gray-100"><Minus size={10} /></button>
+                <div className="glass-pill flex items-center gap-1 rounded-full p-1">
+                  <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Minus size={10} /></button>
                   <span className="min-w-5 text-center text-xs font-black">{item.quantity}</span>
-                  <button type="button" onClick={() => handleIncreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-gray-100"><Plus size={10} /></button>
+                  <button type="button" onClick={() => handleIncreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Plus size={10} /></button>
                 </div>
                 <div className="min-w-[60px] text-right">
                   <p className="text-sm font-black text-gray-900">PKR {item.price * item.quantity}</p>
@@ -682,18 +911,18 @@ export default function POSPage() {
             ))}
           </div>
 
-          <div className="space-y-3 rounded-b-[24px] bg-[#F8F9FB] p-4">
+          <div className="space-y-3 rounded-b-[24px] border-t border-white/40 bg-white/25 p-4">
             <div className="grid grid-cols-3 gap-2">
               <PaymentButton icon={<Banknote size={16} />} label="Cash" active={selectedPaymentMethod === 'Cash'} onClick={() => setSelectedPaymentMethod('Cash')} />
               <PaymentButton icon={<CreditCard size={16} />} label="Card" active={selectedPaymentMethod === 'Card'} onClick={() => setSelectedPaymentMethod('Card')} />
               <PaymentButton icon={<Wallet size={16} />} label="E-Wallet" active={selectedPaymentMethod === 'E-Wallet'} onClick={() => setSelectedPaymentMethod('E-Wallet')} />
             </div>
-            <div className="space-y-1.5 rounded-[20px] bg-white p-3">
+            <div className="space-y-1.5 rounded-[20px] bg-white/50 p-3 shadow-inner">
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Items Total</span><span>PKR {subtotal}</span></div>
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
               <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
-            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] bg-[#E2F33C] px-5 py-3 text-base font-black text-black shadow-lg shadow-yellow-200/60 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
               {isSavingOrder ? 'Saving Order...' : 'Save Order'}
             </button>
           </div>
@@ -719,18 +948,18 @@ export default function POSPage() {
 
 function StatusBanner({ tone, text }: { tone: 'success' | 'error' | 'info'; text: string }) {
   return (
-    <div className={`rounded-[28px] border px-5 py-4 text-sm shadow-sm ${tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : tone === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-sky-200 bg-sky-50 text-sky-700'}`}>
+    <div className={`glass rounded-[28px] px-5 py-4 text-sm ${tone === 'success' ? 'text-emerald-700' : tone === 'error' ? 'text-rose-700' : 'text-sky-700'}`}>
       {text}
     </div>
   );
 }
 
 function SurfaceMessage({ text }: { text: string }) {
-  return <div className="rounded-[32px] bg-white p-8 text-sm text-gray-500 shadow-sm">{text}</div>;
+  return <div className="glass rounded-[32px] p-8 text-sm text-gray-500">{text}</div>;
 }
 
 function IconToggleButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return <button type="button" onClick={onClick} className={`rounded-full p-2.5 transition ${active ? 'bg-[#E2F33C] text-black shadow-sm' : 'text-gray-500'}`}>{children}</button>;
+  return <button type="button" onClick={onClick} className={`rounded-full p-2.5 transition ${active ? 'glass-dark' : 'text-gray-500'}`}>{children}</button>;
 }
 
 function FormField({ label, children }: { label: string; children: React.ReactNode }) {
@@ -744,11 +973,11 @@ function FormField({ label, children }: { label: string; children: React.ReactNo
 
 function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGroup; onSelect: (variation: Product) => void; onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
-      <div className="w-full max-w-sm rounded-[28px] bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+    <div className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="glass-strong w-full max-w-sm rounded-[28px] p-6" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-center gap-3">
-          <div className={`h-14 w-14 shrink-0 overflow-hidden rounded-[16px] ${group.color || 'bg-indigo-500'} p-2`}>
-            <img src={getProductImageUrl(group.image)} alt={group.name} className="h-full w-full object-contain" />
+          <div className="h-14 w-14 shrink-0 overflow-hidden rounded-[16px] bg-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_6px_16px_-6px_rgba(0,0,0,0.3)]">
+            <img src={resolveProductImage(group)} alt={group.name} className="h-full w-full object-cover" />
           </div>
           <div className="min-w-0">
             <h3 className="truncate text-lg font-black text-gray-900">{group.name}</h3>
@@ -761,7 +990,7 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
               key={variation.id}
               type="button"
               onClick={() => onSelect(variation)}
-              className="flex w-full items-center justify-between rounded-2xl border border-gray-100 bg-[#FAFBFC] px-4 py-3 text-left transition hover:border-[#E2F33C] hover:bg-[#FBFDEB]"
+              className="flex w-full items-center justify-between rounded-2xl border border-white/50 bg-white/50 px-4 py-3 text-left shadow-inner transition hover:border-[#E2F33C]/70 hover:bg-[#FBFDEB]/70"
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-black text-gray-900">{variation.variation || 'Standard'}</p>
@@ -771,7 +1000,7 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
             </button>
           ))}
         </div>
-        <button type="button" onClick={onClose} className="mt-4 w-full rounded-2xl bg-gray-100 py-3 text-sm font-black text-gray-600 transition hover:bg-gray-200">
+        <button type="button" onClick={onClose} className="glass-pill mt-4 w-full rounded-2xl py-3 text-sm font-black text-gray-600 transition hover:bg-white/70">
           Cancel
         </button>
       </div>
@@ -781,7 +1010,7 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
 
 function PaymentButton({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className={`rounded-xl border px-2.5 py-2.5 transition ${active ? 'border-[#E2F33C] bg-[#F4F7C8] text-black' : 'border-gray-100 bg-white text-gray-500 hover:border-[#E2F33C]'}`}>
+    <button type="button" onClick={onClick} className={`rounded-xl border px-2.5 py-2.5 transition ${active ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>
       <div className="flex flex-col items-center gap-1.5">
         {icon}
         <span className="text-[9px] font-bold uppercase tracking-wide">{label}</span>

@@ -6,6 +6,13 @@ const orderItemSchema = new mongoose.Schema(
     price: { type: Number, required: true, min: 0 },
     quantity: { type: Number, required: true, min: 1 },
     variation: { type: String, default: "" },
+    // Carries the product's own image reference (icon filename or a custom
+    // hosted/data URL) forward onto the order line itself - without this,
+    // once an order is saved we only ever have the item's plain-text name
+    // to guess a photo from, which silently breaks for any product whose
+    // name doesn't happen to contain an obvious food keyword. See
+    // resolveProductImage() in src/lib/food-images.ts.
+    image: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -48,6 +55,17 @@ const orderSchema = new mongoose.Schema(
     cancelReason: { type: String, default: "" },
     discount: { type: discountSchema, default: null },
     version: { type: Number, default: 1 },
+    // Real-time table-timer alert (Dashboard-wide popup when a Dine-In
+    // table's turnover window expires while the order is still pending -
+    // see TableTimerAlertWatcher.tsx). Staff can push the deadline back
+    // 10 minutes at a time instead of clearing the table outright.
+    timerExtendedMinutes: { type: Number, default: 0 },
+    // Set true the moment staff explicitly dismiss the alert with "Clear
+    // Table" - the table becomes selectable again immediately everywhere
+    // (POS grid, the occupancy check below) even though this order's
+    // status is still "pending"/unpaid. Distinct from actually completing
+    // or cancelling the order.
+    tableTimerCleared: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

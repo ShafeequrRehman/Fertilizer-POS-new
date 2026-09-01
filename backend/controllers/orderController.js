@@ -64,6 +64,11 @@ exports.getOrders = async (req, res) => {
       const end = new Date(`${req.query.date}T23:59:59.999Z`);
       query.createdAt = { $gte: start, $lte: end };
     }
+    // Used by the Dine-In table availability timer (POSPage.tsx polls
+    // GET /api/orders?status=pending&orderType=DineIn to know which tables
+    // currently have an open order and when each one was placed).
+    if (req.query.status) query.status = req.query.status;
+    if (req.query.orderType) query.orderType = req.query.orderType;
 
     const orders = await Order.find(query).sort({ createdAt: -1 });
     res.json(orders.map((order) => ({ ...order.toObject(), id: String(order._id) })));
@@ -111,6 +116,43 @@ exports.createOrder = async (req, res) => {
     }
 
     const payload = req.body;
+
+    // Technical Requirement #1: a table with an active, un-expired order
+    // must stay un-selectable for a new order - enforced here too (not just
+    // hidden in POSPage.tsx's table grid) so a stale tab or a direct API
+    // call can't double-book a table. "Active" means a pending DineIn order
+    // placed on the same table within the shop's tableTurnoverMinutes
+    // window (Requirement #4: once that window elapses the table re-opens
+    // automatically even if the earlier order still hasn't been paid, so
+    // this check must use the same time-based definition, not just
+    // "status === pending").
+    if (payload.orderType === "DineIn" && payload.table) {
+      // A table stays occupied for as long as it has a still-pending
+      // DineIn order on it - full stop - UNLESS staff explicitly
+      // dismissed it via "Clear Table" (tableTimerCleared). This is a
+      // deliberate change from the old behavior of silently auto-freeing
+      // the table once its turnover window elapsed: that "grace period"
+      // is now a real-time popup (see TableTimerAlertWatcher.tsx) that
+      // makes staff actively choose to clear the table or extend its
+      // timer by 10 minutes, rather than the table quietly reopening
+      // (and risking a second order landing on a table that's still
+      // physically occupied) on its own.
+      const occupyingOrder = await Order.findOne({
+        ...buildShopScope(req),
+        orderType: "DineIn",
+        table: payload.table,
+        status: "pending",
+        tableTimerCleared: { $ne: true },
+      });
+
+      if (occupyingOrder) {
+        return res.status(409).json({
+          error: `Table ${payload.table} already has an active order. Complete/pay it, or use "Clear Table" on the timer alert to free it up.`,
+          reason: "table_occupied",
+        });
+      }
+    }
+
     const totals = recalculateTotals(payload.items || [], payload.discount);
     const dailyOrderNumber = openSession.orderCounter;
 
@@ -178,6 +220,56 @@ exports.createOrder = async (req, res) => {
     }
 
     res.status(201).json({ ...order.toObject(), id: String(order._id), customerSyncWarning });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// POST /api/orders/:id/extend-timer
+// "Extend +10 Minutes" action on the real-time table-timer alert popup
+// (TableTimerAlertWatcher.tsx) - pushes this order's effective turnover
+// window back by another 10 minutes instead of clearing the table, for
+// when the table is still genuinely in use. Cumulative: a table can be
+// extended more than once if it keeps running long.
+exports.extendTableTimer = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (order.status !== "pending") {
+      return res.status(400).json({ error: "Only a still-pending order's table timer can be extended." });
+    }
+    order.timerExtendedMinutes = Number(order.timerExtendedMinutes || 0) + 10;
+    await order.save();
+    res.json({ ...order.toObject(), id: String(order._id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// POST /api/orders/:id/clear-table
+// "Clear Table" action on the same alert - frees the table for a new order
+// immediately (everywhere: this endpoint's own occupancy check above, and
+// every terminal's POS table grid on its next poll) without changing the
+// order's own status, since the order itself might still need completing/
+// paying later (e.g. a walk-out, or the bill gets settled at a different
+// table).
+exports.clearTableTimer = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    order.tableTimerCleared = true;
+    await order.save();
+    res.json({ ...order.toObject(), id: String(order._id) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

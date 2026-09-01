@@ -27,3 +27,127 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Interactive-affordance defaults, app-wide (Technical Requirements for
+   Dynamic Popups #3 - Interactive Micro-Animations & Clickable
+   Enhancements). Every button, link, and role="button" in this app gets an
+   explicit pointer cursor and a subtle press-down animation, without
+   needing a "cursor-pointer"/"active:scale-*" class added by hand on each
+   one. `:not(:disabled)` keeps disabled buttons showing the normal
+   not-allowed/default cursor and skips the press animation on them - a
+   disabled control isn't actually clickable, so it shouldn't look like it
+   is. `.clickable` is an escape hatch for a non-button/anchor element
+   (e.g. a div-based custom control) that needs the same treatment. */
+button:not(:disabled),
+a,
+[role="button"],
+input[type="checkbox"],
+input[type="radio"],
+select,
+summary,
+.clickable {
+  cursor: pointer;
+}
+
+/* :where(...) keeps this at zero specificity, so it only fills in a
+   transition for elements that don't already declare their own (e.g. via
+   Tailwind's `transition` utility, which already includes `transform` in
+   its default property list) - it's a fallback default, never an
+   override of a more deliberate per-component transition. */
+:where(button:not(:disabled), a, [role="button"], .clickable) {
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+
+button:not(:disabled):active,
+a:active,
+[role="button"]:active,
+.clickable:active {
+  transform: scale(0.98);
+}
+
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   Glass design system - iOS 16/17 notification + macOS "frosted
+   glass" look, used app-wide for panels, cards, popups, and pills.
+   Everything here is layered translucency + backdrop-filter blur,
+   never a flat color, so real page content shows softly through.
+   ============================================================ */
+
+/* Soft pastel wash + gentle color blobs behind every dashboard page,
+   built as pure radial-gradient layers (no extra DOM nodes, no blur
+   filter on the background itself) - this is what glass panels blur
+   and pick up tint from. Kept muted/light since this is a working
+   business app, not a wallpaper: think "Control Center" tint, not a
+   loud gradient. `background-attachment: fixed` keeps the wash stable
+   while the page content scrolls underneath it. */
+.glass-app-bg {
+  background-color: #eef1f6;
+  background-image:
+    radial-gradient(60% 50% at 12% 8%, rgba(147, 197, 253, 0.30), transparent 70%),
+    radial-gradient(50% 45% at 88% 12%, rgba(216, 180, 254, 0.26), transparent 70%),
+    radial-gradient(55% 50% at 15% 92%, rgba(253, 186, 212, 0.22), transparent 70%),
+    radial-gradient(45% 40% at 92% 88%, rgba(167, 243, 208, 0.22), transparent 70%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Standard light glass - the default for cards, panels, and containers
+   sitting directly on the app background above. */
+.glass {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.42));
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 8px 32px -12px rgba(15, 23, 42, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* More opaque + more blur than .glass - for modals/popups, where body
+   text needs to stay fully legible over whatever is behind the dialog
+   (which, unlike a page card, can be busy product/order content). */
+.glass-strong {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.7));
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 24px 70px -16px rgba(15, 23, 42, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+/* The dimmed, blurred backdrop behind a modal/popup itself (replaces a
+   flat bg-black/40) - frosts whatever's behind it rather than just
+   darkening it, matching iOS/macOS sheet presentations. */
+.glass-overlay {
+  background: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+}
+
+/* Small frosted chip/pill - nav items, top-bar icon buttons, status
+   badges, and most button chrome app-wide. Lighter blur than the two
+   above since these are small and often stacked closely together.
+   Outer drop-shadow deliberately removed (buttons read as inset/pressed
+   glass, not floating cards) - depth comes from the two inset layers
+   (a top highlight + a soft bottom groove) plus a hairline border. */
+.glass-pill {
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  border: 0.5px solid rgba(255, 255, 255, 0.65);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), inset 0 -2px 5px rgba(15, 23, 42, 0.10);
+}
+
+/* Dark frosted glass - active/selected states and "premium" dark
+   surfaces (e.g. a receipt-style total pill), matching iOS's dark
+   notification/Dynamic Island material rather than a flat dark fill.
+   Same outer-shadow-removed / inset-only treatment as .glass-pill. */
+.glass-dark {
+  background: linear-gradient(135deg, rgba(32, 33, 38, 0.88), rgba(12, 13, 16, 0.82));
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -3px 8px rgba(0, 0, 0, 0.4);
+  color: #fff;
+}

@@ -65,10 +65,10 @@ export default function KitchenPage() {
           <p className="text-gray-400 text-xs">Live ticket queue for pending orders.</p>
         </div>
         <div className="flex gap-2">
-           <button onClick={() => loadOrders()} className="rounded-2xl bg-white shadow-sm px-4 py-3 text-sm font-black text-gray-700 hover:bg-gray-50 flex items-center gap-2">
+           <button onClick={() => loadOrders()} className="rounded-2xl bg-white shadow-inner px-4 py-3 text-sm font-black text-gray-700 hover:bg-gray-50 flex items-center gap-2">
              <RefreshCcw size={16} /> Refresh
            </button>
-           <button onClick={() => setShowSettings(true)} className="rounded-2xl bg-white shadow-sm px-4 py-3 text-sm font-black text-gray-700 hover:bg-gray-50 flex items-center gap-2">
+           <button onClick={() => setShowSettings(true)} className="rounded-2xl bg-white shadow-inner px-4 py-3 text-sm font-black text-gray-700 hover:bg-gray-50 flex items-center gap-2">
              <Settings size={16} /> Print Configuration
            </button>
         </div>

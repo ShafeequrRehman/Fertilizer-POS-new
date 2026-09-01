@@ -5,6 +5,7 @@ import { createProduct, deleteProduct, fetchProducts, updateProduct } from "@/li
 import { Product } from "@/lib/pos-types";
 import { useToast } from "@/lib/toast";
 import { getProductImageUrl } from "@/lib/asset-path";
+import { resolveProductImage } from "@/lib/food-images";
 
 // Products that share the same name+category are different "variations" of
 // the same menu item (e.g. Pizza Small/Medium/Large are 3 separate Product
@@ -420,7 +421,7 @@ export function ProductManagementSection({
                 {products.filter(p => !p.isDeal && !p.category.toLowerCase().includes("deal")).map(p => {
                    const isSelected = dealItems.includes(String(p.id));
                    return (
-                     <label key={p.id} className={`flex items-start gap-4 p-4 rounded-[20px] cursor-pointer transition-all ${isSelected ? 'bg-indigo-600 ring-2 ring-indigo-600 shadow-md text-white' : 'bg-white ring-1 ring-slate-200 hover:ring-indigo-300 text-slate-700'}`}>
+                     <label key={p.id} className={`flex items-start gap-4 p-4 rounded-[20px] cursor-pointer transition-all ${isSelected ? 'bg-indigo-600 ring-2 ring-indigo-600 shadow-inner text-white' : 'bg-white ring-1 ring-slate-200 hover:ring-indigo-300 text-slate-700'}`}>
                         <input 
                            type="checkbox"
                            className="mt-0.5 w-5 h-5 rounded accent-indigo-500"
@@ -601,7 +602,7 @@ export function ProductManagementSection({
                   key={icon}
                   type="button"
                   onClick={() => setImage(icon)}
-                  className={`shrink-0 w-[72px] h-[72px] rounded-[24px] border-2 flex flex-col items-center justify-center transition-all snap-start overflow-hidden bg-white hover:-translate-y-1 ${image === icon ? "border-indigo-500 shadow-md ring-4 ring-indigo-50" : "border-slate-200 hover:border-indigo-300 shadow-sm"}`}
+                  className={`shrink-0 w-[72px] h-[72px] rounded-[24px] border-2 flex flex-col items-center justify-center transition-all snap-start overflow-hidden bg-white hover:-translate-y-1 ${image === icon ? "border-indigo-500 shadow-inner ring-4 ring-indigo-50" : "border-slate-200 hover:border-indigo-300 shadow-sm"}`}
                 >
                    <img src={getProductImageUrl(icon)} alt={icon} className="w-9 h-9 object-contain drop-shadow-sm" />
                 </button>
@@ -614,7 +615,7 @@ export function ProductManagementSection({
             type="button"
             onClick={() => void handleSaveProduct()}
             disabled={isSaving}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/30 bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] transition-all hover:-translate-y-0.5"
           >
             {editingId ? <Edit size={16} /> : <Plus size={16} />}
             {isSaving ? "Saving..." : (editingId ? `Update ${formType}` : `Publish ${formType}`)}
@@ -677,12 +678,13 @@ export function ProductManagementSection({
                         {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                       </span>
                     ) : null}
-                    <div className="bg-slate-50 border border-slate-100 text-indigo-600 h-14 w-14 flex items-center justify-center rounded-[20px] overflow-hidden shrink-0 group-hover:bg-indigo-50 transition-colors">
-                      {group.image ? (
-                        <img src={getProductImageUrl(group.image)} alt={group.name} className="w-8 h-8 object-contain drop-shadow-sm" />
-                      ) : (
-                        <Package size={22} className="opacity-70" />
-                      )}
+                    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-[20px] border border-slate-100 bg-slate-50">
+                      <img
+                        src={resolveProductImage({ image: group.image, name: group.name, category: group.category })}
+                        alt={group.name}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                      />
                     </div>
                     <div className="min-w-0">
                       <div className="text-[15px] font-black text-slate-900 flex items-center gap-2 flex-wrap">

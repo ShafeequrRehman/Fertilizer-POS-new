@@ -125,7 +125,7 @@ export default function WhatsAppManager() {
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">WhatsApp Manager</h1>
-        <button onClick={checkStatus} className="p-2 bg-white rounded-md border shadow-sm hover:bg-gray-50 flex items-center gap-2 text-sm">
+        <button onClick={checkStatus} className="p-2 bg-white rounded-md border shadow-inner hover:bg-gray-50 flex items-center gap-2 text-sm">
           <RefreshCw size={16} />
           Refresh Status
         </button>

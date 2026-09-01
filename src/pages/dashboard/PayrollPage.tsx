@@ -33,7 +33,7 @@ export default function PayrollPage() {
           </button>
           <button 
             onClick={() => setIsProcessing(true)}
-            className="flex items-center gap-2 px-6 py-4 bg-purple-600 text-white rounded-[20px] font-black text-sm hover:bg-purple-700 transition-all shadow-lg shadow-purple-200"
+            className="flex items-center gap-2 px-6 py-4 border-[0.5px] border-white/30 bg-purple-600 text-white rounded-[20px] font-black text-sm hover:bg-purple-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(88,28,135,0.5)]"
           >
             <Calculator size={18} /> Run Payroll
           </button>

@@ -4,6 +4,7 @@ import { fetchOrders, fetchShopSessionHistory } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
 import { hasPermission } from '@/lib/auth';
 import CancelOrderModal from '@/components/CancelOrderModal';
+import { resolveProductImage } from '@/lib/food-images';
 
 type StatusFilter = 'All' | 'pending' | 'completed' | 'paid' | 'cancelled';
 
@@ -120,7 +121,7 @@ export default function RecordPage() {
             key={tab.key}
             type="button"
             onClick={() => setStatusFilter(tab.key)}
-            className={`rounded-[20px] p-4 text-left shadow-sm transition ${statusFilter === tab.key ? 'bg-black text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+            className={`rounded-[20px] p-4 text-left transition ${statusFilter === tab.key ? 'glass-dark' : 'glass text-gray-700 hover:bg-white/70'}`}
           >
             <p className={`text-[10px] font-black uppercase tracking-[0.16em] ${statusFilter === tab.key ? 'text-gray-300' : 'text-gray-400'}`}>{tab.label}</p>
             <p className="mt-1 text-2xl font-black">{counts[tab.key]}</p>
@@ -128,7 +129,7 @@ export default function RecordPage() {
         ))}
       </div>
 
-      <div className="rounded-[20px] bg-rose-50 p-4 shadow-sm sm:flex sm:items-center sm:justify-between">
+      <div className="rounded-[20px] bg-rose-50/60 p-4 shadow-inner backdrop-blur-xl sm:flex sm:items-center sm:justify-between">
         <div>
           <p className="text-[10px] font-black uppercase tracking-[0.16em] text-rose-500">Total Discount Today</p>
           <p className="mt-1 text-2xl font-black text-rose-700">Rs {totalDiscountToday}</p>
@@ -136,20 +137,20 @@ export default function RecordPage() {
         <p className="mt-2 text-xs font-semibold text-rose-500 sm:mt-0">{discountedOrderCount} order{discountedOrderCount === 1 ? '' : 's'} discounted this shift</p>
       </div>
 
-      <div className="rounded-[28px] bg-white p-4 shadow-sm">
+      <div className="glass rounded-[28px] p-4">
         <div className="relative w-full sm:max-w-sm">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search order #, customer, phone, table, waiter"
-            className="w-full rounded-full border border-transparent bg-[#F6F7FB] py-3 pl-11 pr-4 text-sm outline-none transition focus:border-[#D6E332]"
+            className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-11 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
           />
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-[28px] bg-white shadow-sm">
-        <div className="hidden grid-cols-[90px_1.3fr_1fr_0.9fr_0.7fr_0.9fr_0.9fr_80px] gap-2 border-b border-gray-100 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
+      <div className="glass overflow-hidden rounded-[28px]">
+        <div className="hidden grid-cols-[90px_1.3fr_1fr_0.9fr_0.7fr_0.9fr_0.9fr_80px] gap-2 border-b border-white/40 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
           <span>Order</span>
           <span>Customer</span>
           <span>Type</span>
@@ -165,7 +166,7 @@ export default function RecordPage() {
         ) : filteredOrders.length === 0 ? (
           <div className="p-10 text-center text-sm font-bold text-gray-400">No orders match this filter.</div>
         ) : (
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-white/40">
             {filteredOrders.map((order) => (
               <RecordRow key={order.id} order={order} onView={() => setViewOrder(order)} />
             ))}
@@ -221,7 +222,7 @@ function RecordRow({ order, onView }: { order: SavedOrder; onView: () => void })
         <button
           type="button"
           onClick={onView}
-          className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
+          className="glass-pill flex items-center gap-1.5 rounded-full px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-white/70"
         >
           <Eye size={13} /> View
         </button>
@@ -232,12 +233,12 @@ function RecordRow({ order, onView }: { order: SavedOrder; onView: () => void })
 
 function StatusBadge({ status }: { status: SavedOrder['status'] }) {
   const styles: Record<string, string> = {
-    pending: 'bg-amber-100 text-amber-700',
-    completed: 'bg-emerald-100 text-emerald-700',
-    paid: 'bg-sky-100 text-sky-700',
-    cancelled: 'bg-rose-100 text-rose-700',
+    pending: 'bg-gradient-to-b from-amber-300 to-amber-500 text-amber-950',
+    completed: 'bg-gradient-to-b from-emerald-400 to-emerald-600 text-white',
+    paid: 'bg-gradient-to-b from-sky-400 to-sky-600 text-white',
+    cancelled: 'bg-gradient-to-b from-rose-400 to-rose-600 text-white',
   };
-  return <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase ${styles[status] || 'bg-gray-100 text-gray-600'}`}>{status}</span>;
+  return <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-2px_5px_rgba(0,0,0,0.15)] ${styles[status] || 'bg-gray-100 text-gray-600'}`}>{status}</span>;
 }
 
 function OrderDetailModal({
@@ -257,9 +258,9 @@ function OrderDetailModal({
   const createdAt = new Date(order.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   return (
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col rounded-[32px] bg-white shadow-2xl">
-        <div className="flex shrink-0 items-start justify-between border-b border-gray-100 p-6">
+    <div className="glass-overlay fixed inset-0 z-[130] flex items-center justify-center p-4">
+      <div className="glass-strong flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col rounded-[32px]">
+        <div className="flex shrink-0 items-start justify-between border-b border-white/40 p-6">
           <div>
             <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p>
             <h2 className="mt-1 text-2xl font-black text-gray-900">Order #{orderLabel}</h2>
@@ -267,7 +268,7 @@ function OrderDetailModal({
           </div>
           <div className="flex items-center gap-2">
             <StatusBadge status={order.status} />
-            <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <button type="button" onClick={onClose} className="glass-pill rounded-full p-2.5 text-gray-500 transition hover:bg-white/70 hover:text-gray-900">
               <XCircle size={18} />
             </button>
           </div>
@@ -284,7 +285,7 @@ function OrderDetailModal({
           </div>
 
           {order.status === 'cancelled' ? (
-            <div className="space-y-1.5 rounded-[20px] border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">
+            <div className="space-y-1.5 rounded-[20px] bg-rose-50/60 p-4 text-sm font-bold text-rose-700 shadow-inner">
               <div className="flex items-center gap-2">
                 <AlertCircle size={16} />
                 <span>This order was cancelled.</span>
@@ -298,12 +299,12 @@ function OrderDetailModal({
             <h3 className="mb-3 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Items</h3>
             <div className="space-y-2">
               {order.items.map((item, index) => (
-                <div key={`${item.name}-${index}`} className="flex items-center justify-between rounded-[18px] bg-[#FAFBFC] px-4 py-3">
-                  <div>
-                    <p className="font-bold text-gray-900">{item.name}</p>
-                    <p className="text-xs text-gray-400">{item.variation}</p>
+                <div key={`${item.name}-${index}`} className="flex items-center gap-3 rounded-[18px] bg-white/45 px-4 py-3 shadow-inner">
+                  <div className="h-10 w-10 shrink-0 overflow-hidden rounded-[12px] bg-slate-100 shadow-inner">
+                    <img src={resolveProductImage({ image: item.image, name: item.name })} alt={item.name} loading="lazy" className="h-full w-full object-cover" />
                   </div>
-                  <div className="text-right">
+                  <div className="min-w-0 flex-1"><p className="truncate font-bold text-gray-900">{item.name}</p><p className="text-xs text-gray-400">{item.variation}</p></div>
+                  <div className="shrink-0 text-right">
                     <p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p>
                     <p className="text-xs text-gray-400">Qty {item.quantity}</p>
                   </div>
@@ -312,7 +313,7 @@ function OrderDetailModal({
             </div>
           </div>
 
-          <div className="rounded-[20px] bg-[#F8F9FB] p-4 text-sm">
+          <div className="rounded-[20px] bg-white/50 p-4 text-sm shadow-inner">
             <DetailRow label="Subtotal" value={`Rs ${order.subtotal}`} />
             <DetailRow label="Tax" value={`Rs ${order.tax}`} />
             {order.discount && order.discount.amount > 0 ? (
@@ -325,11 +326,11 @@ function OrderDetailModal({
         </div>
 
         {order.status === 'pending' && canCancel ? (
-          <div className="shrink-0 border-t border-gray-100 p-6">
+          <div className="shrink-0 border-t border-white/40 p-6">
             <button
               type="button"
               onClick={onCancelRequested}
-              className="flex w-full items-center justify-center gap-2 rounded-[20px] bg-rose-600 px-5 py-3.5 text-sm font-black text-white transition hover:bg-rose-700"
+              className="flex w-full items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105"
             >
               <Lock size={16} /> Cancel Order
             </button>
@@ -342,7 +343,7 @@ function OrderDetailModal({
 
 function DetailBox({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-[16px] bg-[#F8F9FB] px-4 py-3">
+    <div className="rounded-[16px] bg-white/50 px-4 py-3 shadow-inner">
       <p className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{label}</p>
       <p className="mt-1 text-sm font-bold text-gray-900">{value}</p>
     </div>

@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { CancelOrderPayload, CloseShopResult, Customer, LedgerCustomer, OrderPayload, OrderUpdatePayload, Product, ProductInput, SavedOrder, ShopSession, ShopSessionStatus, Waiter } from '@/lib/pos-types';
+import { CancelOrderPayload, CloseShopResult, Customer, LedgerCustomer, OrderPayload, OrderUpdatePayload, Product, ProductInput, SavedOrder, ShopSession, ShopSessionStatus, Table, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -209,6 +209,64 @@ export async function deleteWaiter(id: string) {
   }
 }
 
+export async function fetchTables() {
+  try {
+    const response = await api.get<Array<Table & { _id?: string }>>('/tables');
+    return response.data.map((table) => ({ ...table, id: table.id ?? table._id ?? '' }));
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function createTable(payload: { name: string; isFamily?: boolean; isActive?: boolean }) {
+  try {
+    const response = await api.post<Table & { _id?: string }>('/tables', payload);
+    return { ...response.data, id: response.data.id ?? response.data._id ?? '' };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateTable(id: string, payload: Partial<Pick<Table, 'name' | 'isFamily' | 'isActive'>>) {
+  try {
+    const response = await api.patch<Table & { _id?: string }>(`/tables/${id}`, payload);
+    return { ...response.data, id: response.data.id ?? response.data._id ?? '' };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteTable(id: string) {
+  try {
+    await api.delete(`/tables/${id}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// The estimated combined preparation + dining duration (minutes) that
+// drives the Dine-In table availability countdown - see
+// components/TableManagementSection.tsx (shop-person setting) and
+// POSPage.tsx (countdown + lock display). Defaults to 45 on both ends if
+// the request fails, matching the backend default.
+export async function fetchTableSettings() {
+  try {
+    const response = await api.get<{ tableTurnoverMinutes: number }>('/tables/settings');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateTableSettings(payload: { tableTurnoverMinutes: number }) {
+  try {
+    const response = await api.patch<{ tableTurnoverMinutes: number }>('/tables/settings', payload);
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 export async function checkPendingOrder(phone: string) {
   try {
     const response = await api.get<{ exists: boolean }>(`/orders/pending/${phone}`);
@@ -227,7 +285,7 @@ export async function createOrder(payload: OrderPayload) {
   }
 }
 
-export async function fetchOrders(params?: { date?: string }) {
+export async function fetchOrders(params?: { date?: string; status?: SavedOrder['status']; orderType?: SavedOrder['orderType'] }) {
   try {
     const response = await api.get<Array<SavedOrder & { _id?: string }>>('/orders', { params });
     return response.data.map(normalizeOrder);
@@ -261,6 +319,30 @@ export async function updateOrder(id: string, payload: OrderUpdatePayload) {
 export async function cancelOrder(id: string, payload: CancelOrderPayload) {
   try {
     const response = await api.post<SavedOrder & { _id?: string }>(`/orders/${id}/cancel`, payload);
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// The two actions on the real-time table-timer alert popup (see
+// TableTimerAlertWatcher.tsx) - "Extend +10 Minutes" pushes this order's
+// effective turnover window back instead of freeing the table, "Clear
+// Table" frees the table immediately (everywhere - the backend occupancy
+// check and every terminal's next poll) without changing the order's own
+// status.
+export async function extendOrderTableTimer(id: string) {
+  try {
+    const response = await api.post<SavedOrder & { _id?: string }>(`/orders/${id}/extend-timer`, {});
+    return normalizeOrder(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function clearOrderTableTimer(id: string) {
+  try {
+    const response = await api.post<SavedOrder & { _id?: string }>(`/orders/${id}/clear-table`, {});
     return normalizeOrder(response.data);
   } catch (error) {
     handleApiError(error);

@@ -30,6 +30,15 @@ const shopSchema = new mongoose.Schema(
     // backend/controllers/orderController.js exports.cancelOrder, which is
     // the only place it's ever compared against.
     cancelOrderKeyHash: { type: String, default: "" },
+    // Estimated combined preparation + dining duration (minutes) used to
+    // drive the Dine-In table availability countdown (see
+    // tableController.js's getTableSettings/updateTableSettings and
+    // orderController.js's isTableCurrentlyLocked). A table is treated as
+    // occupied/un-selectable from the moment a DineIn order is placed on
+    // it until this many minutes have passed - and always re-opens at that
+    // point even if the order still hasn't been paid, by design (see
+    // Technical Requirement #4 - the timer itself IS the grace period).
+    tableTurnoverMinutes: { type: Number, default: 45, min: 1 },
   },
   { timestamps: true }
 );

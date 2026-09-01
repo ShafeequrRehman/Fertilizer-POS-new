@@ -143,7 +143,7 @@ export default function SettingsPage() {
           </h1>
           <p className="text-slate-500 font-bold">Configure your workspace and global preferences.</p>
         </div>
-        <button onClick={saveSettings} className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100">
+        <button onClick={saveSettings} className="flex items-center gap-2 px-6 py-3 border-[0.5px] border-white/30 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)]">
           <Save size={18} /> Save Changes
         </button>
       </div>
@@ -158,7 +158,7 @@ export default function SettingsPage() {
               onClick={() => setActiveSection(item.id)}
               className={`w-full flex items-center justify-between p-4 rounded-2xl font-bold text-sm transition-all ${
                 activeSection === item.id 
-                ? "bg-white text-indigo-600 shadow-sm border border-slate-100" 
+                ? "bg-white text-indigo-600 shadow-inner border border-slate-100"
                 : "text-slate-400 hover:bg-slate-100 hover:text-slate-600"
               }`}
             >

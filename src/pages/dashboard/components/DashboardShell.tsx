@@ -12,6 +12,7 @@ import { closeShopSession, openShopSession } from '@/lib/pos-api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
 import { useToast } from '@/lib/toast';
+import TableTimerAlertWatcher from '@/components/TableTimerAlertWatcher';
 
 // Nav items carry an optional `permission` key - see lib/auth.ts
 // hasPermission(), which mirrors backend/middleware/requirePermission.js.
@@ -45,8 +46,11 @@ export default function DashboardShell() {
 
   return (
     <ShopSessionProvider>
-      <div className="flex min-h-screen bg-[#F2F4F7] font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
-        <aside className="print:hidden flex w-56 flex-col gap-6 p-4">
+      <div className="glass-app-bg flex min-h-screen font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
+        {/* Floating frosted sidebar (macOS Finder / Sonoma-style) - detached
+            from the edge with its own rounded glass panel, rather than a
+            flush flat-color rail. */}
+        <aside className="glass sticky top-4 m-4 flex h-[calc(100vh-2rem)] w-56 shrink-0 flex-col gap-6 rounded-[28px] p-4 print:hidden">
           <div className="flex items-center gap-2 px-2">
             <div className="rounded-lg bg-black p-1">
               <div className="text-[10px] text-white">*</div>
@@ -79,7 +83,7 @@ export default function DashboardShell() {
               <TopAction icon={<MessageCircle size={18} />} />
               <div className="relative">
                 <TopAction icon={<Bell size={18} />} />
-                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">2</span>
+                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-sm">2</span>
               </div>
               <button
                 type="button"
@@ -88,7 +92,7 @@ export default function DashboardShell() {
                   clearAuthSession();
                   navigate('/login', { replace: true });
                 }}
-                className="flex items-center gap-2 rounded-full border border-white bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+                className="glass-pill flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold text-gray-700 transition-colors hover:bg-white/70"
               >
                 <LogOut size={16} />
                 Logout
@@ -98,6 +102,7 @@ export default function DashboardShell() {
           <Outlet />
         </main>
       </div>
+      <TableTimerAlertWatcher />
     </ShopSessionProvider>
   );
 }
@@ -160,7 +165,7 @@ function ShopStatusControl() {
   }
 
   if (loading) {
-    return <div className="h-10 w-36 animate-pulse rounded-full bg-white/60" />;
+    return <div className="glass-pill h-10 w-36 animate-pulse rounded-full" />;
   }
 
   if (!isOpen) {
@@ -170,7 +175,7 @@ function ShopStatusControl() {
         onClick={handleOpen}
         disabled={busy || !canManage}
         title={canManage ? 'Open the shop to start taking orders' : 'Only a Manager or Shop Owner can open the shop'}
-        className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <Store size={16} />
         {busy ? 'Opening...' : 'Open Shop'}
@@ -184,7 +189,7 @@ function ShopStatusControl() {
   return (
     <div className="flex items-center gap-2">
       <div
-        className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-700"
+        className="glass-pill flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-bold text-emerald-700"
         title={`Opened at ${openedTime}${session?.openedByName ? ` by ${session.openedByName}` : ''}`}
       >
         <span className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -195,7 +200,7 @@ function ShopStatusControl() {
           type="button"
           onClick={() => handleClose(false)}
           disabled={busy}
-          className="flex items-center gap-2 rounded-full bg-rose-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Lock size={16} />
           {busy ? 'Closing...' : 'Close Shop'}
@@ -217,10 +222,8 @@ function NetworkStatusBadge() {
       type="button"
       onClick={() => void checkNow()}
       title={isOnline ? 'Connected to the server' : 'Cannot reach the server - check your internet connection'}
-      className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-bold transition-colors ${
-        isOnline
-          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-          : 'border-rose-200 bg-rose-50 text-rose-700'
+      className={`glass-pill flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-bold transition-colors ${
+        isOnline ? 'text-emerald-700' : 'text-rose-700'
       }`}
     >
       {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
@@ -241,7 +244,9 @@ function NavItem({
   active?: boolean;
 }) {
   const className = `flex items-center gap-2.5 rounded-full px-3 py-2.5 transition-all ${
-    active ? 'bg-[#E2F33C] font-bold text-black shadow-sm' : 'text-gray-500 hover:bg-gray-200'
+    active
+      ? 'border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] font-bold text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]'
+      : 'text-gray-500 hover:bg-white/50'
   }`;
 
   if (!href) {
@@ -263,7 +268,7 @@ function NavItem({
 
 function TopAction({ icon }: { icon: React.ReactNode }) {
   return (
-    <div className="cursor-pointer rounded-full border border-white bg-white/60 p-2.5 text-gray-500 shadow-sm transition-colors hover:bg-white">
+    <div className="clickable glass-pill rounded-full p-2.5 text-gray-500 transition-colors hover:bg-white/70">
       {icon}
     </div>
   );

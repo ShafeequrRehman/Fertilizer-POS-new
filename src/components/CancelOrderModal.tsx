@@ -44,8 +44,8 @@ export default function CancelOrderModal({
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
 
   return (
-    <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-[28px] bg-white p-6 shadow-2xl">
+    <div className="glass-overlay fixed inset-0 z-[150] flex items-center justify-center p-4">
+      <div className="glass-strong w-full max-w-md rounded-[28px] p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-xl font-black text-gray-900">Cancel Order #{orderLabel}</h2>
@@ -53,7 +53,7 @@ export default function CancelOrderModal({
               Ask the Shop Owner for the Cancel Order Key set up in the Super Admin panel.
             </p>
           </div>
-          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+          <button type="button" onClick={onClose} className="glass-pill rounded-full p-2.5 text-gray-500 transition hover:bg-white/70 hover:text-gray-900">
             <XCircle size={18} />
           </button>
         </div>
@@ -65,7 +65,7 @@ export default function CancelOrderModal({
               type="password"
               value={key}
               onChange={(event) => setKey(event.target.value)}
-              className="w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none focus:border-black"
+              className="w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
               autoFocus
             />
           </div>
@@ -74,7 +74,7 @@ export default function CancelOrderModal({
             <textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
-              className="min-h-24 w-full rounded-2xl border border-gray-200 px-4 py-3 outline-none focus:border-black"
+              className="min-h-24 w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
             />
           </div>
         </div>
@@ -82,14 +82,14 @@ export default function CancelOrderModal({
         {error ? <p className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
 
         <div className="mt-5 grid grid-cols-2 gap-2">
-          <button type="button" onClick={onClose} className="rounded-2xl bg-gray-100 py-3 text-sm font-black text-gray-600 transition hover:bg-gray-200">
+          <button type="button" onClick={onClose} className="glass-pill rounded-2xl py-3 text-sm font-black text-gray-600 transition hover:bg-white/70">
             Back
           </button>
           <button
             type="button"
             disabled={submitting}
             onClick={() => void submit()}
-            className="flex items-center justify-center gap-2 rounded-2xl bg-rose-600 py-3 text-sm font-black text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 py-3 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Lock size={14} />
             {submitting ? 'Cancelling...' : 'Confirm Cancellation'}

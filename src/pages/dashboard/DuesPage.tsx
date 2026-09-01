@@ -132,7 +132,7 @@ export default function CustomerDuesPage() {
           </button>
           <button
             onClick={() => setShowAddCustomer(true)}
-            className="flex items-center gap-2 px-6 py-3 bg-black text-white rounded-2xl font-black hover:bg-slate-800 transition-all shadow-lg"
+            className="flex items-center gap-2 px-6 py-3 border-[0.5px] border-white/20 bg-black text-white rounded-2xl font-black hover:bg-slate-800 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.2),inset_0_-3px_7px_rgba(0,0,0,0.5)]"
           >
             <Plus size={18} /> Add Customer
           </button>

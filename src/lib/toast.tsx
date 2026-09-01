@@ -30,6 +30,17 @@ interface ConfirmState extends ConfirmOptions {
   resolve: (value: boolean) => void;
 }
 
+interface PopupOptions {
+  /** Defaults to "info". */
+  tone?: ToastTone;
+  title?: string;
+  message: string;
+}
+
+interface PopupState extends PopupOptions {
+  id: number;
+}
+
 interface ToastContextValue {
   toast: {
     success: (message: string) => void;
@@ -39,22 +50,34 @@ interface ToastContextValue {
   };
   /** Promise-based replacement for window.confirm(). Resolves true/false when the user picks an option. */
   confirm: (message: string, options?: ConfirmOptions) => Promise<boolean>;
+  // A centered, blocking popup (backdrop + X close button + OK button) for
+  // moments that deserve more visual weight than a corner toast - e.g.
+  // "you can't save this order" or "your order was saved" - see Technical
+  // Requirements for Dynamic Popups #1. Fire-and-forget (no promise): the
+  // user dismisses it via the X, the OK button, or clicking the backdrop.
+  popup: (options: PopupOptions) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 let idCounter = 0;
 
-const TONE_STYLES: Record<ToastTone, { bg: string; border: string; text: string; icon: ReactNode }> = {
-  success: { bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700", icon: <CheckCircle2 size={18} className="text-emerald-500" /> },
-  error: { bg: "bg-rose-50", border: "border-rose-200", text: "text-rose-700", icon: <XCircle size={18} className="text-rose-500" /> },
-  info: { bg: "bg-indigo-50", border: "border-indigo-200", text: "text-indigo-700", icon: <Info size={18} className="text-indigo-500" /> },
-  warning: { bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700", icon: <AlertTriangle size={18} className="text-amber-500" /> },
+// Shared per-tone styling for both the toast stack and the popup dialog -
+// a colored gradient "app icon" badge + a short bold label, matching an
+// iOS notification banner's icon + app-name treatment rather than a flat
+// pale alert box. `icon` takes a size so the same entry works for the
+// toast's small badge and the popup's larger one.
+const TONE_META: Record<ToastTone, { label: string; iconBg: string; icon: (size: number) => ReactNode }> = {
+  success: { label: "Success", iconBg: "bg-gradient-to-br from-emerald-400 to-emerald-600", icon: (size) => <CheckCircle2 size={size} className="text-white" /> },
+  error: { label: "Error", iconBg: "bg-gradient-to-br from-rose-400 to-rose-600", icon: (size) => <XCircle size={size} className="text-white" /> },
+  info: { label: "Notice", iconBg: "bg-gradient-to-br from-indigo-400 to-indigo-600", icon: (size) => <Info size={size} className="text-white" /> },
+  warning: { label: "Warning", iconBg: "bg-gradient-to-br from-amber-400 to-amber-600", icon: (size) => <AlertTriangle size={size} className="text-white" /> },
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const [popupState, setPopupState] = useState<PopupState | null>(null);
 
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -84,27 +107,38 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setConfirmState(null);
   }
 
+  const popup = useCallback((options: PopupOptions) => {
+    setPopupState({ id: ++idCounter, tone: options.tone ?? "info", title: options.title, message: options.message });
+  }, []);
+
   return (
-    <ToastContext.Provider value={{ toast, confirm }}>
+    <ToastContext.Provider value={{ toast, confirm, popup }}>
       {children}
 
-      {/* Toast stack */}
+      {/* Toast stack - styled like an iOS/iPhone notification banner: a
+          colored "app icon" badge, a bold short label, and the message
+          underneath, all on a frosted glass card. */}
       <div className="fixed top-5 right-5 z-[200] flex w-full max-w-sm flex-col gap-2.5 pointer-events-none">
         {toasts.map((t) => {
-          const style = TONE_STYLES[t.tone];
+          const meta = TONE_META[t.tone];
           return (
             <div
               key={t.id}
-              className={`pointer-events-auto flex items-start gap-3 rounded-2xl border ${style.border} ${style.bg} px-4 py-3.5 shadow-lg`}
+              className="glass-strong pointer-events-auto flex items-start gap-3 rounded-[22px] p-3.5"
             >
-              <div className="mt-0.5 shrink-0">{style.icon}</div>
-              <p className={`flex-1 text-sm font-bold ${style.text}`}>{t.message}</p>
+              <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full shadow-[inset_0_1px_0_rgba(255,255,255,0.45),0_2px_6px_rgba(0,0,0,0.25)] ${meta.iconBg}`}>
+                {meta.icon(16)}
+              </div>
+              <div className="min-w-0 flex-1 pt-0.5">
+                <p className="text-[11px] font-black uppercase tracking-wide text-gray-500">{meta.label}</p>
+                <p className="mt-0.5 text-sm font-bold leading-snug text-gray-900">{t.message}</p>
+              </div>
               <button
                 type="button"
                 onClick={() => dismiss(t.id)}
-                className={`shrink-0 opacity-60 hover:opacity-100 ${style.text}`}
+                className="shrink-0 rounded-full p-1 text-gray-400 transition-colors hover:bg-black/5 hover:text-gray-700"
               >
-                <X size={16} />
+                <X size={14} />
               </button>
             </div>
           );
@@ -114,11 +148,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {/* Confirm (Yes/No) dialog */}
       {confirmState && (
         <div
-          className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4"
+          className="glass-overlay fixed inset-0 z-[210] flex items-center justify-center p-4"
           onClick={() => respond(false)}
         >
           <div
-            className="w-full max-w-sm max-h-[85vh] overflow-y-auto rounded-[28px] bg-white p-6 shadow-2xl"
+            className="glass-strong w-full max-w-sm max-h-[85vh] overflow-y-auto rounded-[28px] p-6"
             onClick={(event) => event.stopPropagation()}
           >
             {confirmState.title ? (
@@ -146,10 +180,56 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           </div>
         </div>
       )}
+
+      {/* Centered blocking popup - see PopupOptions above. Sits above the
+          confirm dialog (z-index) since a popup can reasonably follow a
+          confirm in the same flow (e.g. "cancel this order?" -> "Order
+          cancelled"). */}
+      {popupState && (
+        <div
+          className="glass-overlay fixed inset-0 z-[220] flex items-center justify-center p-4"
+          onClick={() => setPopupState(null)}
+        >
+          <div
+            className="glass-strong relative w-full max-w-sm max-h-[85vh] overflow-y-auto rounded-[28px] p-6 text-center"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setPopupState(null)}
+              aria-label="Close"
+              className="glass-pill absolute right-4 top-4 rounded-full p-2 text-gray-500 transition hover:bg-white/70"
+            >
+              <X size={16} />
+            </button>
+
+            <div className={`mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_8px_18px_-6px_rgba(0,0,0,0.35)] ${TONE_META[popupState.tone ?? "info"].iconBg}`}>
+              {TONE_META[popupState.tone ?? "info"].icon(28)}
+            </div>
+
+            {popupState.title ? (
+              <h3 className="mb-1 text-lg font-black text-slate-900">{popupState.title}</h3>
+            ) : null}
+            <p className="whitespace-pre-line text-sm font-bold leading-relaxed text-slate-600">{popupState.message}</p>
+
+            <button
+              type="button"
+              onClick={() => setPopupState(null)}
+              className="glass-dark mt-6 w-full rounded-2xl py-3.5 text-sm font-black transition-colors hover:brightness-110"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
     </ToastContext.Provider>
   );
 }
 
+// This hook is intentionally exported alongside the ToastProvider
+// component above - splitting it into a separate file would just add an
+// import for every one of this hook's call sites for no real benefit.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useToast() {
   const ctx = useContext(ToastContext);
   if (!ctx) {

@@ -68,6 +68,13 @@ export interface Waiter {
   isActive: boolean;
 }
 
+export interface Table {
+  id: string;
+  name: string;
+  isFamily: boolean;
+  isActive: boolean;
+}
+
 export interface ShopSessionSummary {
   orderCount: number;
   cancelledCount: number;
@@ -148,6 +155,11 @@ export interface OrderPayload {
     price: number;
     quantity: number;
     variation: string;
+    // The product's own image reference (icon filename, or a hosted/data
+    // URL for a custom photo) carried onto the order line so Sales/Record
+    // cards can show the exact same photo the POS grid used, instead of
+    // re-guessing one from the item's plain-text name after the fact.
+    image?: string;
   }>;
   total: number;
   subtotal: number;
@@ -174,6 +186,12 @@ export interface OrderPayload {
   cancelReason?: string;
   discount?: Discount | null;
   userId?: string;
+  // Real-time table-timer alert (see TableTimerAlertWatcher.tsx) -
+  // cumulative minutes staff have added via "Extend +10 Minutes", and
+  // whether staff dismissed the alert via "Clear Table" (frees the table
+  // immediately without changing this order's own status).
+  timerExtendedMinutes?: number;
+  tableTimerCleared?: boolean;
 }
 
 export interface SavedOrder extends OrderPayload {
@@ -198,6 +216,7 @@ export interface OrderUpdatePayload {
     price: number;
     quantity: number;
     variation: string;
+    image?: string;
   }>;
   note?: string;
   waiter?: string;

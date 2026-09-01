@@ -120,14 +120,14 @@ export function WaiterManagementSection({
           </div>
           <p className="mt-2 max-w-2xl text-sm text-slate-500">{description}</p>
         </div>
-        <div className="rounded-3xl bg-slate-50 px-4 py-3 text-right">
+        <div className="glass-pill rounded-3xl px-4 py-3 text-right">
           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Active Waiters</p>
           <p className="text-2xl font-black text-slate-900">{activeWaiters}</p>
         </div>
       </div>
 
       {statusMessage ? (
-        <div className={`mt-5 rounded-2xl border px-4 py-3 text-sm ${statusMessage.tone === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+        <div className={`mt-5 rounded-2xl px-4 py-3 text-sm shadow-inner ${statusMessage.tone === "success" ? "bg-emerald-50/70 text-emerald-700" : "bg-rose-50/70 text-rose-700"}`}>
           {statusMessage.text}
         </div>
       ) : null}
@@ -144,13 +144,13 @@ export function WaiterManagementSection({
             }
           }}
           placeholder="Enter waiter name"
-          className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium outline-none focus:border-indigo-400"
+          className="flex-1 rounded-2xl border border-white/60 bg-white/50 px-4 py-3 text-sm font-medium shadow-inner outline-none focus:border-indigo-400"
         />
         <button
           type="button"
           onClick={() => void handleAddWaiter()}
           disabled={isSaving}
-          className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
+          className="glass-dark inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Plus size={16} />
           Add Waiter
@@ -158,15 +158,15 @@ export function WaiterManagementSection({
       </div>
 
       <div className="mt-6 space-y-3">
-        {isLoading ? <div className="rounded-3xl bg-slate-50 px-4 py-5 text-sm text-slate-500">Loading waiters...</div> : null}
-        {!isLoading && waiters.length === 0 ? <div className="rounded-3xl bg-slate-50 px-4 py-5 text-sm text-slate-500">No waiters saved yet.</div> : null}
+        {isLoading ? <div className="rounded-3xl bg-white/40 px-4 py-5 text-sm text-slate-500 shadow-inner">Loading waiters...</div> : null}
+        {!isLoading && waiters.length === 0 ? <div className="rounded-3xl bg-white/40 px-4 py-5 text-sm text-slate-500 shadow-inner">No waiters saved yet.</div> : null}
         {!isLoading ? waiters.map((waiter) => {
           const isEditing = editingWaiterId === waiter.id;
 
           return (
-            <div key={waiter.id} className="flex flex-col gap-3 rounded-3xl border border-slate-100 bg-slate-50 p-4 lg:flex-row lg:items-center lg:justify-between">
+            <div key={waiter.id} className="flex flex-col gap-3 rounded-3xl bg-white/40 p-4 shadow-inner lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-1 items-center gap-3">
-                <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${waiter.isActive ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"}`}>
+                <div className={`flex h-11 w-11 items-center justify-center rounded-2xl shadow-inner ${waiter.isActive ? "bg-emerald-100/80 text-emerald-600" : "bg-slate-200/70 text-slate-500"}`}>
                   {waiter.isActive ? <UserRoundCheck size={18} /> : <UserRoundX size={18} />}
                 </div>
                 <div className="flex-1">
@@ -175,7 +175,7 @@ export function WaiterManagementSection({
                       type="text"
                       value={editingWaiterName}
                       onChange={(event) => setEditingWaiterName(event.target.value)}
-                      className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold outline-none focus:border-indigo-400"
+                      className="w-full rounded-2xl border border-white/60 bg-white/60 px-4 py-2.5 text-sm font-semibold shadow-inner outline-none focus:border-indigo-400"
                     />
                   ) : (
                     <p className="text-sm font-black text-slate-900">{waiter.name}</p>
@@ -191,7 +191,7 @@ export function WaiterManagementSection({
                       type="button"
                       onClick={() => void handleSaveWaiter(waiter.id)}
                       disabled={isSaving}
-                      className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded-2xl border-[0.5px] border-white/30 bg-gradient-to-b from-indigo-500 to-indigo-700 px-4 py-2 text-xs font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       Save
                     </button>
@@ -201,7 +201,7 @@ export function WaiterManagementSection({
                         setEditingWaiterId(null);
                         setEditingWaiterName("");
                       }}
-                      className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700"
+                      className="glass-pill rounded-2xl px-4 py-2 text-xs font-black text-slate-700"
                     >
                       Cancel
                     </button>
@@ -213,7 +213,7 @@ export function WaiterManagementSection({
                       setEditingWaiterId(waiter.id);
                       setEditingWaiterName(waiter.name);
                     }}
-                    className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700"
+                    className="glass-pill inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-xs font-black text-slate-700"
                   >
                     <Pencil size={14} />
                     Update
@@ -224,7 +224,7 @@ export function WaiterManagementSection({
                   type="button"
                   onClick={() => void handleToggleWaiter(waiter)}
                   disabled={isSaving}
-                  className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="glass-pill rounded-2xl px-4 py-2 text-xs font-black text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {waiter.isActive ? "Deactivate" : "Activate"}
                 </button>
@@ -233,7 +233,7 @@ export function WaiterManagementSection({
                   type="button"
                   onClick={() => void handleDeleteWaiter(waiter)}
                   disabled={isSaving}
-                  className="inline-flex items-center gap-2 rounded-2xl bg-rose-50 px-4 py-2 text-xs font-black text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="inline-flex items-center gap-2 rounded-2xl bg-rose-50/70 px-4 py-2 text-xs font-black text-rose-600 shadow-inner disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Trash2 size={14} />
                   Delete

@@ -36,7 +36,7 @@ export default function PurchasePage() {
               className="pl-12 pr-4 py-3 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-indigo-500 w-64 text-sm outline-none"
             />
           </div>
-          <button className="flex items-center gap-2 px-6 py-4 bg-indigo-600 text-white rounded-[20px] font-black text-sm hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200">
+          <button className="flex items-center gap-2 px-6 py-4 border-[0.5px] border-white/30 bg-indigo-600 text-white rounded-[20px] font-black text-sm hover:bg-indigo-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)]">
             <PackagePlus size={18} /> New Purchase Order
           </button>
         </div>
