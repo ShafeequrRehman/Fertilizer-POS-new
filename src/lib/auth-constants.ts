@@ -7,3 +7,4 @@ export const AUTH_PERMISSIONS_KEY = "pos_permissions";
 export const AUTH_USER_KEY = "pos_user";
 export const AUTH_SHOP_KEY = "pos_shop";
 export const AUTH_LICENSE_KEY = "pos_license";
+export const AUTH_HIDE_DASHBOARD_KEY = "pos_hide_dashboard";

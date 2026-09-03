@@ -16,6 +16,10 @@ router.use(authenticate, requireShopMember, requireLicenseValid);
 router.get("/settings", getTableSettings);
 router.patch("/settings", requirePermission("settings.manage"), updateTableSettings);
 
+// Open to any authenticated shop member - every logged-in user (owner or
+// employee) can add, rename, re-categorize (Family/Simple), or delete a
+// table, not just whoever holds "settings.manage". Only the shop-wide
+// turnover-timer setting above stays permission-gated.
 router.get("/", getTables);
 router.post("/", createTable);
 router.patch("/:id", updateTable);

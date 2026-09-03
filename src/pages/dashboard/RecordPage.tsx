@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
 import { fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory, updateOrder } from '@/lib/pos-api';
@@ -16,6 +17,11 @@ import { useToast } from '@/lib/toast';
 import CancelOrderModal from '@/components/CancelOrderModal';
 import { resolveProductImage } from '@/lib/food-images';
 import { downloadExcelWorkbook, ExcelCell, ExcelCellStyle, ExcelSheet } from '@/lib/excel-export';
+// NOTE: intentionally NOT a static top-level import - see the matching
+// comment in LedgerPage.tsx. @react-pdf/renderer (imported by
+// @/lib/pdf-export) crashes the whole app at startup if it's pulled into
+// Vite's eager dependency pre-bundle via a static import on a routed page,
+// so it's loaded dynamically, only when Download PDF is actually clicked.
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -568,6 +574,114 @@ export default function RecordPage() {
     downloadExcelWorkbook(sheets, `record_${isCustomRange ? `${rangeFrom}_to_${rangeTo}` : 'current-shift'}.xls`);
   }
 
+  // "Neat, downloadable PDF layout" of the exact same filtered view as
+  // Export Excel/CSV above - stat cards, the category-wise and item-wise
+  // rollups, then the full order list - built on the shared
+  // ReportPdfDocument (see @/lib/pdf-export.tsx) rather than a bespoke
+  // layout, since it's the same "title, stats, tables" shape either page
+  // needs.
+  async function exportPdf() {
+    const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
+    const rangeLabel = isCustomRange ? `${rangeFrom} to ${rangeTo}` : 'Current Shift';
+    const formatMoney = (value: number) => `Rs ${Math.round(value).toLocaleString()}`;
+
+    const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
+    const totalCategoryRevenue = categorySales.reduce((sum, c) => sum + c.revenue, 0);
+
+    const itemsByCategory = new Map<string, typeof itemSales>();
+    itemSales.forEach((item) => {
+      const category =
+        categoryByItem.get(`${item.name}::${item.variation}`) ||
+        categoryByItem.get(item.name) ||
+        'Uncategorized';
+      if (!itemsByCategory.has(category)) itemsByCategory.set(category, []);
+      itemsByCategory.get(category)!.push(item);
+    });
+
+    const doc = (
+      <ReportPdfDocument
+        title="Sales Record"
+        subtitle={`${rangeLabel} · ${filteredOrders.length} order${filteredOrders.length === 1 ? '' : 's'}${statusFilter !== 'All' ? ` · ${statusFilter}` : ''}`}
+        stats={[
+          { label: 'Total Orders', value: String(orderStats.totalOrders) },
+          { label: 'Total Amount', value: formatMoney(orderStats.totalAmount) },
+          { label: 'Paid Amount', value: formatMoney(orderStats.paidAmount) },
+          { label: 'Remaining Amount', value: formatMoney(orderStats.remainingAmount) },
+        ]}
+        tables={[
+          {
+            title: 'Category-wise Sale',
+            columns: [
+              { label: 'Category', width: 2 },
+              { label: 'Qty Sold', width: 1, align: 'right' },
+              { label: 'Revenue', width: 1.3, align: 'right' },
+            ],
+            rows: categorySales.map((c) => [c.category, String(c.qty), formatMoney(c.revenue)]),
+            footer: ['Grand Total', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            emptyMessage: 'No items sold in this selection.',
+          },
+          {
+            title: 'Item-wise Sale',
+            columns: [
+              { label: 'Category', width: 1.5 },
+              { label: 'Item', width: 2 },
+              { label: 'Variation', width: 1.3 },
+              { label: 'Qty Sold', width: 1, align: 'right' },
+              { label: 'Revenue', width: 1.3, align: 'right' },
+            ],
+            rows: categorySales.flatMap((catSummary) =>
+              (itemsByCategory.get(catSummary.category) || []).map((item) => [
+                catSummary.category,
+                item.name,
+                item.variation || '-',
+                String(item.qty),
+                formatMoney(item.revenue),
+              ]),
+            ),
+            footer: ['Grand Total', '', '', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            emptyMessage: 'No items sold in this selection.',
+          },
+          {
+            title: 'All Orders',
+            columns: [
+              { label: 'Order ID', width: 1 },
+              { label: 'Date', width: 1 },
+              { label: 'Time', width: 0.9 },
+              { label: 'Customer', width: 1.8 },
+              { label: 'Phone', width: 1.3 },
+              { label: 'Type', width: 1 },
+              { label: 'Status', width: 1 },
+              { label: 'Total', width: 1, align: 'right' },
+              { label: 'Paid', width: 1, align: 'right' },
+              { label: 'Remaining', width: 1.1, align: 'right' },
+            ],
+            rows: filteredOrders.map((order) => {
+              const createdAt = new Date(order.createdAt);
+              const customerName = order.orderType === 'DineIn'
+                ? (order.table ? `Table ${order.table}` : 'Dine-In Customer')
+                : order.customer?.name || 'Walk-in Customer';
+              return [
+                `#${order.dailyOrderNumber ?? order.id.slice(-4)}`,
+                createdAt.toLocaleDateString('en-CA'),
+                createdAt.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }),
+                customerName,
+                order.customer?.phone || '',
+                order.orderType,
+                order.status,
+                formatMoney(order.total),
+                formatMoney(order.paidAmount ?? 0),
+                formatMoney(order.remainingAmount ?? 0),
+              ];
+            }),
+            emptyMessage: 'No orders match this selection.',
+          },
+        ]}
+      />
+    );
+
+    await downloadPdfDocument(doc, `record_${isCustomRange ? `${rangeFrom}_to_${rangeTo}` : 'current-shift'}.pdf`);
+  }
+
   const counts = useMemo(() => {
     // Pending is intentionally the unbounded, always-current count (see
     // allPendingOrders above) rather than dayOrders' shift-scoped one - so
@@ -700,8 +814,8 @@ export default function RecordPage() {
             {isCustomRange
               ? `Showing orders from ${rangeFrom} to ${rangeTo}`
               : shopSession
-                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - pending, completed, paid, and cancelled.`
-                : 'No shift recorded yet. Open the shop to start today\'s record.'}
+                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this restaurant's last shift"} - pending, completed, paid, and cancelled.`
+                : 'No shift recorded yet. Open the restaurant to start today\'s record.'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -720,6 +834,14 @@ export default function RecordPage() {
             className="flex items-center gap-2 rounded-full bg-[#D6E332] px-4 py-2 text-xs font-black text-gray-900 shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Download size={14} /> Export CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => void exportPdf()}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-2 rounded-full bg-rose-600 px-4 py-2 text-xs font-black text-white shadow-sm transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download size={14} /> Download PDF
           </button>
         </div>
       </div>
@@ -1100,6 +1222,9 @@ function OrderDetailModal({
   const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
   const orderType = order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery';
   const createdAt = new Date(order.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
 
   return (
     <div className="glass-overlay fixed inset-0 z-[130] flex items-center justify-center p-4">

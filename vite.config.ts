@@ -20,6 +20,18 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // @react-pdf/renderer (used from src/lib/pdf-export.tsx) pulls in
+      // js-md5 as a transitive dependency, which does
+      // `require('buffer').Buffer` at module-load time. Vite/esbuild's
+      // dependency pre-bundler treats a bare 'buffer' specifier as an
+      // unresolved Node built-in for the browser platform rather than
+      // resolving it to the actual npm `buffer` polyfill package already
+      // installed here, so that require() call returns an object with no
+      // `.Buffer`, and `Buffer.from` throws `Cannot read properties of
+      // undefined (reading 'from')` - this crashed the whole app at
+      // startup once pdf-export was on the static import graph. This
+      // alias forces the bare specifier to resolve to the real polyfill.
+      buffer: path.resolve(__dirname, 'node_modules/buffer/index.js'),
     },
   },
   server: {
@@ -57,5 +69,20 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+  },
+  optimizeDeps: {
+    // Force the `buffer` alias above into the dependency pre-bundle
+    // upfront rather than waiting for Vite to discover it lazily on first
+    // use (Download PDF is behind a dynamic import, so a lazy discovery
+    // would otherwise trigger a dev-server reload mid-download the first
+    // time it's clicked in a fresh session).
+    include: ['buffer'],
+    esbuildOptions: {
+      // A couple of Node-oriented libraries in this dependency tree
+      // (reached only through @react-pdf/renderer) reference the bare
+      // `global` identifier, which doesn't exist in a browser bundle.
+      // Standard companion polyfill alongside the `buffer` alias above.
+      define: { global: 'globalThis' },
+    },
   },
 });

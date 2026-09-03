@@ -8,6 +8,7 @@ import {
   AUTH_USER_KEY,
   AUTH_SHOP_KEY,
   AUTH_LICENSE_KEY,
+  AUTH_HIDE_DASHBOARD_KEY,
 } from "@/lib/auth-constants";
 
 export { AUTH_COOKIE_KEY, AUTH_TOKEN_KEY };
@@ -49,6 +50,11 @@ export interface LoginSessionPayload {
   shop?: SessionShop | null;
   license?: SessionLicense | null;
   permissions?: string[];
+  // Dashboard Permission Gate: true when this employee's assigned Role has
+  // the "Hide Dashboard" toggle set (see backend/models/Role.js). Never
+  // set true for a Shop Owner/Super Admin login response - see
+  // getIsDashboardHidden below.
+  hideDashboard?: boolean;
 }
 
 function storeBoth(key: string, value: string) {
@@ -134,6 +140,30 @@ export function hasPermission(key: string): boolean {
   return getPermissions().includes(key);
 }
 
+// Dashboard Permission Gate: true only for an Employee whose assigned Role
+// has "Hide Dashboard" checked (see backend/models/Role.js/EmployeesPage.tsx's
+// RoleEditorModal) - a Shop Owner/Super Admin can never have this apply to
+// them, same "never locked out of their own shop" rule hasPermission
+// already follows above. Used by DashboardShell.tsx (hides the Dashboard
+// nav item), DashboardPageClient.tsx (redirects away if reached directly),
+// and lib/dashboard-pages.ts's getFirstAccessiblePage (picks a login/redirect
+// target that isn't Dashboard for this employee).
+export function getIsDashboardHidden(): boolean {
+  const role = getAuthRole();
+  if (role !== "employee") return false;
+  return readEither(AUTH_HIDE_DASHBOARD_KEY) === "true";
+}
+
+// For a nav item (or any gate) that should open on ANY of several
+// alternate keys - e.g. Ingredient Stock accepts either the broad
+// "inventory.manage" or the narrower "stock.manage" (Stock Manager role),
+// and Reports accepts "reports.view" or either of its two scoped variants
+// (see lib/dashboard-pages.ts). Short-circuits true on the first match, so
+// it's just as cheap as hasPermission for the common single-key case.
+export function hasAnyPermission(keys: string[]): boolean {
+  return keys.some((key) => hasPermission(key));
+}
+
 // Unlike hasPermission, this is NOT role-gated - a Shop Owner is only
 // exempt from their own shop's role/permission rules, not from a Super
 // Admin's platform-level page toggle (see Shop.enabledPages). A null/
@@ -155,6 +185,18 @@ export function updateCachedShopEnabledPages(enabledPages: string[]) {
   const current = getAuthShop();
   if (!current) return;
   storeBoth(AUTH_SHOP_KEY, JSON.stringify({ ...current, enabledPages }));
+}
+
+// Same pattern as updateCachedShopEnabledPages above - called right after
+// the Shop Name field in Settings (Store Profile) successfully saves a new
+// name, so the sidebar's own branding label (DashboardShell.tsx, which
+// reads getAuthShop()?.name) reflects the change immediately instead of
+// only after the next login.
+export function updateCachedShopName(name: string) {
+  if (typeof window === "undefined") return;
+  const current = getAuthShop();
+  if (!current) return;
+  storeBoth(AUTH_SHOP_KEY, JSON.stringify({ ...current, name }));
 }
 
 export function setAuthSession(payload: LoginSessionPayload) {
@@ -189,6 +231,7 @@ export function setAuthSession(payload: LoginSessionPayload) {
     clearBoth(AUTH_LICENSE_KEY);
   }
   storeBoth(AUTH_PERMISSIONS_KEY, JSON.stringify(payload.permissions || []));
+  storeBoth(AUTH_HIDE_DASHBOARD_KEY, payload.hideDashboard ? "true" : "false");
 }
 
 // Used after a silent token refresh - updates just the access/refresh
@@ -206,7 +249,7 @@ export function updateTokens(accessToken: string, refreshToken?: string) {
 export function clearAuthSession() {
   if (typeof window === "undefined") return;
 
-  [AUTH_TOKEN_KEY, REFRESH_TOKEN_KEY, AUTH_ROLE_KEY, AUTH_SHOP_ID_KEY, AUTH_PERMISSIONS_KEY, AUTH_USER_KEY, AUTH_SHOP_KEY, AUTH_LICENSE_KEY].forEach(clearBoth);
+  [AUTH_TOKEN_KEY, REFRESH_TOKEN_KEY, AUTH_ROLE_KEY, AUTH_SHOP_ID_KEY, AUTH_PERMISSIONS_KEY, AUTH_USER_KEY, AUTH_SHOP_KEY, AUTH_LICENSE_KEY, AUTH_HIDE_DASHBOARD_KEY].forEach(clearBoth);
 
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
   document.cookie = `${AUTH_COOKIE_KEY}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secure}`;

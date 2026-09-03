@@ -1,4 +1,4 @@
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, fetchCustomerSearch, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
@@ -12,6 +12,7 @@ import { reportPrintOutcome, type ToastLike } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
 import { triggerBackgroundSync } from '@/lib/offline-sync';
 import { useToast } from '@/lib/toast';
+import { useNotifications } from '@/lib/notifications';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
@@ -100,6 +101,8 @@ function printKitchenUpdateTicket(order: SavedOrder, items: SavedOrder['items'],
 
 export default function EditOrderPage() {
   const { toast } = useToast();
+  const { notify } = useNotifications();
+  const navigate = useNavigate();
   const params = useParams<{ id: string }>();
   const [order, setOrder] = useState<SavedOrder | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -313,8 +316,19 @@ export default function EditOrderPage() {
         }
         setRemovedItems([]);
         triggerBackgroundSync();
-        setStatus(`Order ${updated.id} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
+        // No blocking pop-up here by design - the notification bar/bell
+        // (see lib/notifications.tsx) is the confirmation surface. Kind is
+        // "info", not "order_saved" - this is an edit to an already-
+        // existing order, so it must not restart that order's 10-minute
+        // edit-from-the-bell window (which is tied to the original save in
+        // POSPage.tsx). This editor is only ever reached from the Sales
+        // page (route is sales/:id/edit), so after saving we return there
+        // instead of to POS - previously this used notify's
+        // navigateToPos, which always sent staff to /dashboard/pos even
+        // though they'd started from Sales.
+        notify('info', `Order ${updated.id} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
         setOrder(updated);
+        navigate('/dashboard/sales');
       } catch (err) {
         setStatus(err instanceof Error ? err.message : 'Could not save this change.');
       }
@@ -346,8 +360,11 @@ export default function EditOrderPage() {
       }
     }
 
-    setStatus(`Order ${updated.id} saved successfully.`);
+    // Same reasoning as the desktop/offline branch above - no pop-up,
+    // notify + return to the Sales page this editor was opened from.
+    notify('info', `Order ${updated.id} saved successfully.`);
     setOrder(updated);
+    navigate('/dashboard/sales');
   }
 
   const visibleProducts = useMemo(

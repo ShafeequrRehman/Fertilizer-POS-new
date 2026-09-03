@@ -33,6 +33,14 @@ export default function ThermalReceipt({
   const discountAmount = order.discount?.amount || 0;
   const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
   const dueAmount = Math.max(billTotal - (amountTendered ?? 0), 0);
+  // Change-Return Calculation: order.cashReceived is the raw cash the
+  // customer actually handed over (see backend/models/Order.js's own
+  // comment) - independent of paidAmount/amountTendered above, which is
+  // always clamped to the bill. Only prints when it's actually more than
+  // the bill (a Cash sale where change was owed back); otherwise this
+  // receipt looks exactly as it did before this feature existed.
+  const cashReceived = order.cashReceived || 0;
+  const changeReturned = Math.max(cashReceived - billTotal, 0);
   const date = order.createdAt ? new Date(order.createdAt) : null;
   const dateString = date
     ? date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()
@@ -192,8 +200,33 @@ export default function ThermalReceipt({
 
           <div className="mt-3">
             <p>PAID: {order.paymentMethod?.toUpperCase() || 'CASH'}</p>
-            {amountTendered !== undefined && (
-              <p>AMOUNT TENDERED: Rs {amountTendered.toFixed(2)}</p>
+            {/* Change-Return Calculation: these three exact rows (Total
+                Bill / Cash Tendered/Received / Change Returned), same as a
+                standard supermarket or fast-food till receipt - only for a
+                sale where a real cash-tendered figure was actually
+                recorded (see SalesPage.tsx's Complete Payment modal).
+                Anything else (card/e-wallet, or an older order saved
+                before this feature existed) falls back to the original
+                single "AMOUNT TENDERED" line below, unchanged. */}
+            {cashReceived > 0 ? (
+              <>
+                <div className="flex justify-between font-bold mt-1">
+                  <span>TOTAL BILL:</span>
+                  <span className="pr-[1mm]">Rs {billTotal.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>CASH TENDERED/RECEIVED:</span>
+                  <span className="pr-[1mm]">Rs {cashReceived.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between font-bold">
+                  <span>CHANGE RETURNED:</span>
+                  <span className="pr-[1mm]">Rs {changeReturned.toFixed(2)}</span>
+                </div>
+              </>
+            ) : (
+              amountTendered !== undefined && (
+                <p>AMOUNT TENDERED: Rs {amountTendered.toFixed(2)}</p>
+              )
             )}
             {dueAmount > 0 && (
               <p>DUE: Rs {dueAmount.toFixed(2)}</p>

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useBackspaceToClose } from "@/lib/keyboard-shortcuts";
 import { Plus, Ban, CheckCircle2, KeyRound, CalendarPlus, Pencil, X, ShieldAlert, Eye } from "lucide-react";
 import { superAdminApi, type ShopSummary, type PlanSummary } from "@/lib/superadmin-api";
 import { useToast } from "@/lib/toast";
@@ -189,6 +190,8 @@ function IconButton({ children, onClick, title, danger }: { children: ReactNode;
 }
 
 function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#15171C] p-6 text-white shadow-2xl">

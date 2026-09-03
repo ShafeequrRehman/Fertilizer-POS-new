@@ -26,6 +26,17 @@ const discountSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// One entry of what services/stockService.js's deductStockForItems actually
+// took off an ingredient's shelf for this order - see orderSchema's
+// stockDeductions field below for the full reasoning.
+const stockDeductionSchema = new mongoose.Schema(
+  {
+    ingredientId: { type: mongoose.Schema.Types.ObjectId, ref: "Ingredient", required: true },
+    quantity: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 // Queue of "the kitchen needs to prepare MORE of this" line items, built up
 // whenever an already-fired order's items change in a way that increases
 // what's being cooked (addItems, or a replaceItems quantity increase on an
@@ -118,6 +129,16 @@ const orderSchema = new mongoose.Schema(
     paymentMethod: { type: String, enum: ["Cash", "Card", "E-Wallet"], default: "Cash" },
     paidAmount: { type: Number, default: 0 },
     remainingAmount: { type: Number, default: 0 },
+    // Change-Return Calculation: the raw cash amount the customer actually
+    // handed over at checkout - independent of paidAmount above, which is
+    // always clamped to however much of this bill (plus any other dues)
+    // it actually settles. Only meaningful for a Cash payment where the
+    // customer tendered more than the bill (e.g. bill is 1600, customer
+    // hands over 2000) - see orderController.js's completeAndSettle branch
+    // (which sets this) and the receipt template (which prints "CASH
+    // TENDERED"/"CHANGE RETURNED" from it). Stays 0 for a payment where
+    // nothing extra was tendered.
+    cashReceived: { type: Number, default: 0 },
     cancelledAt: { type: String, default: "" },
     cancelledBy: { type: String, default: "" },
     cancelReason: { type: String, default: "" },
@@ -230,6 +251,32 @@ const orderSchema = new mongoose.Schema(
       assignedAt: { type: Date, default: null },
     },
     customerChangeRequest: { type: customerChangeRequestSchema, default: null },
+    // Snapshot of exactly what services/stockService.js's
+    // deductStockForItems took off the shelf for THIS order's line items at
+    // creation time (Recipe Management/Stock Management: Task 3's
+    // real-time deduction) - not the recipe's theoretical amounts, but what
+    // was actually available and removed (see that function's own comment
+    // on why). orderController.js's cancelOrderCore reads this back to
+    // restore the exact same amounts if the order is later cancelled,
+    // deliberately never recomputing against whatever the recipe looks
+    // like at cancellation time, which may have changed since. Empty for
+    // every order with no matching recipe, and for every order placed
+    // before this field existed.
+    stockDeductions: { type: [stockDeductionSchema], default: [] },
+    // Task 2 (Purchasing/Financial Logic): the real-time ingredient cost of
+    // this order's items, computed once at creation by
+    // services/stockService.js's deductStockForItems using each
+    // ingredient's averageCost AT THAT MOMENT (see Ingredient.js's own
+    // comment on how that average moves) - a frozen snapshot, exactly like
+    // stockDeductions above, never recomputed later even if an ingredient's
+    // average cost subsequently changes. grossProfit is simply
+    // `total - costPrice`, stored rather than computed on read so the
+    // Day-End Profit report (reportController.getDayEndReport) can sum it
+    // directly with a single aggregation instead of re-deriving it per
+    // order. Both default to 0 - an order with no matching recipe (or
+    // placed before this feature existed) legitimately has no known cost.
+    costPrice: { type: Number, default: 0 },
+    grossProfit: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

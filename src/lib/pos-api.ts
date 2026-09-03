@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { CancelOrderPayload, CloseShopResult, Customer, LedgerCustomer, OrderPayload, OrderUpdatePayload, Product, ProductInput, SavedOrder, ShopSession, ShopSessionStatus, Table, Waiter } from '@/lib/pos-types';
+import { CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Table, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -120,9 +120,15 @@ export async function fetchAllCustomers() {
   }
 }
 
-export async function fetchCustomerLedger() {
+// startDate/endDate are optional plain YYYY-MM-DD strings (LedgerPage.tsx's
+// Date Range picker, same format as its `type="date"` inputs) - when both
+// are given, the backend scopes orderCount/totalBilled/totalPaid/orders/
+// lastOrderAt to that period, while totalOrderBalance/totalDue/
+// previousDues stay the customer's real current balance regardless (see
+// getCustomerLedger's own comment in backend/controllers/customerController.js).
+export async function fetchCustomerLedger(params?: { startDate?: string; endDate?: string }) {
   try {
-    const response = await api.get<LedgerCustomer[]>('/customers/ledger');
+    const response = await api.get<LedgerCustomer[]>('/customers/ledger', { params });
     return response.data;
   } catch (error) {
     handleApiError(error);
@@ -317,6 +323,381 @@ export async function updateTableSettings(payload: { tableTurnoverMinutes: numbe
   try {
     const response = await api.patch<{ tableTurnoverMinutes: number }>('/tables/settings', payload);
     return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Ingredient Stock (Task 1: raw-ingredient inventory + categories) ---
+
+function normalizeIngredientCategory(category: IngredientCategory & { _id?: string }) {
+  return { ...category, id: category.id ?? category._id ?? '' };
+}
+
+function normalizeIngredient(ingredient: Ingredient & { _id?: string }) {
+  return { ...ingredient, id: ingredient.id ?? ingredient._id ?? '' };
+}
+
+export async function fetchIngredientCategories() {
+  try {
+    const response = await api.get<Array<IngredientCategory & { _id?: string }>>('/ingredients/categories');
+    return response.data.map(normalizeIngredientCategory);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function createIngredientCategory(name: string) {
+  try {
+    const response = await api.post<IngredientCategory & { _id?: string }>('/ingredients/categories', { name });
+    return normalizeIngredientCategory(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateIngredientCategory(id: string, payload: Partial<Pick<IngredientCategory, 'name' | 'isActive'>>) {
+  try {
+    const response = await api.patch<IngredientCategory & { _id?: string }>(`/ingredients/categories/${id}`, payload);
+    return normalizeIngredientCategory(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteIngredientCategory(id: string) {
+  try {
+    await api.delete(`/ingredients/categories/${id}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function fetchIngredients(params?: { search?: string; categoryId?: string }) {
+  try {
+    const response = await api.get<Array<Ingredient & { _id?: string }>>('/ingredients', { params });
+    return response.data.map(normalizeIngredient);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export interface IngredientInput {
+  name: string;
+  unit: IngredientUnit;
+  categoryId?: string | null;
+  currentStock?: number;
+  lowStockThreshold?: number;
+}
+
+export async function createIngredient(payload: IngredientInput) {
+  try {
+    const response = await api.post<Ingredient & { _id?: string }>('/ingredients', payload);
+    return normalizeIngredient(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateIngredient(id: string, payload: Partial<IngredientInput & { isActive: boolean }>) {
+  try {
+    const response = await api.patch<Ingredient & { _id?: string }>(`/ingredients/${id}`, payload);
+    return normalizeIngredient(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Adds `quantity` (in the ingredient's own unit) to its running stock - the
+// normal "today's/this month's delivery came in" entry point. Pass a
+// negative quantity for a manual wastage/correction write-off.
+export async function restockIngredient(id: string, quantity: number, note?: string) {
+  try {
+    const response = await api.patch<Ingredient & { _id?: string }>(`/ingredients/${id}/restock`, { quantity, note });
+    return normalizeIngredient(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteIngredient(id: string) {
+  try {
+    await api.delete(`/ingredients/${id}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Recipe Management (Task 2: per-size recipe definition) ---
+
+function normalizeRecipe(recipe: Recipe & { _id?: string }) {
+  return { ...recipe, id: recipe.id ?? recipe._id ?? '' };
+}
+
+export async function fetchRecipes() {
+  try {
+    const response = await api.get<Array<Recipe & { _id?: string }>>('/recipes');
+    return response.data.map(normalizeRecipe);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function fetchRecipeForProduct(productId: string) {
+  try {
+    const response = await api.get<(Recipe & { _id?: string }) | null>(`/recipes/product/${productId}`);
+    return response.data ? normalizeRecipe(response.data) : null;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function saveRecipeForProduct(productId: string, ingredients: Array<{ ingredientId: string; quantity: number; unit?: IngredientUnit }>) {
+  try {
+    const response = await api.put<Recipe & { _id?: string }>(`/recipes/product/${productId}`, { ingredients });
+    return normalizeRecipe(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteRecipeForProduct(productId: string) {
+  try {
+    await api.delete(`/recipes/product/${productId}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Ingredient Purchases (Purchasing/Financial Logic Task 1) ---
+
+function normalizeIngredientPurchase(purchase: IngredientPurchase & { _id?: string }) {
+  return { ...purchase, id: purchase.id ?? purchase._id ?? '' };
+}
+
+export async function fetchIngredientPurchases(params?: { ingredientId?: string; supplierId?: string; startDate?: string; endDate?: string; status?: 'pending' | 'received' }) {
+  try {
+    const response = await api.get<Array<IngredientPurchase & { _id?: string }>>('/ingredient-purchases', { params });
+    return response.data.map(normalizeIngredientPurchase);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export interface IngredientPurchaseInput {
+  ingredientId: string;
+  quantity: number;
+  rate: number;
+  paidAmount?: number;
+  companyName?: string;
+  productDetails?: string;
+  supplierId?: string | null;
+  purchaseDate?: string;
+  note?: string;
+}
+
+// Records a batch (rate/total/paid/due), restocks the ingredient, and folds
+// the rate into its moving-average cost - all three happen together on the
+// backend (see ingredientPurchaseController.createPurchase), which hands
+// back both the new purchase record and the now-updated ingredient in one
+// response so the caller never has to re-derive the average-cost math
+// itself.
+export async function createIngredientPurchase(payload: IngredientPurchaseInput) {
+  try {
+    const response = await api.post<{ purchase: IngredientPurchase & { _id?: string }; ingredient: Ingredient & { _id?: string } }>('/ingredient-purchases', payload);
+    return {
+      purchase: normalizeIngredientPurchase(response.data.purchase),
+      ingredient: normalizeIngredient(response.data.ingredient),
+    };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Dual-Status Stock Inventory Workflow, Phase 1 (Order Placed): the
+// Purchase page's "New Purchase Order" - one Supplier Company, one or more
+// ingredient lines, all sharing one auto-generated purchaseOrderNumber.
+// Deliberately does NOT touch stock/averageCost yet (see
+// ingredientPurchaseController.createPurchaseOrder) - only
+// receivePurchaseOrder below does that, once delivery is actually
+// confirmed.
+export async function createPurchaseOrder(payload: PurchaseOrderInput) {
+  try {
+    const response = await api.post<{ purchaseOrderNumber: string; lines: Array<IngredientPurchase & { _id?: string }> }>('/ingredient-purchases/orders', payload);
+    return {
+      purchaseOrderNumber: response.data.purchaseOrderNumber,
+      lines: response.data.lines.map(normalizeIngredientPurchase),
+    };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Phase 2 (Delivery Fulfillment & Billing) redesign: this IS the billing
+// screen submit - `items` carries one { purchaseId, rate } pair per pending
+// line of the order (the Actual Supplier Rate the manager just entered for
+// each delivered ingredient), and `paidAmount` is the TOTAL paid for the
+// WHOLE order right now, computed against the fresh Total Bill those rates
+// produce (the order's own freshly-computed total for "Full Payment", or
+// anything less for "Partial" - the difference routes to the company's
+// Dues). Flips every line of the order to "received" and, only now, folds
+// each line into its own ingredient's currentStock/averageCost - see
+// ingredientPurchaseController.receivePurchaseOrder for the exact per-line
+// total computation and proportional payment split. Hands back both the
+// updated purchase lines AND the now-updated ingredients, so the Purchase
+// page never has to re-derive the average-cost math itself.
+export async function receivePurchaseOrder(purchaseOrderNumber: string, items: PurchaseOrderReceiveItemInput[], paidAmount: number) {
+  try {
+    const response = await api.patch<{
+      purchaseOrderNumber: string;
+      lines: Array<IngredientPurchase & { _id?: string }>;
+      ingredients: Array<Ingredient & { _id?: string }>;
+    }>(`/ingredient-purchases/orders/${encodeURIComponent(purchaseOrderNumber)}/receive`, { items, paidAmount });
+    return {
+      purchaseOrderNumber: response.data.purchaseOrderNumber,
+      lines: response.data.lines.map(normalizeIngredientPurchase),
+      ingredients: response.data.ingredients.map(normalizeIngredient),
+    };
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Settles part (or all) of a batch's outstanding supplier due. Additive -
+// pass how much is being paid now, not the new total.
+export async function payIngredientPurchase(id: string, amount: number) {
+  try {
+    const response = await api.patch<IngredientPurchase & { _id?: string }>(`/ingredient-purchases/${id}/pay`, { amount });
+    return normalizeIngredientPurchase(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Task 4 (Ledger Integration): company-wise supplier dues, grouped by the
+// free-text companyName typed on each purchase. `startDate`/`endDate` are
+// optional and only scope purchaseCount/totalPurchased/totalPaid - totalDue
+// is always this company's real balance right now (see
+// ingredientPurchaseController.getCompanyLedger's own comment).
+export async function fetchCompanyLedger(params?: { startDate?: string; endDate?: string }) {
+  try {
+    const response = await api.get<CompanyLedgerEntry[]>('/ingredient-purchases/company-ledger', { params });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Expenses (Task 3's "Other Expenses" - gas, electricity, wages, waste) ---
+
+function normalizeExpense(expense: Expense & { _id?: string }) {
+  return { ...expense, id: expense.id ?? expense._id ?? '' };
+}
+
+export async function fetchExpenses() {
+  try {
+    const response = await api.get<Array<Expense & { _id?: string }>>('/expenses');
+    return response.data.map(normalizeExpense);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function createExpense(payload: { category: string; amount: number; date?: string; note?: string }) {
+  try {
+    const response = await api.post<Expense & { _id?: string }>('/expenses', payload);
+    return normalizeExpense(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteExpense(id: string) {
+  try {
+    await api.delete(`/expenses/${id}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Day-End Profit Report (Task 3) ---
+// startDate/endDate are plain YYYY-MM-DD strings - same Date Range
+// convention as fetchCustomerLedger. Both required so ReportsPage.tsx's
+// Daily/Monthly/Yearly/Custom picker always sends an explicit range (the
+// backend itself falls back to "today" if they're ever omitted).
+export async function fetchDayEndReport(startDate: string, endDate: string) {
+  try {
+    const response = await api.get<DayEndReport>('/reports/day-end', { params: { startDate, endDate } });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Role-Based Security: what an account with only 'reports.view.own_sales'
+// (the Receptionist role) can load - one calendar day (defaults to today
+// server-side if omitted), only their own orders. See
+// reportController.getMySalesReport's own comment.
+export async function fetchMySalesReport(date?: string) {
+  try {
+    const response = await api.get<MySalesReport>('/reports/my-sales', { params: date ? { date } : undefined });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Role-Based Security: what an account with only 'reports.view.inventory'
+// (the Stock Manager role) can load - kitchen stock purchase logs in range
+// plus every company's all-time due. See
+// reportController.getInventoryReport's own comment.
+export async function fetchInventoryReport(startDate: string, endDate: string) {
+  try {
+    const response = await api.get<InventoryReport>('/reports/inventory', { params: { startDate, endDate } });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Suppliers (Task 4/5: the registered "Company Name" directory the
+// Ingredient Directory's dynamic filter tabs are generated from, and whose
+// `phone` a stock export gets sent to on WhatsApp) ---
+
+function normalizeSupplier(supplier: Supplier & { _id?: string }) {
+  return { ...supplier, id: supplier.id ?? supplier._id ?? '' };
+}
+
+export async function fetchSuppliers() {
+  try {
+    const response = await api.get<Array<Supplier & { _id?: string }>>('/suppliers');
+    return response.data.map(normalizeSupplier);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function createSupplier(payload: { name: string; phone?: string; email?: string; address?: string; notes?: string }) {
+  try {
+    const response = await api.post<Supplier & { _id?: string }>('/suppliers', payload);
+    return normalizeSupplier(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function updateSupplier(id: string, payload: { name?: string; phone?: string; email?: string; address?: string; notes?: string; isActive?: boolean }) {
+  try {
+    const response = await api.patch<Supplier & { _id?: string }>(`/suppliers/${id}`, payload);
+    return normalizeSupplier(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteSupplier(id: string) {
+  try {
+    await api.delete(`/suppliers/${id}`);
   } catch (error) {
     handleApiError(error);
   }
@@ -608,6 +989,7 @@ export async function respondToOrderChangeRequest(id: string, action: 'approve' 
 export interface ShopProfile {
   _id?: string;
   name?: string;
+  address?: string;
   enabledPages?: string[] | null;
   hasPageVisibilityKey?: boolean;
   hasCancelOrderKey?: boolean;
@@ -632,10 +1014,11 @@ export async function fetchShopProfile() {
 }
 
 // PATCH /shop/profile - see shopOwnerController.exports.updateOwnShop. Used
-// today just for the receiptAutoPrint checkboxes in Settings (Hardware/POS)
-// - name/phone/email/address are also accepted server-side but nothing in
-// this app's UI edits those through this call yet.
-export async function updateShopProfile(payload: { receiptAutoPrint?: Partial<{ dineIn: boolean; takeAway: boolean; delivery: boolean }> }) {
+// for the receiptAutoPrint checkboxes in Settings (Hardware/POS) and the
+// Shop Name/Shop Address fields in Settings (Store Profile) - phone/email
+// are also accepted server-side but nothing in this app's UI edits those
+// through this call yet.
+export async function updateShopProfile(payload: { name?: string; address?: string; receiptAutoPrint?: Partial<{ dineIn: boolean; takeAway: boolean; delivery: boolean }> }) {
   try {
     const response = await api.patch<ShopProfile>('/shop/profile', payload);
     return response.data;

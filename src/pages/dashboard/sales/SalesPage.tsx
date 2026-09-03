@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, Edit3, Globe, Heart, Lock, MapPin, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, Table2, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchTables, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, respondToOrderChangeRequest, type TrackingStatus, type Rider } from '@/lib/pos-api';
+import { ArrowRight, CheckCircle2, Edit3, Globe, Heart, Lock, MapPin, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, Star, Table2, UserRound, XCircle } from 'lucide-react';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchTables, fetchTableSettings, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, respondToOrderChangeRequest, type TrackingStatus, type Rider } from '@/lib/pos-api';
 import { Discount, Product, SavedOrder, ShopSession, Table, Waiter } from '@/lib/pos-types';
+import { getTableTimerRemainingMs, isTableTimerExpired, formatTableCountdown, TABLE_STATUS_POLL_MS, type TableTimerOrder } from '@/lib/table-timer';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
@@ -15,6 +16,8 @@ import { computeDiscountFromInputs, loadDiscountDraft, saveDiscountDraft } from 
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { useToast } from '@/lib/toast';
+import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
+import { useNotifications } from '@/lib/notifications';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 import { resolveProductImage, resolveOrderImage } from '@/lib/food-images';
@@ -81,7 +84,8 @@ function isReceiptPdfResult(value: unknown): value is ReceiptPdfResult {
 }
 
 export default function SalesPage() {
-  const { toast, popup } = useToast();
+  const { toast, popup, confirm } = useToast();
+  const { notify } = useNotifications();
   // The hidden auto-print iframe (see printReadyUrl further down) loads
   // PrintOrderPage.tsx in its own separate React tree - a toast shown from
   // inside it would render invisibly in that hidden iframe. It posts a
@@ -136,6 +140,11 @@ export default function SalesPage() {
   const localEditVersionRef = useRef(0);
   const [filter, setFilter] = useState('All');
   const [search, setSearch] = useState('');
+  // Which status the order grid below is showing - the type/waiter pills
+  // above (filter, above) narrow WHAT shows within that status, this
+  // decides pending vs already-settled. Defaults to Pending, the workflow
+  // this page has always centered on (open tabs/tables needing attention).
+  const [statusTab, setStatusTab] = useState<'pending' | 'completed'>('pending');
   const [status, setStatus] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showPayment, setShowPayment] = useState(false);
@@ -198,13 +207,6 @@ export default function SalesPage() {
   const [customerDue, setCustomerDue] = useState(0);
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [isSendingWA, setIsSendingWA] = useState(false);
-  // Set once the cashier clicks Confirm Payment/Pay Full in the Complete
-  // Payment modal - opens a second "Order Details Preview" popup (Technical
-  // Requirements for Dynamic Popups #2) showing the full item list and
-  // totals one more time before anything is actually charged/saved. The
-  // real completeAndSettle call only happens from that preview's own
-  // Confirm button (see confirmCompletePayment).
-  const [paymentPreview, setPaymentPreview] = useState<{ full: boolean; paid: number } | null>(null);
   // Scrolled into view the instant the Complete Payment modal opens, so
   // the Confirm Payment/Pay Full buttons are visible without the cashier
   // needing to manually scroll down past the discount fields and bill
@@ -215,6 +217,13 @@ export default function SalesPage() {
   // panel are visible immediately - no manual scrolling needed to find
   // them, matching the same auto-scroll pattern as the payment modal above.
   const completeButtonsRef = useRef<HTMLDivElement>(null);
+  // Set true only inside selectOrder (an actual card click) and consumed
+  // (reset false) the moment the scroll effect below runs - this is what
+  // stops the very first order the page auto-selects on load/refresh (see
+  // loadFromCache/refresh's setSelectedOrder(... ?? scoped[0] ...) fallback)
+  // from also triggering an unwanted scroll-to-bottom before the person has
+  // clicked anything.
+  const userSelectedOrderRef = useRef(false);
   // Order list shows 10, "Load More" grows it by 10 - same pattern as
   // Record/Ledger/Dues.
   const [visibleOrderCount, setVisibleOrderCount] = useState(10);
@@ -338,6 +347,11 @@ export default function SalesPage() {
   // this every time it swaps in a fresh object for the same order.
   useEffect(() => {
     if (!selectedOrder || selectedOrder.status !== 'pending') return;
+    // Only an actual card click (selectOrder) sets this - the page's own
+    // auto-select-first-order-on-load never does, so opening/refreshing the
+    // Sales screen no longer scrolls anywhere on its own.
+    if (!userSelectedOrderRef.current) return;
+    userSelectedOrderRef.current = false;
     const frame = requestAnimationFrame(() => {
       completeButtonsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     });
@@ -440,14 +454,29 @@ export default function SalesPage() {
     return byFilter && haystack.includes(search.toLowerCase());
   }), [filter, allPendingOrders, search]);
 
-  // A new filter/search re-derives the whole list, so a stale "load more"
-  // position would otherwise leave the grid showing an arbitrary/
+  // The Completed tab - unlike visibleOrders above, sourced from
+  // filteredOrders (shift-scoped) rather than an unbounded fetch, so it
+  // matches exactly what the "Completed" StatCard above already counts.
+  // A shop's full completed history (beyond the current shift) is what
+  // RecordPage.tsx's date range/export is for - this tab is the same
+  // "today's shift" scope the rest of this page already uses.
+  const completedOrders = useMemo(
+    () => filteredOrders.filter((order) => order.status === 'completed'),
+    [filteredOrders],
+  );
+
+  // Which list the grid below actually renders - toggled by statusTab, the
+  // Pending/Completed pill pair above the type filters.
+  const activeOrders = statusTab === 'pending' ? visibleOrders : completedOrders;
+
+  // A new filter/search/tab re-derives the whole list, so a stale "load
+  // more" position would otherwise leave the grid showing an arbitrary/
   // inconsistent slice - always restart at 10 when they change.
   useEffect(() => {
     setVisibleOrderCount(10);
-  }, [filter, search, allPendingOrders]);
+  }, [filter, search, allPendingOrders, statusTab]);
 
-  const pagedOrders = visibleOrders.slice(0, visibleOrderCount);
+  const pagedOrders = activeOrders.slice(0, visibleOrderCount);
 
   // True once selectedOrder is either nothing, or a REAL full order (not
   // the lean list placeholder - see SavedOrder['itemCount']'s comment).
@@ -471,6 +500,14 @@ export default function SalesPage() {
   const discountRawValue = discountForOrder?.value ?? 0;
   const adjustedTotal = Math.max(orderSubtotal + orderTax - discountAmount, 0);
   const payable = adjustedTotal + customerDue;
+  // Change-Return Calculation: Amount Paid is no longer clamped to payable
+  // (see its input's own comment below) - it now represents the real cash
+  // the customer physically handed over, which can be MORE than the bill.
+  // changeReturn is what's owed back to them the moment that happens (e.g.
+  // Bill 1600, Paid 2000 -> Return 400); 0 the rest of the time (nothing
+  // typed yet, or a partial/exact amount with nothing extra tendered).
+  const enteredPaymentAmount = paymentAmount === '' ? 0 : Number(paymentAmount);
+  const changeReturn = Math.max(enteredPaymentAmount - payable, 0);
 
   async function refresh(lean: boolean) {
     try {
@@ -656,6 +693,7 @@ export default function SalesPage() {
   // went lean at all, or a previous refreshOne/saveUpdate already
   // hydrated it) skips the extra round trip entirely.
   function selectOrder(order: SavedOrder) {
+    userSelectedOrderRef.current = true;
     setSelectedOrder(order);
     // Discount now lives on the order-details card itself (see the
     // Complete Order button's own comment below), not the payment modal -
@@ -670,6 +708,42 @@ export default function SalesPage() {
     if (order.itemCount !== undefined) {
       void refreshOne(order.id);
     }
+  }
+
+  // Instant Checkout: opens the same Complete Payment modal the "Complete
+  // Order" button does, resetting the discount drafts the same way it
+  // does - shared by both the search-bar Enter workflow and the
+  // click-then-Enter card workflow below, so the two stay identical.
+  function openInstantCheckout(order: SavedOrder) {
+    selectOrder(order);
+    if (order.status !== 'pending') return;
+    setDiscountAmountInput('');
+    setDiscountPercentInput('');
+    setShowPayment(true);
+  }
+
+  // Instant Checkout on Enter (search bar): typing an order number and
+  // hitting Enter fetches that exact pending order and opens the payment
+  // popup immediately, no mouse needed. Prefers an exact order-number match
+  // over the loose substring match `visibleOrders` already applies (via the
+  // `search` state itself), so typing "7" jumps straight to Order #007
+  // instead of whatever happened to match first.
+  function handleOrderSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const trimmed = search.trim();
+    if (!trimmed) return;
+    const query = trimmed.replace(/^#/, '').toLowerCase();
+    const exactMatch = visibleOrders.find(
+      (order) => orderNumber(order).toLowerCase() === query.padStart(3, '0') || String(order.dailyOrderNumber ?? '').toLowerCase() === query,
+    );
+    const match = exactMatch ?? visibleOrders[0];
+    if (!match) {
+      toast.error(`No pending order found matching "${trimmed}".`);
+      return;
+    }
+    setStatusTab('pending');
+    openInstantCheckout(match);
   }
 
   async function saveUpdate(payload: Parameters<typeof updateOrder>[1]) {
@@ -853,7 +927,7 @@ export default function SalesPage() {
   // Same direct-IPC-else-fallback-page pattern used everywhere else in this
   // file - prints on this till's own counter printer immediately if one's
   // configured, otherwise opens the Manual Print Center page. Shared by the
-  // on-demand Print Receipt button below and confirmCompletePayment's own
+  // on-demand Print Receipt button below and completePayment's own
   // auto-print, so both ever only have one real implementation.
   function printCustomerReceipt(order: SavedOrder) {
     const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
@@ -892,24 +966,49 @@ export default function SalesPage() {
     }
   }
 
-  // Step 1 of finalizing a sale: validates the amount and opens the Order
-  // Details Preview popup (Technical Requirements #2) instead of charging
-  // anything immediately - the actual completeAndSettle call only happens
-  // from that preview's own Confirm button, see confirmCompletePayment.
-  function openPaymentPreview(full: boolean) {
+  // Finalizes a sale directly from the Complete Payment modal's own
+  // Confirm Payment/Pay Full buttons - no intermediate "Confirm Order
+  // Payment" preview step in between anymore (that second popup, and its
+  // own Back/Confirm & Complete click, were removed so a valid payment
+  // completes in one click). `paid` is the FULL amount actually collected
+  // right now - this order's own bill plus whatever of the customer's
+  // other outstanding dues (Previous Dues, above) gets collected alongside
+  // it. The backend's completeAndSettle action pays down the customer's
+  // older dues/pending orders first with it, oldest first, and only
+  // applies what's left to this order - see orderController.updateOrder.
+  async function completePayment(full: boolean) {
     if (!selectedOrder) return;
-    const paid = full ? payable : Number(paymentAmount || 0);
+    // Change-Return Calculation: Amount Paid is the real cash tendered, not
+    // capped at the bill any more (see the input's own comment) - `paid`
+    // (what actually gets applied to this order + any other dues, sent to
+    // the backend as paidAmount) is always clamped at payable regardless of
+    // how much was typed; anything typed beyond that is change owed back,
+    // never money applied toward a bill. "Pay Full" with nothing typed
+    // still means "tendered exactly the payable amount" (0 change), same
+    // as before this feature existed.
+    const tendered = paymentAmount === '' ? (full ? payable : 0) : Number(paymentAmount);
+    const paid = full ? payable : Math.max(0, Math.min(tendered, payable));
+    const changeAmount = Math.max(tendered - payable, 0);
     if (!full && (paid < 0 || paid > payable)) {
       popup({ tone: 'error', title: 'Invalid Payment Amount', message: 'Enter a valid payment amount.' });
       return;
     }
+    // Zero payment (empty field + "Put in Pending" ticked, or a literal
+    // "0" typed in) is a distinct case from an ordinary partial payment -
+    // it leaves the WHOLE bill as a due with nothing collected at all, so
+    // it gets its own gates below: the tick itself, mandatory customer
+    // details, and one more explicit Yes/No confirmation - see each check's
+    // own comment. "Full Pay" is also disabled outright whenever this is
+    // true (see the button's own disabled prop further down) since paying
+    // in full makes no sense once the cashier's already indicated zero.
+    const isZeroPayment = !full && paid === 0;
     // Nothing typed in Amount Paid is only allowed through with the
     // "Put in Pending" box explicitly ticked - a bare Confirm Payment
     // click with an empty field (a stray click, a misplaced tap) used to
     // silently complete the order with paid=0 and leave the whole bill as
     // an unpaid due with no confirmation at all. Typing any real amount
     // (partial or full via the field) never needs the tick.
-    if (!full && paid === 0 && !confirmPending) {
+    if (isZeroPayment && !confirmPending) {
       popup({ tone: 'error', title: 'Payment Amount Required', message: 'Enter a payment amount, or check "Put in Pending" to confirm this order with no payment collected.' });
       return;
     }
@@ -921,31 +1020,40 @@ export default function SalesPage() {
     // against "Dine-In Customer" / 03000000000 is therefore permanently
     // untrackable and unreachable for a reminder the moment this modal
     // closes - so a real name + phone are required before this is allowed
-    // to leave anything unpaid. A full payment never leaves a due, so
-    // walk-ins can still check out with no customer details exactly as
-    // before.
+    // to leave anything unpaid. This applies just as strictly to a zero
+    // payment (the largest possible due, since nothing at all was
+    // collected) as to any smaller partial one - streamlining the payment
+    // popups elsewhere never relaxes this particular check. A full payment
+    // never leaves a due, so walk-ins can still check out with no customer
+    // details exactly as before. A plain toast here (not the blocking OK/X
+    // popup) - this is a routine, correctable validation nudge, not
+    // something that needs a dedicated dialog the cashier has to dismiss
+    // before continuing.
     if (paid < payable) {
       if (!hasCustomerPhone(selectedOrder) || !selectedOrder.customer.name?.trim()) {
-        popup({ tone: 'error', title: 'Customer Details Required', message: "Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against. Edit the order first, or pay in full instead." });
+        toast.error(
+          isZeroPayment
+            ? "Add the customer's name and phone number before confirming with zero payment - the full amount becomes a due, and dues need a real customer to track them against. Edit the order first, or pay in full instead."
+            : "Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against. Edit the order first, or pay in full instead.",
+        );
         return;
       }
     }
-    // Swap to the preview instead of stacking it on top of this modal.
-    setShowPayment(false);
-    setPaymentPreview({ full, paid });
-  }
+    // One more explicit Yes/No check specifically for zero payment - the
+    // "Put in Pending" tick alone is easy to leave checked from a previous
+    // order or brush past without reading, and unlike a partial payment
+    // (which still collects something), this collects nothing at all and
+    // pushes the ENTIRE bill onto the customer's dues. Making the cashier
+    // affirmatively confirm that here ensures it's intentional, not a slip.
+    if (isZeroPayment) {
+      const proceedWithZeroPayment = await confirm(
+        `No payment will be collected right now for Order #${orderNumber(selectedOrder)} - the full ₨${payable} will be recorded as a due against ${selectedOrder.customer.name}. Continue?`,
+        { title: 'Confirm Zero Payment', confirmText: 'Confirm', tone: 'danger' },
+      );
+      if (!proceedWithZeroPayment) return;
+    }
 
-  // Step 2: the cashier reviewed the preview and confirmed it. `paid` here
-  // is the FULL amount actually collected right now - this order's own
-  // bill plus whatever of the customer's other outstanding dues (Previous
-  // Dues, above) the cashier chose to collect alongside it. The backend's
-  // completeAndSettle action pays down the customer's older dues/pending
-  // orders first with it, oldest first, and only applies what's left to
-  // this order - see orderController.updateOrder.
-  async function confirmCompletePayment() {
-    if (!selectedOrder || !paymentPreview) return;
-    const { paid } = paymentPreview;
-    const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, discount: discountForOrder });
+    const updated = await saveUpdate({ status: 'completed', action: 'completeAndSettle', paidAmount: paid, cashReceived: tendered, discount: discountForOrder });
     if (!updated) return;
     // Auto-print is opt-in per order type (Settings > Hardware/POS - see
     // receiptAutoPrint above) - a Shop Owner explicitly turns this back on
@@ -958,15 +1066,20 @@ export default function SalesPage() {
       (updated.orderType === 'Delivery' && receiptAutoPrint.delivery);
     if (shouldAutoPrint) printCustomerReceipt(updated);
     await sendCompletedReceiptOnWhatsApp(updated);
-    setPaymentPreview(null);
     setShowPayment(false);
     setPaymentAmount('');
     setConfirmPending(false);
     setDiscountAmountInput('');
     setDiscountPercentInput('');
-    // Technical Requirements for Dynamic Popups #2 - Post-Payment Success
-    // Popup: compact, responsive, and states the outcome plainly.
-    popup({ tone: 'success', title: 'Order Completed Successfully', message: `Order #${orderNumber(updated)} - Rs ${paid} collected.` });
+    // No blocking pop-up here by design - the notification bar/bell (see
+    // lib/notifications.tsx) is the sole confirmation surface for a
+    // completed order now.
+    notify(
+      'order_completed',
+      changeAmount > 0
+        ? `Order #${orderNumber(updated)} completed - Rs ${paid} collected, Rs ${changeAmount} change returned.`
+        : `Order #${orderNumber(updated)} completed - Rs ${paid} collected.`,
+    );
   }
 
   async function sendCompletedReceiptOnWhatsApp(order: SavedOrder) {
@@ -1166,16 +1279,32 @@ export default function SalesPage() {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search orders, tables, customers, waiters" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none focus:border-[#D6E332]" />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={handleOrderSearchKeyDown} placeholder="Search orders, tables, customers, waiters - Enter to check out" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none focus:border-[#D6E332]" />
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <p className="max-w-xs text-xs font-bold text-gray-500">
                   {shopSession
-                    ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - not split by calendar date.`
-                    : 'No shift recorded yet. Open the shop to start taking orders.'}
+                    ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this restaurant's last shift"} - not split by calendar date.`
+                    : 'No shift recorded yet. Open the restaurant to start taking orders.'}
                 </p>
                 <button type="button" onClick={() => void loadAny()} className="glass-dark rounded-2xl px-4 py-3 text-sm font-black"><RefreshCcw size={16} className="mr-2 inline" />Refresh</button>
               </div>
+            </div>
+            <div className="mt-4 flex gap-1.5 rounded-full bg-white/40 p-1.5 shadow-inner">
+              <button
+                type="button"
+                onClick={() => setStatusTab('pending')}
+                className={`flex-1 rounded-full px-4 py-2.5 text-sm font-black transition ${statusTab === 'pending' ? 'glass-dark' : 'text-gray-500 hover:bg-white/60'}`}
+              >
+                Pending ({visibleOrders.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusTab('completed')}
+                className={`flex-1 rounded-full px-4 py-2.5 text-sm font-black transition ${statusTab === 'completed' ? 'glass-dark' : 'text-gray-500 hover:bg-white/60'}`}
+              >
+                Completed ({completedOrders.length})
+              </button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               {filters.map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-4 py-2 text-sm font-bold transition ${filter === item ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>{item}</button>)}
@@ -1183,13 +1312,16 @@ export default function SalesPage() {
           </div>
 
           {loading ? <Surface text="Loading orders..." /> : null}
-          {!loading && visibleOrders.length === 0 ? <Surface text="No orders matched the current filters." /> : null}
-          {!loading && visibleOrders.length > 0 ? (
-            // auto-fill/minmax instead of fixed breakpoint columns - order
-            // cards resize fluidly with the available width (which now
-            // varies since the detail panel is always pinned to the right)
-            // instead of ever needing a horizontal scrollbar.
-            <div className="grid grid-cols-3 gap-3 sm:grid-cols-3 md:grid-cols-3 lg:min-h-0 lg:flex-1 lg:content-start lg:grid-cols-3 lg:overflow-y-auto lg:pr-2 xl:grid-cols-4">
+          {!loading && activeOrders.length === 0 ? (
+            <Surface text={statusTab === 'pending' ? 'No pending orders matched the current filters.' : 'No completed orders matched the current filters.'} />
+          ) : null}
+          {!loading && activeOrders.length > 0 ? (
+            // Dynamic Expanding Grid: minimum 3 order cards per row on
+            // smaller displays (grid-cols-3 floor), automatically expanding
+            // to 4/5/6 as the screen widens - never dropped below 3 at any
+            // width, unlike the old lg:grid-cols-3 override that used to
+            // undercut a wider baseline.
+            <div className="grid grid-cols-3 gap-3 md:grid-cols-4 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2 xl:grid-cols-5 2xl:grid-cols-6">
               {pagedOrders.map((order) => {
                 const isSelected = selectedOrder?.id === order.id;
                 const heroImage = resolveOrderImage(order.items);
@@ -1198,6 +1330,16 @@ export default function SalesPage() {
                   key={order.id}
                   type="button"
                   onClick={() => selectOrder(order)}
+                  onKeyDown={(event) => {
+                    // Click-then-Enter Instant Checkout: a mouse click
+                    // already focuses this card (native button focus), so
+                    // Enter right after - with no extra click - opens the
+                    // payment popup for it, exactly like the search-bar
+                    // Enter workflow above.
+                    if (event.key !== 'Enter') return;
+                    event.preventDefault();
+                    openInstantCheckout(order);
+                  }}
                   className={`min-w-0 overflow-hidden rounded-[28px] border bg-gradient-to-br backdrop-blur-xl backdrop-saturate-150 text-left transition-all duration-200 ${
                     isSelected
                       ? '-translate-y-1 border-[#D6E332] from-[#FBFDEB]/80 to-white/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.3)] ring-1 ring-[#E2F33C]/60'
@@ -1244,7 +1386,12 @@ export default function SalesPage() {
                       <div className="flex flex-wrap items-center gap-1.5">
                         <div className="min-w-0 shrink-0"><Line icon={<UserRound size={15} />} text={label(order)} /></div>
                         {order.orderType === 'DineIn' && order.table ? (
-                          <TableTypeBadge tableName={order.table} isFamily={familyTableNames[order.table]} />
+                          <>
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100/80 px-2 py-0.5 text-[10px] font-black text-slate-700 shadow-inner">
+                              <Table2 size={10} /> Table {order.table}
+                            </span>
+                            <TableTypeBadge tableName={order.table} isFamily={familyTableNames[order.table]} />
+                          </>
                         ) : null}
                       </div>
                       <Line icon={<Phone size={15} />} text={phoneLabel(order)} />
@@ -1261,14 +1408,14 @@ export default function SalesPage() {
               })}
             </div>
           ) : null}
-          {!loading && visibleOrders.length > pagedOrders.length ? (
+          {!loading && activeOrders.length > pagedOrders.length ? (
             <div className="flex justify-center pt-1">
               <button
                 type="button"
                 onClick={() => setVisibleOrderCount((previous) => previous + 10)}
                 className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
               >
-                Load More ({visibleOrders.length - pagedOrders.length} more)
+                Load More ({activeOrders.length - pagedOrders.length} more)
               </button>
             </div>
           ) : null}
@@ -1358,18 +1505,31 @@ export default function SalesPage() {
                         disabled={!isSelectedOrderHydrated}
                         type="button"
                         onClick={() => setShowTableEdit(true)}
-                        className="min-w-0 rounded-[20px] bg-white/50 px-4 py-3 text-left shadow-inner transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
+                        // col-span-2: this box carries more content (number
+                        // + type badge + pencil) than a plain Box, so it
+                        // needs the full row width - squeezed into half of
+                        // the 2-col grid on a narrow detail panel, "Table 3"
+                        // itself was wrapping onto two lines.
+                        className="col-span-2 min-w-0 rounded-[20px] bg-white/50 px-4 py-3 text-left shadow-inner transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table Category</p>
-                        <div className="mt-1.5 flex items-center gap-1.5">
-                          {selectedOrder.table ? <TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} /> : <span className="text-sm font-bold text-gray-900">Not set</span>}
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table</p>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          {selectedOrder.table ? (
+                            <>
+                              <span className="whitespace-nowrap text-sm font-black text-gray-900">Table {selectedOrder.table}</span>
+                              <TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} />
+                            </>
+                          ) : <span className="text-sm font-bold text-gray-900">Not set</span>}
                           <Pencil size={12} className="shrink-0 text-gray-400" />
                         </div>
                       </button>
                     ) : selectedOrder.table ? (
-                      <div className="min-w-0 rounded-[20px] bg-white/50 px-4 py-3 shadow-inner">
-                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table Category</p>
-                        <div className="mt-1.5"><TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} /></div>
+                      <div className="col-span-2 min-w-0 rounded-[20px] bg-white/50 px-4 py-3 shadow-inner">
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table</p>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <span className="whitespace-nowrap text-sm font-black text-gray-900">Table {selectedOrder.table}</span>
+                          <TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} />
+                        </div>
                       </div>
                     ) : (
                       <Box label="Table" value="N/A" />
@@ -1452,7 +1612,7 @@ export default function SalesPage() {
                       Complete Payment modal itself will use. Once the order
                       is actually completed, `discountAmountInput`/
                       `discountPercentInput` are reset (see
-                      confirmCompletePayment), so from that point on this
+                      completePayment), so from that point on this
                       reads the real, persisted selectedOrder.discount
                       instead - both branches now always spell out
                       value-vs-percentage explicitly rather than leaving a
@@ -1505,7 +1665,21 @@ export default function SalesPage() {
 
       {showPayment && selectedOrder ? (
         <Modal title="Complete Payment" onClose={() => { setShowPayment(false); setConfirmPending(false); }}>
-          <div className="space-y-4">
+          <div
+            className="space-y-4"
+            onKeyDown={(event) => {
+              // Instant Checkout: Enter anywhere in this popup (typically
+              // right after typing the cash amount) submits it as "Pay
+              // Full" - the same button click, just without reaching for
+              // the mouse. Respects the exact same disabled condition Pay
+              // Full's own button already uses, so a partial/zero amount
+              // still can't be silently overridden into a full payment.
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              if ((Boolean(paymentAmount) && Number(paymentAmount) < payable) || confirmPending) return;
+              void completePayment(true);
+            }}
+          >
             {/* Discount is set on the order-details card itself now, before
                 Complete Order is even clicked (see that button's own
                 comment) - this modal just reviews the figures it already
@@ -1521,65 +1695,39 @@ export default function SalesPage() {
               <Row label="Final Payable" value={`Rs ${payable}`} strong />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-semibold text-gray-700">Amount Paid</label>
+              <label className="mb-1 block text-sm font-semibold text-gray-700">Amount Paid / Cash Received</label>
               <input
                 value={paymentAmount}
                 onChange={(event) => {
                   if (!/^\d*$/.test(event.target.value)) return;
-                  // Clamped to the Final Payable figure as they type -
-                  // can't overpay an order (previously this only caught an
-                  // over-typed amount at Confirm Payment click time, via
-                  // openPaymentPreview's own `paid > payable` check below,
-                  // which let something like "100000" sit in the field
-                  // looking valid until submit).
+                  // Change-Return Calculation: no longer clamped to the
+                  // Final Payable figure - a cashier types the REAL cash
+                  // the customer handed over here (e.g. Bill 1600, hands
+                  // over a 2000 note), which can be more than the bill.
+                  // completePayment below still only ever applies up to
+                  // `payable` toward the order itself; anything typed
+                  // beyond that becomes the Change Return shown below and
+                  // printed on the receipt (see ThermalReceipt.tsx).
                   const digitsOnly = event.target.value;
-                  const clamped = digitsOnly === '' ? '' : String(Math.min(Number(digitsOnly), payable));
-                  setPaymentAmount(clamped);
+                  setPaymentAmount(digitsOnly);
                   // Typing a real amount supersedes the tick below - only
                   // relevant while it's still empty.
-                  if (clamped) setConfirmPending(false);
+                  if (digitsOnly) setConfirmPending(false);
                 }}
                 className="w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none"
-                placeholder={`Up to Rs ${payable}`}
+                placeholder={`Bill is Rs ${payable} - enter cash received`}
               />
             </div>
-            <div ref={paymentButtonsRef} className="grid gap-2 sm:grid-cols-2">
-              <button type="button" onClick={() => openPaymentPreview(false)} className="glass-dark rounded-[20px] px-4 py-3 text-sm font-black transition hover:brightness-110">Confirm Payment</button>
-              <button type="button" onClick={() => openPaymentPreview(true)} className="rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-4 py-3 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105">Pay Full</button>
-            </div>
-          </div>
-        </Modal>
-      ) : null}
-
-      {paymentPreview && selectedOrder ? (
-        <Modal title="Confirm Order Payment" onClose={() => { setPaymentPreview(null); setShowPayment(true); }}>
-          <div className="space-y-4">
-            <div className="rounded-[24px] bg-white/50 p-4 shadow-inner">
-              <p className="mb-3 text-xs font-black uppercase tracking-[0.16em] text-gray-400">
-                Order #{orderNumber(selectedOrder)} &middot; {label(selectedOrder)}
-              </p>
-              <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
-                {selectedOrder.items.map((item, index) => (
-                  <div key={`${item.name}-${index}`} className="flex items-center gap-2.5 text-sm">
-                    <div className="h-8 w-8 shrink-0 overflow-hidden rounded-[10px] bg-slate-100 shadow-inner">
-                      <img src={resolveProductImage({ image: item.image, name: item.name })} alt={item.name} loading="lazy" className="h-full w-full object-cover" />
-                    </div>
-                    <span className="min-w-0 flex-1 truncate text-gray-600">{item.name}{item.variation ? ` (${item.variation})` : ''} &times; {item.quantity}</span>
-                    <span className="shrink-0 font-black text-gray-900">Rs {item.price * item.quantity}</span>
-                  </div>
-                ))}
+            {/* Change-Return Calculation: dynamically computed the moment
+                the typed amount exceeds the Final Payable figure - large,
+                clear font so it reads at a glance across the counter, same
+                as a supermarket/fast-food till display. */}
+            {changeReturn > 0 ? (
+              <div className="rounded-[24px] bg-emerald-50 px-4 py-4 text-center shadow-inner">
+                <p className="text-xs font-black uppercase tracking-wide text-emerald-600">Change Return / Balance Due Back</p>
+                <p className="mt-1 text-4xl font-black text-emerald-700">Rs {changeReturn}</p>
               </div>
-            </div>
-            <div className="rounded-[24px] bg-white/50 p-4 text-sm shadow-inner">
-              <Row label="Subtotal" value={`Rs ${orderSubtotal}`} />
-              <Row label="Tax" value={`Rs ${orderTax}`} />
-              {discountAmount > 0 ? (
-                <Row label={`Discount ${discountType === 'percent' ? `(${discountRawValue}%)` : ''}`} value={`-Rs ${discountAmount}`} />
-              ) : null}
-              <Row label="Bill Total" value={`Rs ${adjustedTotal}`} />
-              <Row label="Previous Dues" value={`Rs ${customerDue}`} />
-              <Row label="Collecting Now" value={`Rs ${paymentPreview.paid}`} strong />
-            </div>
+            ) : null}
             {!paymentAmount ? (
               <label className="flex cursor-pointer items-start gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">
                 <input
@@ -1591,9 +1739,26 @@ export default function SalesPage() {
                 Put in Pending - confirm with no payment collected right now (this leaves the full ₨{payable} as a due).
               </label>
             ) : null}
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button type="button" onClick={() => { setPaymentPreview(null); setShowPayment(true); }} className="glass-pill rounded-[20px] px-4 py-3 text-sm font-black text-gray-700 transition hover:bg-white/70">Back</button>
-              <button type="button" onClick={() => void confirmCompletePayment()} className="rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-4 py-3 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105">Confirm &amp; Complete</button>
+            <div ref={paymentButtonsRef} className="grid gap-2 sm:grid-cols-2">
+              <button type="button" onClick={() => void completePayment(false)} className="glass-dark rounded-[20px] px-4 py-3 text-sm font-black transition hover:brightness-110">Confirm Payment</button>
+              <button
+                type="button"
+                onClick={() => void completePayment(true)}
+                // Once the cashier has typed a partial amount into Amount
+                // Paid (anything less than the Final Payable figure,
+                // including a literal "0"), "Pay Full" no longer makes
+                // sense as a shortcut - disable it so they can't
+                // accidentally override their own partial/zero entry with
+                // a full payment in one click. Also disabled the moment
+                // "Put in Pending" is ticked (the empty-field zero-payment
+                // path) for the same reason. Re-enables the moment the
+                // field is cleared (and the tick with it) or filled up to
+                // the full amount.
+                disabled={(Boolean(paymentAmount) && Number(paymentAmount) < payable) || confirmPending}
+                className="rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-4 py-3 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Pay Full
+              </button>
             </div>
           </div>
         </Modal>
@@ -1673,14 +1838,18 @@ function TableTypeBadge({ tableName, isFamily }: { tableName: string; isFamily: 
       title={`Table ${tableName} - ${familyMode ? 'Family Table' : 'Simple Table'}`}
       className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[7px] font-black uppercase tracking-wide shadow-inner ${familyMode ? 'bg-pink-100/80 text-pink-700' : 'bg-sky-100/80 text-sky-700'}`}
     >
-      {familyMode ? <Heart size={8} fill="currentColor" /> : <Table2 size={8} />}
-      {familyMode ? 'Family' : 'Simple'}
+      {familyMode ? <Heart size={8} fill="currentColor" /> : <Star size={8} fill="currentColor" />}
+      {familyMode ? 'F' : 'S'}
     </span>
   );
 }
 function Box({ label, value }: { label: string; value: string }) { return <div className="min-w-0 rounded-[20px] bg-white/50 px-4 py-3 shadow-inner"><p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">{label}</p><p className="mt-1 break-words text-sm font-bold text-gray-900">{value}</p></div>; }
 function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) { return <div className={`flex items-center justify-between py-1.5 ${strong ? 'text-lg font-black text-gray-900' : 'text-sm text-gray-500'}`}><span>{label}</span><span>{value}</span></div>; }
-function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) { return <div className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"><div className={`glass-strong flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-white/40 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="glass-pill rounded-full p-3 text-gray-500 transition hover:bg-white/70"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>; }
+function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
+  return <div className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"><div className={`glass-strong flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-white/40 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="glass-pill rounded-full p-3 text-gray-500 transition hover:bg-white/70"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>;
+}
 
 const TRACKING_STEP_LABEL: Record<string, string> = {
   awaiting_confirmation: 'Waiting for confirmation',
@@ -1867,6 +2036,75 @@ function TableChangeModal({
   const [selected, setSelected] = useState(order.table || '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [tableTurnoverMinutes, setTableTurnoverMinutes] = useState(45);
+  // tableName -> the most recent still-pending, not-yet-cleared DineIn order
+  // occupying it, EXCLUDING this very order (see loadActiveTableOrders
+  // below) - same lock data POSPage.tsx's Dine-In grid uses when placing a
+  // new order, so moving an existing order onto a different table only ever
+  // offers tables that are actually free right now.
+  const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
+  const [tick, setTick] = useState(Date.now());
+
+  async function loadActiveTableOrders() {
+    try {
+      const orders = await fetchOrders({ status: 'pending', orderType: 'DineIn' });
+      const next: Record<string, TableTimerOrder> = {};
+      (orders ?? [])
+        .filter((o) => o.status === 'pending' && o.orderType === 'DineIn' && o.table && !o.tableTimerCleared && o.id !== order.id)
+        .forEach((o) => {
+          const existing = next[o.table];
+          if (!existing || new Date(o.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
+            next[o.table] = { createdAt: o.createdAt, timerExtendedMinutes: o.timerExtendedMinutes };
+          }
+        });
+      setActiveTableOrders(next);
+    } catch (err) {
+      console.error('Failed to refresh table occupancy:', err);
+    }
+  }
+
+  useEffect(() => {
+    void fetchTableSettings().then((settings) => {
+      if (settings?.tableTurnoverMinutes) setTableTurnoverMinutes(settings.tableTurnoverMinutes);
+    });
+    void loadActiveTableOrders();
+    const pollInterval = setInterval(() => void loadActiveTableOrders(), TABLE_STATUS_POLL_MS);
+    const tickInterval = setInterval(() => setTick(Date.now()), 1000);
+    return () => {
+      clearInterval(pollInterval);
+      clearInterval(tickInterval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If the table currently selected gets taken by another order while this
+  // modal is still open, drop the now-stale selection instead of letting
+  // staff submit straight into the 409 the backend would return.
+  useEffect(() => {
+    if (!selected || selected === order.table) return;
+    if (activeTableOrders[selected]) {
+      setSelected('');
+      setError(`Table ${selected} was just taken by another order. Pick a different table.`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTableOrders]);
+
+  function getTableRemainingMs(tableName: string): number | null {
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return null;
+    void tick; // re-evaluated every second purely to re-render the live countdown
+    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
+  }
+
+  // Automatic, no staff decision involved - locked only while the occupying
+  // order's turnover window hasn't elapsed yet (same rule as POSPage.tsx's
+  // isTableLocked and the backend's autoFreeExpiredTable).
+  function isTableLocked(tableName: string): boolean {
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return false;
+    void tick;
+    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
+  }
 
   async function submit() {
     if (!selected) {
@@ -1875,6 +2113,10 @@ function TableChangeModal({
     }
     if (selected === order.table) {
       onClose();
+      return;
+    }
+    if (isTableLocked(selected)) {
+      setError(`Table ${selected} already has an active order. Pick a different table.`);
       return;
     }
     setSubmitting(true);
@@ -1892,23 +2134,61 @@ function TableChangeModal({
   return (
     <Modal title={`Change Table - Order #${orderNumber(order)}`} onClose={onClose}>
       <p className="text-sm text-gray-500">
-        Currently {order.table ? <span className="font-bold text-gray-900">Table {order.table}</span> : 'no table set'}. Pick the new table below.
+        Pick the new table below - occupied tables are locked, just like when placing a new order.
       </p>
+      {/* Always visible so staff can see at a glance exactly which table's
+          order this is, and exactly where it's about to move to, before
+          they hit Save - important once more than one order's table might
+          be getting changed around the same time. */}
+      <div className="mt-3 flex items-center gap-3 rounded-2xl bg-gray-50 p-4">
+        <div className="min-w-0 flex-1 text-center">
+          <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">Current Table</p>
+          <p className="mt-1 truncate text-lg font-black text-gray-900">{order.table || 'Not set'}</p>
+        </div>
+        <ArrowRight size={20} className="shrink-0 text-gray-300" />
+        <div className="min-w-0 flex-1 text-center">
+          <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">New Table</p>
+          <p className={`mt-1 truncate text-lg font-black ${selected ? 'text-emerald-600' : 'text-gray-300'}`}>{selected || 'Select below'}</p>
+        </div>
+      </div>
       {tables.length === 0 ? <p className="mt-3 text-xs font-bold text-gray-400">No tables configured yet.</p> : null}
       <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-5">
         {tables.map((table) => {
           const isSelected = selected === table.name;
+          const remainingMs = getTableRemainingMs(table.name);
+          const isLocked = isTableLocked(table.name);
+          const isExpired = isLocked && remainingMs !== null && remainingMs <= 0;
           return (
             <button
               key={table.id}
               type="button"
+              disabled={isLocked}
+              title={
+                isExpired
+                  ? `Table ${table.name} - timer expired, awaiting staff to clear or extend it`
+                  : isLocked
+                    ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
+                    : undefined
+              }
               onClick={() => setSelected(table.name)}
               className={`flex flex-col items-center gap-1 rounded-xl border py-2.5 text-sm font-black transition ${
-                isSelected ? 'border-black bg-black text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-400'
+                isExpired
+                  ? 'cursor-not-allowed border-rose-300 bg-rose-50 text-rose-400'
+                  : isLocked
+                    ? 'cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400'
+                    : isSelected
+                      ? 'border-black bg-black text-white'
+                      : 'border-gray-200 bg-white text-gray-700 hover:border-gray-400'
               }`}
             >
               <span>{table.name}</span>
-              <TableTypeBadge tableName={table.name} isFamily={familyTableNames[table.name]} />
+              {isExpired ? (
+                <span className="text-[9px] font-black normal-case text-rose-500">Expired</span>
+              ) : isLocked ? (
+                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
+              ) : (
+                <TableTypeBadge tableName={table.name} isFamily={familyTableNames[table.name]} />
+              )}
             </button>
           );
         })}

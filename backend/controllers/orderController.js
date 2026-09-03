@@ -8,6 +8,7 @@ const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { notifyRiderForDelivery, notifyAssignedRider } = require("../services/riderNotificationService");
 const { notifyCustomerConfirmed, notifyCustomerCompleted } = require("../services/customerNotificationService");
+const { deductStockForItems, restoreStockForOrder } = require("../services/stockService");
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -121,6 +122,32 @@ function mergeKitchenDelta(existingItems, delta) {
 // Order purely as "who created this" attribution, unfiltered on read.
 function buildShopScope(req) {
   return shopScope(req);
+}
+
+// Same expiry math as src/lib/table-timer.ts's isTableTimerExpired, kept in
+// sync manually since this is the one place it also needs to run
+// server-side (see the two occupancy checks below). There is no more
+// staff-facing "Clear Table" decision anywhere in the app - a table's
+// turnover window (plus any past extension) elapsing is now, by itself,
+// enough to treat the table as free, checked live at the exact moment
+// something needs to know.
+function isOccupyingOrderExpired(order, turnoverMinutes) {
+  const effectiveMinutes = Number(turnoverMinutes || 45) + Number(order.timerExtendedMinutes || 0);
+  const elapsedMs = Date.now() - new Date(order.createdAt).getTime();
+  return elapsedMs >= effectiveMinutes * 60 * 1000;
+}
+
+// Shared by both occupancy checks below: given an order that's blocking a
+// table, decide whether its turnover window has actually elapsed and, if
+// so, auto-clear it right here (persisting tableTimerCleared=true) instead
+// of blocking the new order/table-move. Returns true if the table is now
+// free to use.
+async function autoFreeExpiredTable(occupyingOrder, req) {
+  const shop = await Shop.findById(req.user.shopId).select("tableTurnoverMinutes").lean();
+  const turnoverMinutes = shop?.tableTurnoverMinutes ?? 45;
+  if (!isOccupyingOrderExpired(occupyingOrder, turnoverMinutes)) return false;
+  await Order.updateOne({ _id: occupyingOrder._id }, { $set: { tableTimerCleared: true } });
+  return true;
 }
 
 exports.getOrders = async (req, res) => {
@@ -440,18 +467,10 @@ exports.createOrder = async (req, res) => {
     // window (Requirement #4: once that window elapses the table re-opens
     // automatically even if the earlier order still hasn't been paid, so
     // this check must use the same time-based definition, not just
-    // "status === pending").
+    // "status === pending"). No staff decision involved any more - once
+    // that window has genuinely elapsed, autoFreeExpiredTable clears it
+    // right here, in this same request, instead of blocking the new order.
     if (payload.orderType === "DineIn" && payload.table) {
-      // A table stays occupied for as long as it has a still-pending
-      // DineIn order on it - full stop - UNLESS staff explicitly
-      // dismissed it via "Clear Table" (tableTimerCleared). This is a
-      // deliberate change from the old behavior of silently auto-freeing
-      // the table once its turnover window elapsed: that "grace period"
-      // is now a real-time popup (see TableTimerAlertWatcher.tsx) that
-      // makes staff actively choose to clear the table or extend its
-      // timer by 10 minutes, rather than the table quietly reopening
-      // (and risking a second order landing on a table that's still
-      // physically occupied) on its own.
       const occupyingOrder = await Order.findOne({
         ...buildShopScope(req),
         orderType: "DineIn",
@@ -460,15 +479,24 @@ exports.createOrder = async (req, res) => {
         tableTimerCleared: { $ne: true },
       });
 
-      if (occupyingOrder) {
+      if (occupyingOrder && !(await autoFreeExpiredTable(occupyingOrder, req))) {
         return res.status(409).json({
-          error: `Table ${payload.table} already has an active order. Complete/pay it, or use "Clear Table" on the timer alert to free it up.`,
+          error: `Table ${payload.table} already has an active order. Complete or pay it to free up this table.`,
           reason: "table_occupied",
         });
       }
     }
 
     const totals = recalculateTotals(payload.items || [], payload.discount);
+
+    // Task 3 (Recipe/Stock Management): deduct raw-ingredient stock the
+    // moment this order is placed - that's when the kitchen actually starts
+    // cooking it, same moment the kitchen ticket itself fires. Computed
+    // BEFORE Order.create so the exact amounts taken off the shelf can be
+    // saved directly onto the new order's own stockDeductions field -
+    // that's what a later cancellation reverses (see cancelOrderCore).
+    // Never blocks the sale - see deductStockForItems' own comment.
+    const stockResult = await deductStockForItems(payload.items || [], req.user.shopId);
 
     const order = await Order.create({
       ...payload,
@@ -483,6 +511,9 @@ exports.createOrder = async (req, res) => {
       clientSyncId: payload.clientSyncId || payload.orderId || "",
       paidAmount: payload.paidAmount || 0,
       remainingAmount: typeof payload.remainingAmount === "number" ? payload.remainingAmount : totals.total,
+      stockDeductions: stockResult.deductions,
+      costPrice: stockResult.costPrice,
+      grossProfit: Math.round((totals.total - stockResult.costPrice) * 100) / 100,
     });
 
     // Surfaced to the client (instead of only console.error) so a broken
@@ -534,18 +565,18 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    res.status(201).json({ ...order.toObject(), id: String(order._id), customerSyncWarning });
+    res.status(201).json({ ...order.toObject(), id: String(order._id), customerSyncWarning, stockWarning: stockResult.warning });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
 // POST /api/orders/:id/extend-timer
-// "Extend +10 Minutes" action on the real-time table-timer alert popup
-// (TableTimerAlertWatcher.tsx) - pushes this order's effective turnover
-// window back by another 10 minutes instead of clearing the table, for
-// when the table is still genuinely in use. Cumulative: a table can be
-// extended more than once if it keeps running long.
+// No longer wired to any UI button - table expiry is now fully automatic
+// (see autoFreeExpiredTable above and lib/notifications.tsx's poll), with
+// no staff decision to make, so there's nothing left to "extend" from.
+// Left in place rather than removed in case a future need for it comes
+// back; harmless and unused otherwise.
 exports.extendTableTimer = async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -567,12 +598,14 @@ exports.extendTableTimer = async (req, res) => {
 };
 
 // POST /api/orders/:id/clear-table
-// "Clear Table" action on the same alert - frees the table for a new order
-// immediately (everywhere: this endpoint's own occupancy check above, and
-// every terminal's POS table grid on its next poll) without changing the
-// order's own status, since the order itself might still need completing/
-// paying later (e.g. a walk-out, or the bill gets settled at a different
-// table).
+// Frees this order's table for a new order immediately (everywhere - the
+// occupancy checks above, and every terminal's POS table grid on its next
+// poll) without changing the order's own status, since the order itself
+// might still need completing/paying later (e.g. a walk-out, or the bill
+// gets settled at a different table). Table expiry now auto-clears itself
+// (see autoFreeExpiredTable and lib/notifications.tsx's poll) - this
+// endpoint is what that auto-clear calls under the hood; it's no longer
+// reachable from any staff-facing button.
 exports.clearTableTimer = async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -737,7 +770,53 @@ exports.importOfflineOrders = async (req, res) => {
           shopSequenceNumber = updatedShop ? updatedShop.orderSequenceCounter : 1;
         }
 
+        // Conflict resolution: two offline nodes (a second till, or a till
+        // and a paired phone with its own separate outage) can each place a
+        // brand-new DineIn order for the same table while both are
+        // unaware of the other - the online createOrder path already
+        // rejects this live (see its own "Technical Requirement #1"
+        // comment above), but until now importOfflineOrders had NO
+        // equivalent check at all, so both orders silently landed in the
+        // cloud, double-booking the table. Same rule here: re-checked
+        // against the DB fresh for EVERY entry in this loop (not just
+        // once for the whole batch), so if an earlier entry in this same
+        // batch just occupied this table, a later conflicting entry still
+        // gets caught. Recommended-and-chosen resolution is "reject +
+        // flag for staff" (not last-write-wins) - the loser stays queued
+        // in the Local Hub as a `failed` entry (reason: 'table_conflict')
+        // rather than being silently created or discarded; staff can
+        // still edit its table via the normal offline "Change Table"
+        // action (it's still only a local-<uuid> record, not yet
+        // created here) and it'll import cleanly on the next sync tick.
+        if (payload.orderType === "DineIn" && payload.table) {
+          const occupyingOrder = await Order.findOne({
+            ...buildShopScope(req),
+            orderType: "DineIn",
+            table: payload.table,
+            status: "pending",
+            tableTimerCleared: { $ne: true },
+          });
+
+          if (occupyingOrder && !(await autoFreeExpiredTable(occupyingOrder, req))) {
+            failed.push({
+              localOrderId: entry.localOrderId,
+              error: `Table ${payload.table} already has an active order from another device. Change this order's table and it will sync automatically.`,
+              reason: "table_conflict",
+            });
+            continue;
+          }
+        }
+
         const totals = recalculateTotals(payload.items || [], payload.discount);
+
+        // Same real-time deduction as the online createOrder path above -
+        // an offline order was already cooked/served on the till in the
+        // moment, so its ingredients must come off the shelf now, at import
+        // time, exactly as if it had been placed online to begin with.
+        const stockResult = await deductStockForItems(payload.items || [], req.user.shopId);
+        if (stockResult.warning) {
+          console.warn(`Stock shortage importing offline order ${entry.localOrderId}:`, stockResult.warning);
+        }
 
         const order = await Order.create({
           ...payload,
@@ -752,6 +831,9 @@ exports.importOfflineOrders = async (req, res) => {
           clientSyncId,
           paidAmount: payload.paidAmount || 0,
           remainingAmount: typeof payload.remainingAmount === "number" ? payload.remainingAmount : totals.total,
+          stockDeductions: stockResult.deductions,
+          costPrice: stockResult.costPrice,
+          grossProfit: Math.round((totals.total - stockResult.costPrice) * 100) / 100,
           createdOffline: true,
           offlineOrderNumber: entry.localOrderNumber || null,
           offlineCreatedAt: entry.offlineCreatedAt ? new Date(entry.offlineCreatedAt) : null,
@@ -1103,14 +1185,40 @@ async function applyOrderPatch(order, patch, req, options) {
     // the money for them was just collected together with this one. The
     // Sales page's Complete Payment panel sends the FULL amount actually
     // collected (this order's own total plus whatever of the customer's
-    // other dues the cashier chose to also collect) as `paidAmount`, and
-    // this distributes it oldest-debt-first: the older lump-sum
-    // previousDues, then other pending/unpaid orders by creation date,
-    // and only what's left over after that goes toward this order itself.
+    // other dues the cashier chose to also collect) as `paidAmount`.
+    //
+    // Bug fix: this used to distribute that amount oldest-debt-first - the
+    // older previousDues lump-sum, then other orders, and only whatever was
+    // left over went toward THIS order. That let a stale/underestimated
+    // "Previous Dues" figure (or another order's due changing between the
+    // Complete Payment panel opening and this request landing) siphon the
+    // payment away from the bill actually being completed right now, and
+    // could leave IT showing a due even though the cashier explicitly chose
+    // "Full Payment"/"Pay Full" for it. `Due Amount = Total Bill - Paid
+    // Amount` must always hold for THIS order specifically, and a Full
+    // Payment must always leave it at strictly 0 - so this order is now
+    // settled FIRST out of whatever was collected, and only the leftover
+    // (if the cashier chose to also collect other dues alongside it) spills
+    // into previousDues, then this customer's other pending/unpaid orders,
+    // oldest first.
     if (patch.action === "completeAndSettle") {
       if (patch.customer) order.customer = patch.customer;
       const customerPhone = order.customer?.phone;
       let paidTotal = Math.max(Number(patch.paidAmount) || 0, 0);
+
+      // This order's own remaining balance (not order.total on its own -
+      // that ignores anything already paid toward it) is settled before
+      // anything else touches `paidTotal`. Same due-then-increment pattern
+      // as the otherOrders loop below and customerController.js's
+      // settleCustomerDues - this order is never any different from those.
+      const thisOrderDue = typeof order.remainingAmount === "number"
+        ? order.remainingAmount
+        : Math.max((order.total || 0) - (order.paidAmount || 0), 0);
+      const appliedToThis = Math.min(thisOrderDue, paidTotal);
+      order.paidAmount = Number(order.paidAmount || 0) + appliedToThis;
+      order.remainingAmount = Math.max(thisOrderDue - appliedToThis, 0);
+      order.status = "completed";
+      paidTotal -= appliedToThis;
 
       if (customerPhone && customerPhone !== "03000000000") {
         const customerDoc = await Customer.findOne({ phone: customerPhone, ...buildShopScope(req) });
@@ -1153,13 +1261,12 @@ async function applyOrderPatch(order, patch, req, options) {
         }
       }
 
-      const thisOrderDue = order.total;
-      const appliedToThis = Math.min(thisOrderDue, paidTotal);
-      order.paidAmount = appliedToThis;
-      order.remainingAmount = Math.max(thisOrderDue - appliedToThis, 0);
-      order.status = "completed";
       if (typeof patch.paymentMethod === "string") order.paymentMethod = patch.paymentMethod;
       if (typeof patch.note === "string") order.note = patch.note;
+      // Change-Return Calculation: recorded purely for the receipt/display
+      // (see Order.js's own comment on this field) - never touches the
+      // dues cascade above, which only ever works off paidAmount/paidTotal.
+      if (typeof patch.cashReceived === "number") order.cashReceived = Math.max(0, patch.cashReceived);
       if (receiptPrinted) order.customerReceiptPrintedAt = new Date();
       order.version = Number(order.version || 0) + 1;
       await order.save();
@@ -1181,6 +1288,37 @@ async function applyOrderPatch(order, patch, req, options) {
       );
     }
 
+    // Same "Technical Requirement #1" rule as createOrder above, applied to
+    // moving an EXISTING pending order onto a different table (SalesPage.tsx's
+    // Change Table modal) - without this, that modal's client-side filtering
+    // of occupied tables is only a UI courtesy, and a stale tab or a direct
+    // API call could still double-book a table that's already got another
+    // active order on it. Only fires when the table is actually changing -
+    // re-saving an order onto its own current table (a no-op) must never
+    // trip over itself here, hence the `_id: { $ne: order._id }` exclusion.
+    if (patch.table !== undefined && patch.table && patch.table !== order.table) {
+      const effectiveOrderType = patch.orderType || order.orderType;
+      if (effectiveOrderType === "DineIn") {
+        const occupyingOrder = await Order.findOne({
+          ...buildShopScope(req),
+          orderType: "DineIn",
+          table: patch.table,
+          status: "pending",
+          tableTimerCleared: { $ne: true },
+          _id: { $ne: order._id },
+        });
+
+        // Same auto-free-if-expired rule as createOrder above - no staff
+        // decision required, the window elapsing is enough on its own.
+        if (occupyingOrder && !(await autoFreeExpiredTable(occupyingOrder, req))) {
+          throw Object.assign(
+            new Error(`Table ${patch.table} already has an active order. Complete or pay it to free up this table.`),
+            { status: 409, reason: "table_occupied" }
+          );
+        }
+      }
+    }
+
     ["note", "waiter", "table", "address", "status", "paymentMethod"].forEach((field) => {
       if (patch[field] !== undefined) {
         order[field] = patch[field];
@@ -1193,6 +1331,7 @@ async function applyOrderPatch(order, patch, req, options) {
     // SalesPage.tsx setting paidAmount + remainingAmount together) always
     // wins over whatever was just recalculated above.
     if (typeof patch.remainingAmount === "number") order.remainingAmount = patch.remainingAmount;
+    if (typeof patch.cashReceived === "number") order.cashReceived = Math.max(0, patch.cashReceived);
     order.version = Number(order.version || 0) + 1;
 
     await order.save();
@@ -1265,8 +1404,37 @@ exports.importOfflineOrderUpdates = async (req, res) => {
     const skipped = [];
     const failed = [];
 
+    // Conflict resolution: expectedVersion is the order.version this edit
+    // was originally built against (captured client-side the moment the
+    // edit was queued - see offline-order-helpers.ts's saveOrderEditOffline
+    // and Order.js's own `version` field, bumped on every write). Two
+    // SEPARATE offline nodes (two different tills, each with their own
+    // Local Hub - a single till and its paired phones already share one
+    // queue and sync together) can each queue edits against the same
+    // already-synced order while both are offline and unaware of the
+    // other's change; applying both blindly here would be silent
+    // last-write-wins data loss for whichever one landed first. Recommended-
+    // and-chosen resolution is "reject + flag for staff", not last-write-
+    // wins - so the FIRST edit against a given orderId in this batch is
+    // checked against the order's real current version; if it doesn't
+    // match what this till last knew, every edit this till queued against
+    // that order is stale (built on outdated assumptions) and rejected as a
+    // conflict rather than applied.
+    //
+    // Only checked ONCE per orderId per batch (via claimedOrderIds below),
+    // not on every entry - a single till can queue several sequential
+    // edits against the SAME order while offline (item added, then paid),
+    // and every one of them still carries the SAME expectedVersion (its
+    // local order snapshot only ever reflects the version last pulled from
+    // the cloud, never bumped by its own not-yet-synced queued edits). Ordered
+    // is a chain within a batch, from the SAME source, and must apply in full
+    // once the first check passes - re-checking entry 2 against the version
+    // entry 1 just bumped would falsely flag this till's own coherent,
+    // already-ordered edit history as a conflict with itself.
+    const claimedOrderIds = new Set();
+
     for (const entry of ordered) {
-      const { localEditId, orderId, payload, kitchenPrinted, receiptPrinted } = entry || {};
+      const { localEditId, orderId, payload, kitchenPrinted, receiptPrinted, expectedVersion } = entry || {};
       try {
         if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
           skipped.push({ localEditId, reason: "invalid_order_id" });
@@ -1277,6 +1445,20 @@ exports.importOfflineOrderUpdates = async (req, res) => {
           skipped.push({ localEditId, orderId, reason: "order_not_found" });
           continue;
         }
+
+        if (typeof expectedVersion === "number" && !claimedOrderIds.has(orderId)) {
+          if ((order.version || 1) !== expectedVersion) {
+            failed.push({
+              localEditId,
+              orderId,
+              error: `This order was changed elsewhere since this device last saw it (now v${order.version || 1}, expected v${expectedVersion}). Refresh and redo this edit.`,
+              reason: "version_conflict",
+            });
+            continue;
+          }
+        }
+        claimedOrderIds.add(orderId);
+
         await applyOrderPatch(order, payload || {}, req, { suppressKitchenUpdate: !!kitchenPrinted, receiptPrinted: !!receiptPrinted });
         applied.push({ localEditId, orderId });
       } catch (entryError) {
@@ -1339,6 +1521,12 @@ async function cancelOrderCore(orderId, key, reason, req) {
   order.cancelReason = reason || "No reason provided";
   order.version = Number(order.version || 0) + 1;
   await order.save();
+  // Reverses exactly what deductStockForItems took off the shelf for this
+  // order at creation time (see stockDeductions' own comment on Order.js) -
+  // the ingredients were never actually cooked/served after all. Best-effort
+  // and non-fatal, same as the deduction side - never blocks a cancellation
+  // the Cancel Order Key already authorized.
+  await restoreStockForOrder(order);
   return order;
 }
 

@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Banknote, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { AlertCircle, Banknote, Barcode, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
 import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchShopProfile, fetchTables, fetchTableSettings, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Table, Waiter } from '@/lib/pos-types';
 import { resolveProductImage } from '@/lib/food-images';
-import { getTableTimerRemainingMs, type TableTimerOrder } from '@/lib/table-timer';
+import { getTableTimerRemainingMs, isTableTimerExpired, formatTableCountdown, TABLE_STATUS_POLL_MS, type TableTimerOrder } from '@/lib/table-timer';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
 import { hasPermission, getAuthUser, getAuthShop } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
+import { useNotifications } from '@/lib/notifications';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOrdersCache, pushOrdersCache } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOrdersCache, pushOrdersCache, getOccupiedTablesCache, getPendingLocalOrders, getTablesCache, pushTablesCache } from '@/lib/local-hub-api';
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
+import { isTypingTarget, FOCUS_PRODUCT_SEARCH_EVENT, useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -62,25 +64,17 @@ function sortTables(tables: Table[]) {
   });
 }
 
-// How often the Dine-In screen re-checks which tables have an active order
-// (see loadActiveTableOrders below). There's no push/websocket channel in
-// this app, so a short poll is how a second terminal finds out a table
-// just got occupied or freed up; navigating back to this screen also
-// re-fetches immediately (the effect below re-runs on mount), which is
-// what makes payment completion on the Sales page feel instant in the
-// common single-terminal workflow.
-const TABLE_STATUS_POLL_MS = 5000;
-
-function formatTableCountdown(remainingMs: number) {
-  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
+// TABLE_STATUS_POLL_MS/formatTableCountdown now live in @/lib/table-timer -
+// shared with SalesPage.tsx's Change Table modal so both screens poll and
+// format the exact same way. Navigating back to this screen also re-fetches
+// immediately (the effect below re-runs on mount), which is what makes
+// payment completion on the Sales page feel instant in the common
+// single-terminal workflow.
 
 export default function POSPage() {
   const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
   const { toast: shopToast, popup } = useToast();
+  const { notify } = useNotifications();
   const { isOnline } = useNetworkStatus();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
@@ -101,10 +95,6 @@ export default function POSPage() {
   // real-time table-timer alert popup (TableTimerAlertWatcher.tsx, mounted
   // in DashboardShell) which fires when one of these crosses its deadline.
   const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
-  // Ticks every second purely to force the countdown labels (and the
-  // locked/unlocked state derived from them) to re-render - the underlying
-  // truth is always "now vs. activeTableOrders", never this value itself.
-  const [tableClockTick, setTableClockTick] = useState(() => Date.now());
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -135,11 +125,38 @@ export default function POSPage() {
   // tap instead of rendering the entire catalog at once (a busy shop's full
   // product list was a long scroll before this).
   const [visibleProductCount, setVisibleProductCount] = useState(10);
+  // Product Code / SKU entry box - see the input's own JSX comment below for
+  // the full flow (typed or barcode-scanned -> instant add to cart -> Down
+  // Arrow -> service type dropdown).
+  const [productCodeInput, setProductCodeInput] = useState('');
+  // Keyboard Shortcuts - grid navigation: which visible product card the
+  // Arrow keys currently highlight (index into visibleGroups). Space adds
+  // the highlighted card to the cart - see the product-grid keydown effect
+  // below for the full Arrow/Space/+-/Ctrl+S/Enter handling.
+  const [focusedProductIndex, setFocusedProductIndex] = useState(0);
+  // Keyboard Shortcuts - Dynamic Numerical Quantities: +/- bumps this cart
+  // row's quantity. Sits on the most recently added/incremented item by
+  // default (see addToCart), since that's the item staff almost always
+  // mean right after adding it - clicking any cart row's own qty buttons
+  // (handleIncreaseQty/handleDecreaseQty) also re-targets it here.
+  const [activeCartItemIndex, setActiveCartItemIndex] = useState<number | null>(null);
 
   const suggestionRef = useRef<HTMLDivElement>(null);
   const phoneInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const productCodeInputRef = useRef<HTMLInputElement>(null);
+  // Debounce/Timeout Mechanism for the Product Code box - see
+  // handleProductCodeChange's own comment on the multi-digit-code bug this
+  // fixes. Same ref+setTimeout/clearTimeout pattern as searchTimeoutRef
+  // above, just its own independent timer.
+  const productCodeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // F3 (see DashboardShell.tsx's global shortcut handler) focuses this.
+  const productSearchInputRef = useRef<HTMLInputElement>(null);
+  // The "service options dropdown" (Dine-In/Takeaway/Delivery) - Down Arrow
+  // from the Product Code box jumps straight here, per the Hotkey
+  // Navigation Order Flow requirement.
+  const orderTypeSelectRef = useRef<HTMLSelectElement>(null);
 
   // Loads the product grid + waiter dropdown from the local hub's cached
   // reference data instead of the cloud - what makes the POS screen itself
@@ -156,6 +173,11 @@ export default function POSPage() {
     if (!reachable) {
       setCategories(['All']);
       setProducts([]);
+      // Local Hub itself is unreachable - there is truly no source (not
+      // even a cached one) for the real Table records either, so this
+      // must reset the same way products/categories do rather than leave
+      // whatever tables happened to be on screen already.
+      setTables([]);
       if (silent) return;
       const diagnostics = await getLocalHubStartDiagnostics();
       const reason = diagnostics && !diagnostics.started
@@ -171,6 +193,21 @@ export default function POSPage() {
     setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
     setProducts(offlineProducts);
     setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
+    // The real Dine-In table grid (name + isFamily + isActive) - see
+    // tablesCache.js/pushCurrentTablesCache. Falls back to whatever this
+    // till last saw while online instead of the empty picker in the
+    // screenshot this was fixing ("No tables configured yet." with real
+    // tables configured) - best-effort, so a Local Hub that has this
+    // reachable but has never had a tables snapshot pushed to it yet
+    // (brand new pairing, never been online once) just shows no tables,
+    // same as before this fix existed.
+    try {
+      const tablesSnapshot = await getTablesCache();
+      setTables(sortTables((tablesSnapshot.tables || []).filter((table) => table.isActive)));
+    } catch {
+      // Local Hub reachable but this specific cache call failed - leave
+      // whatever tables state already has rather than wiping it out.
+    }
     if (silent) return;
     if (offlineProducts.length === 0) {
       setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
@@ -186,6 +223,16 @@ export default function POSPage() {
     // is the only path at all for a plain browser tab (no Local Hub cache
     // to have shown a moment ago there).
     async function refreshFromCloud() {
+      // Tracks whether fetchTables() itself failed (network/auth/server
+      // error) vs. genuinely resolved with zero tables - previously both
+      // cases were flattened into the same empty array by a silent
+      // `.catch(() => [])`, which made a real backend failure here
+      // indistinguishable on screen from "this shop truly has no tables
+      // yet", with the only trace being a console/server-log line nobody
+      // was looking at. Now a real failure surfaces as a status banner
+      // (see below) instead of silently rendering "No tables configured
+      // yet" for the wrong reason.
+      let tableFetchError: Error | null = null;
       const [productResponse, waiterResponse, shopProfile, tableResponse] = await Promise.all([
         fetchProducts(),
         fetchWaiters(),
@@ -195,13 +242,28 @@ export default function POSPage() {
         fetchShopProfile().catch(() => null),
         // The real Table records (name + isFamily) that drive the rich
         // table grid below - see TableManagementSection.tsx/Table model.
-        fetchTables().catch(() => []),
+        fetchTables().catch((error) => {
+          tableFetchError = error instanceof Error ? error : new Error('Failed to load tables.');
+          console.error('Failed to load tables for the Dine-In grid:', tableFetchError);
+          return [];
+        }),
       ]);
       setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
       setProducts(productResponse?.products ?? []);
       setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
       setTables(sortTables((tableResponse ?? []).filter((table) => table.isActive)));
-      setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
+      if (tableFetchError) {
+        setStatusMessage({ tone: 'error', text: `Couldn't load Dine-In tables: ${(tableFetchError as Error).message}` });
+      } else {
+        setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
+        // Keeps the Local Hub's offline table-grid snapshot fresh the
+        // moment this till has a real, successful fetch - see
+        // tablesCache.js/loadProductsFromLocalHub above. Only pushed on a
+        // genuine success (never on tableFetchError, which already fell
+        // back to []) so a transient fetch failure can't overwrite a
+        // perfectly good earlier snapshot with an empty one.
+        if (isDesktopApp()) void pushTablesCache(tableResponse ?? []).catch(() => {});
+      }
 
       // Best-effort - keeps the Local Hub's offline copy fresh the moment
       // this till has real data, instead of only ever updating it on the
@@ -282,6 +344,39 @@ export default function POSPage() {
   // too - navigating back to this screen after completing payment on the
   // Sales page also re-runs the mount call, which is what makes a freed
   // table feel instant in the common single-terminal workflow.
+  // Merges the till's own still-queued (not yet synced) local DineIn orders
+  // on top of whatever occupied-table set is already known - see
+  // occupiedTablesCache.js's own comment: "Read (pairing-key gated) by
+  // POSPage.tsx itself when offline, merged with this till's own still-
+  // queued local orders". That merge was previously dead code (the cache
+  // was pushed but nothing ever read it back) - a second offline order for
+  // the same table on the SAME till went completely unblocked, since
+  // localOrders.js's queueOrder has no occupancy check of its own at all.
+  // Each queued local order carries its own real createdAt/
+  // timerExtendedMinutes, so it gets an accurate countdown, unlike the
+  // cache-only entries this is layered on top of (see loadActiveTableOrders).
+  async function mergeLocalPendingIntoActiveTables(base: Record<string, TableTimerOrder>): Promise<Record<string, TableTimerOrder>> {
+    if (!isDesktopApp()) return base;
+    try {
+      const pending = await getPendingLocalOrders();
+      const next = { ...base };
+      pending.forEach((record) => {
+        const payload = record.payload as { orderType?: string; table?: string; status?: string; createdAt?: string; timerExtendedMinutes?: number; tableTimerCleared?: boolean };
+        if (payload.orderType !== 'DineIn' || !payload.table || payload.tableTimerCleared) return;
+        if (payload.status && payload.status !== 'pending') return;
+        const createdAt = payload.createdAt || record.queuedAt;
+        const existing = next[payload.table];
+        if (!existing || new Date(createdAt).getTime() > new Date(existing.createdAt).getTime()) {
+          next[payload.table] = { createdAt, timerExtendedMinutes: payload.timerExtendedMinutes };
+        }
+      });
+      return next;
+    } catch {
+      // Best-effort - the base set (cloud fetch or cache) is still shown.
+      return base;
+    }
+  }
+
   async function loadActiveTableOrders() {
     try {
       const orders = await fetchOrders({ status: 'pending', orderType: 'DineIn' });
@@ -301,14 +396,39 @@ export default function POSPage() {
             nextActiveTableOrders[order.table] = { createdAt: order.createdAt, timerExtendedMinutes: order.timerExtendedMinutes };
           }
         });
-      setActiveTableOrders(nextActiveTableOrders);
+      setActiveTableOrders(await mergeLocalPendingIntoActiveTables(nextActiveTableOrders));
     } catch (error) {
-      // Non-blocking - table locks/countdowns just skip this refresh; the
-      // next poll (or the next visit to this screen) retries. Logged
-      // (instead of swallowed entirely) so a persistently failing poll is
-      // at least visible in devtools rather than silently freezing every
-      // table's lock state at whatever it last successfully loaded.
-      console.error('Failed to refresh table occupancy:', error);
+      // Non-blocking in the sense that this never throws back up to the
+      // caller - but going offline used to mean this whole refresh just
+      // gave up here, leaving activeTableOrders frozen at whatever it last
+      // successfully loaded while online, which could silently let a
+      // second offline order double-book an already-occupied table. Fall
+      // back to whatever this till knows locally: the Local Hub's cached
+      // occupied-table snapshot (pushed down while last online - see
+      // offline-sync.ts's pushCurrentOccupiedTables) plus this till's own
+      // still-queued orders on top of it.
+      console.error('Failed to refresh table occupancy, falling back to local cache:', error);
+      if (!isDesktopApp()) return;
+      try {
+        const cache = await getOccupiedTablesCache();
+        const fromCache: Record<string, TableTimerOrder> = {};
+        // The cache only ever stores plain table NAMES (see
+        // occupiedTablesCache.js), not each order's real createdAt/timer -
+        // so a cache-only entry can't show an accurate countdown. Anchoring
+        // its createdAt to "now" keeps it locked for a full fresh turnover
+        // window from this exact moment, which is the safe direction to be
+        // wrong in offline (never silently unlocking a table that's
+        // actually still occupied) - the next successful online refresh
+        // replaces it with the real value.
+        const approximateCreatedAt = new Date().toISOString();
+        (cache.tables || []).forEach((table) => {
+          fromCache[table] = { createdAt: approximateCreatedAt, timerExtendedMinutes: 0 };
+        });
+        setActiveTableOrders(await mergeLocalPendingIntoActiveTables(fromCache));
+      } catch {
+        // Truly nothing available (Local Hub itself unreachable too) -
+        // leave activeTableOrders at whatever it last was, same as before.
+      }
     }
   }
 
@@ -318,36 +438,36 @@ export default function POSPage() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const interval = setInterval(() => setTableClockTick(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // null = table isn't occupied at all. Otherwise the raw milliseconds left
-  // on the countdown - which CAN be negative once the timer has expired.
-  // Unlike the earlier "hard cutoff" behavior, an expired timer no longer
-  // silently frees the table on its own: it stays locked until staff act on
-  // the real-time alert popup (TableTimerAlertWatcher.tsx) with either
-  // "Clear Table" or "Extend +10 Minutes" - see isTableLocked below, which
-  // is what actually gates table selection.
-  function getTableRemainingMs(tableName: string): number | null {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return null;
-    void tableClockTick; // re-evaluated every second purely to re-render the live countdown
-    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
-  }
-
-  // Whether a table can be selected for a new order right now - true for as
-  // long as it has any occupying entry at all, regardless of whether its
-  // countdown has already reached zero (see getTableRemainingMs above).
+  // Whether a table can be selected for a new order right now. Automatic,
+  // no staff decision involved: a table is locked only while it has a
+  // still-pending order AND that order's turnover window hasn't elapsed
+  // yet. The backend's own occupancy checks (orderController.js's
+  // autoFreeExpiredTable) enforce the exact same rule, so a second
+  // terminal can never slip a new order in during the gap before this
+  // client's own tableTimerCleared flag catches up.
+  //
+  // This is a plain, non-reactive check (no ticking clock state) - it's
+  // only ever called imperatively (on a data change, or at click time), so
+  // it just reads Date.now() at the moment it runs. The DineInTableGrid
+  // component below is what owns the actual per-second re-render for the
+  // LIVE countdown display - keeping that tick local to the small grid
+  // subtree instead of hoisted up here is what stops the whole page (the
+  // full product grid and cart) from needlessly re-rendering every single
+  // second while a cashier is just trying to type or click.
   function isTableLocked(tableName: string): boolean {
-    return Boolean(activeTableOrders[tableName]);
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return false;
+    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
   }
 
   // If the table currently selected in the form gets taken by another
   // order (a second terminal, most likely) while this cashier is still
   // building the cart, drop the now-stale selection instead of letting them
-  // submit straight into the 409 the backend would return.
+  // submit straight into the 409 the backend would return. Only depends on
+  // activeTableOrders (refreshed every TABLE_STATUS_POLL_MS) - a table only
+  // ever becomes MORE locked when a new order actually lands on it
+  // somewhere, never just from time passing, so there's nothing here that
+  // needs a ticking clock to notice.
   useEffect(() => {
     if (!orderFormData.table) return;
     if (!isTableLocked(orderFormData.table)) return;
@@ -357,7 +477,7 @@ export default function POSPage() {
     // Only re-checks when the underlying lock data changes, not on every
     // orderFormData edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTableOrders, tableClockTick]);
+  }, [activeTableOrders]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -408,11 +528,18 @@ export default function POSPage() {
     return Array.from(map.values());
   }, [products]);
 
-  const filteredGroups = productGroups.filter((group) => {
-    const matchesCategory = activeCategory === 'All' || group.category === activeCategory;
-    const matchesSearch = group.name.toLowerCase().includes(productSearchQuery.toLowerCase());
-    return matchesCategory && matchesSearch;
-  });
+  // Memoized so this filter only actually re-runs when the product list,
+  // category, or search text change - not on every one of this page's
+  // other re-renders (cart edits, form typing, etc.), which is how often
+  // an unmemoized version would otherwise be recomputed.
+  const filteredGroups = useMemo(
+    () => productGroups.filter((group) => {
+      const matchesCategory = activeCategory === 'All' || group.category === activeCategory;
+      const matchesSearch = group.name.toLowerCase().includes(productSearchQuery.toLowerCase());
+      return matchesCategory && matchesSearch;
+    }),
+    [productGroups, activeCategory, productSearchQuery],
+  );
 
   // Changing category or search re-filters the whole list, so a stale
   // "load more" position from the previous filter would otherwise leave
@@ -424,6 +551,14 @@ export default function POSPage() {
 
   const visibleGroups = filteredGroups.slice(0, visibleProductCount);
   const hasMoreProducts = filteredGroups.length > visibleGroups.length;
+
+  // Same reasoning as the visibleProductCount reset above - a stale
+  // Arrow-key highlight index from before the filter/search changed could
+  // now point at a completely different card, or past the end of a much
+  // shorter list.
+  useEffect(() => {
+    setFocusedProductIndex(0);
+  }, [activeCategory, productSearchQuery, viewMode]);
 
   function handleGroupClick(group: ProductGroup) {
     // Deals and single-variation products (the vast majority - drinks,
@@ -446,15 +581,222 @@ export default function POSPage() {
     setCart((previousCart) => {
       const existingIndex = previousCart.findIndex((item) => item.id === product.id && item.variation === product.variation);
       if (existingIndex === -1) {
+        setActiveCartItemIndex(previousCart.length);
         return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image }];
       }
+      setActiveCartItemIndex(existingIndex);
       return previousCart.map((item, index) => (index === existingIndex ? { ...item, quantity: item.quantity + 1 } : item));
     });
   }
 
   function clearCart() {
     setCart([]);
+    setActiveCartItemIndex(null);
   }
+
+  // Product Code / SKU lookup: every Product document optionally carries a
+  // productCode (set in Manage Products - see ProductManagementSection.tsx),
+  // unique per shop (backend/models/Product.js's partial unique index).
+  // Keyed by trimmed-lowercase code so a scanner's exact-cased barcode text
+  // still matches a code typed in a different case by staff.
+  const productCodeLookup = useMemo(() => {
+    const map = new Map<string, Product>();
+    for (const product of products) {
+      const code = product.productCode?.trim().toLowerCase();
+      if (code) map.set(code, product);
+    }
+    return map;
+  }, [products]);
+
+  // Product/Deal Barcode Keys: typing (or a barcode scanner "typing", since
+  // a scanner is just a fast keyboard) the exact code assigned to a product
+  // or deal adds that exact variation to the cart - no mouse, no opening the
+  // size picker (the code already identifies the exact size/variation).
+  //
+  // Debounce/Timeout Mechanism (~350ms): matching on every single keystroke
+  // used to be the bug here - typing a multi-digit code like "15" one key at
+  // a time matched-and-added product code "1" the instant "1" was typed,
+  // then matched-and-added code "5" separately once "5" followed, instead of
+  // ever seeing "15" as one code. Waiting a short pause after the LAST
+  // keystroke before actually looking the code up (clearing/rescheduling
+  // this timer on every change, same pattern as searchTimeoutRef/
+  // debouncedSearch above) lets a full multi-digit code finish accumulating
+  // first. A literal Enter press (handleProductCodeKeyDown below) still
+  // confirms INSTANTLY, bypassing this wait entirely - what a barcode
+  // scanner's own trailing Enter keystroke already relies on, and what lets
+  // a cashier confirm early without waiting out the debounce.
+  function handleProductCodeChange(value: string) {
+    setProductCodeInput(value);
+    if (productCodeTimeoutRef.current) clearTimeout(productCodeTimeoutRef.current);
+
+    const trimmed = value.trim();
+    if (!trimmed) return;
+
+    productCodeTimeoutRef.current = setTimeout(() => {
+      productCodeTimeoutRef.current = null;
+      const match = productCodeLookup.get(trimmed.toLowerCase());
+      if (match) {
+        addToCart(match);
+        shopToast.success(`Added "${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}" via code ${match.productCode}.`);
+        setProductCodeInput('');
+      }
+    }, 350);
+  }
+
+  function handleProductCodeKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      // Cancel any still-pending debounced lookup from handleProductCodeChange
+      // above - without this, that timer would still fire ~350ms later on
+      // whatever's left in `productCodeInput` (already cleared to '' below
+      // on a hit, so it'd silently no-op; but on a miss it would re-run the
+      // same failed lookup a second time and show a duplicate error toast).
+      if (productCodeTimeoutRef.current) {
+        clearTimeout(productCodeTimeoutRef.current);
+        productCodeTimeoutRef.current = null;
+      }
+      const trimmed = productCodeInput.trim();
+      if (!trimmed) return;
+      const match = productCodeLookup.get(trimmed.toLowerCase());
+      if (match) {
+        addToCart(match);
+        shopToast.success(`Added "${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}" via code ${match.productCode}.`);
+        setProductCodeInput('');
+      } else {
+        // Visual Product Code Tracing: keep the typed/scanned text visible
+        // on a miss instead of wiping it - the cashier needs to actually
+        // see what was entered to spot a typo or a bad scan, rather than
+        // the field silently going blank. It only clears once the item is
+        // successfully added (above) or the cashier clears it themselves.
+        shopToast.error(`No product/deal found with code "${trimmed}".`);
+      }
+      return;
+    }
+    // Hotkey Navigation Order Flow: right after a code-based add, the next
+    // natural step is picking Dine-In/Takeaway/Delivery - Down Arrow jumps
+    // straight to that dropdown instead of needing a mouse click.
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      orderTypeSelectRef.current?.focus();
+    }
+  }
+
+  // Keyboard Shortcuts - F3 (see DashboardShell.tsx's global shortcut
+  // handler) focuses the product search box once this page is mounted and
+  // listening for it - if F3 was pressed from a different dashboard page,
+  // DashboardShell navigates here first and dispatches this same event a
+  // moment later, once this effect has had a chance to register.
+  useEffect(() => {
+    function handleFocusSearch() {
+      productSearchInputRef.current?.focus();
+    }
+    window.addEventListener(FOCUS_PRODUCT_SEARCH_EVENT, handleFocusSearch);
+    return () => window.removeEventListener(FOCUS_PRODUCT_SEARCH_EVENT, handleFocusSearch);
+  }, []);
+
+  // Keyboard Shortcuts - Operational & Checkout, grid navigation, and
+  // Dynamic Numerical Quantities: all POS-screen-local (only active while
+  // this page is mounted, unlike F1/F2/F3 above which work from any
+  // dashboard page). Guarded by isTypingTarget so normal typing/selection
+  // in the phone/customer/address/note fields, the service type dropdown,
+  // and the Product Code box (which handles its own Enter/Down Arrow
+  // above) is never hijacked.
+  useEffect(() => {
+    // Matches the product grid's own CSS floor (grid-cols-4 - see that
+    // grid's className) so Up/Down moves roughly one row; on a wider
+    // screen where the grid actually renders 5 or 6 columns, Up/Down lands
+    // one card off from directly above/below, which is an acceptable
+    // approximation given there's no reliable way to read the grid's live
+    // column count from CSS at run time.
+    const GRID_COLUMNS = 4;
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      // A modal picker is already up front - let its own Esc handler (see
+      // VariationPickerModal) be the only thing that reacts to a keypress
+      // while it's open, instead of also saving/moving the grid highlight
+      // underneath it.
+      if (variationPickerGroup) return;
+
+      const typing = isTypingTarget(event.target);
+
+      // Ctrl+E / Ctrl+T / Ctrl+D: instantly switch the service option to
+      // Dine-In / Takeaway / Delivery - no mouse needed, and (like Ctrl+S
+      // below) these fire regardless of what's currently focused, since a
+      // Ctrl-held combo never types a character into a field. Right after
+      // one of these, a bare Enter falls straight through to the Ctrl+S/
+      // Enter check below and triggers Save Order/Checkout, exactly as if
+      // that service type had been picked from the dropdown by hand.
+      if (event.key.toLowerCase() === 'e' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        setOrderFormData((previous) => ({ ...previous, orderType: 'DineIn' }));
+        return;
+      }
+      if (event.key.toLowerCase() === 't' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        setOrderFormData((previous) => ({ ...previous, orderType: 'TakeAway' }));
+        return;
+      }
+      if (event.key.toLowerCase() === 'd' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        setOrderFormData((previous) => ({ ...previous, orderType: 'Delivery' }));
+        return;
+      }
+
+      // Ctrl+S / Enter: Save Order / Checkout. Enter only counts outside a
+      // text field (arrow-key/+- grid-navigation focus, a clicked product
+      // card, or nothing focused at all all count as "not typing").
+      if ((event.key.toLowerCase() === 's' && (event.ctrlKey || event.metaKey)) || (event.key === 'Enter' && !typing)) {
+        event.preventDefault();
+        void handleSaveOrder();
+        return;
+      }
+
+      if (typing) return;
+
+      // Arrow keys: move the product-grid highlight (see
+      // focusedProductIndex's own comment).
+      if (viewMode === 'grid' && visibleGroups.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault();
+        setFocusedProductIndex((previous) => {
+          const lastIndex = visibleGroups.length - 1;
+          let next = previous;
+          if (event.key === 'ArrowRight') next = previous + 1;
+          else if (event.key === 'ArrowLeft') next = previous - 1;
+          else if (event.key === 'ArrowDown') next = previous + GRID_COLUMNS;
+          else if (event.key === 'ArrowUp') next = previous - GRID_COLUMNS;
+          return Math.min(Math.max(next, 0), lastIndex);
+        });
+        return;
+      }
+
+      // Space: add the Arrow-highlighted card to the cart - the practical
+      // "select" companion to Arrow-key grid navigation (Enter is already
+      // claimed by Save Order/Checkout per the Operational Shortcuts spec
+      // above, so it isn't also reused as a grid "select" key).
+      if (event.key === ' ' && viewMode === 'grid' && visibleGroups[focusedProductIndex]) {
+        event.preventDefault();
+        handleGroupClick(visibleGroups[focusedProductIndex]);
+        return;
+      }
+
+      // +/-: bump the active cart item's quantity - see addToCart /
+      // handleIncreaseQty / handleDecreaseQty's own comments for how
+      // "active" is tracked and kept in sync with mouse clicks/removals.
+      if ((event.key === '+' || event.key === '=') && activeCartItemIndex !== null && cart[activeCartItemIndex]) {
+        event.preventDefault();
+        handleIncreaseQty(activeCartItemIndex);
+        return;
+      }
+      if ((event.key === '-' || event.key === '_') && activeCartItemIndex !== null && cart[activeCartItemIndex]) {
+        event.preventDefault();
+        handleDecreaseQty(activeCartItemIndex);
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variationPickerGroup, viewMode, visibleGroups, focusedProductIndex, activeCartItemIndex, cart]);
 
   function resetOrderForm() {
     setOrderFormData({ orderType: 'DineIn', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', table: '' });
@@ -469,14 +811,25 @@ export default function POSPage() {
 
   function handleIncreaseQty(index: number) {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: item.quantity + 1 } : item)));
+    setActiveCartItemIndex(index);
   }
 
   function handleDecreaseQty(index: number) {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: Math.max(1, item.quantity - 1) } : item)));
+    setActiveCartItemIndex(index);
   }
 
   function handleRemoveItem(index: number) {
     setCart((previousCart) => previousCart.filter((_, itemIndex) => itemIndex !== index));
+    // The active-cart-item pointer (see its own comment above) needs to
+    // shift down along with every row after the one just removed, or it'll
+    // point at the wrong row (or past the end of the array) for the next
+    // +/- keypress.
+    setActiveCartItemIndex((previousIndex) => {
+      if (previousIndex === null) return null;
+      if (index === previousIndex) return null;
+      return index < previousIndex ? previousIndex - 1 : previousIndex;
+    });
   }
 
   async function searchCustomers(query: string, searchBy: 'name' | 'phone' | 'both' = 'both') {
@@ -622,7 +975,7 @@ export default function POSPage() {
       // table's button, but this catches the rare case where it became
       // occupied (another terminal) in the moment between selecting it
       // and tapping Save.
-      if (isTableLocked(orderFormData.table)) return showValidationError(`Table ${orderFormData.table} already has an active order - complete/pay it, or use "Clear Table" on the timer alert to free it up.`);
+      if (isTableLocked(orderFormData.table)) return showValidationError(`Table ${orderFormData.table} already has an active order - complete/pay it, or wait for its timer to expire, to free it up.`);
       if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty for dine-in.');
       if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a dine-in phone number is entered.');
       return true;
@@ -917,13 +1270,21 @@ export default function POSPage() {
         ? `Table ${savedOrder.table} - kitchen receipt is printing now.`
         : 'Kitchen receipt is printing now.';
 
-      if (isOfflineOrder) {
-        popup({ tone: 'success', title: 'Order Saved Successfully', message: `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.` });
-      } else if (savedOrder.customerSyncWarning) {
-        popup({ tone: 'error', title: 'Order Saved, With a Warning', message: `${savedOrderLabel} was saved, but: ${savedOrder.customerSyncWarning}` });
-      } else {
-        popup({ tone: 'success', title: 'Order Saved Successfully', message: `${savedOrderLabel} saved! ${contextLine}` });
-      }
+      // No blocking pop-ups here by design - the notification bar/bell
+      // (see lib/notifications.tsx) is now the sole confirmation surface
+      // for a saved order. It also starts this order's 10-minute
+      // edit-from-the-bell window (Technical Requirement #3), timestamped
+      // from the moment it actually saved on this till, not the server's
+      // createdAt (avoids any clock-skew edge case for the window check),
+      // and (navigateToPos) brings the POS screen straight back so staff
+      // can start the next order immediately - a no-op here since we're
+      // already on it, kept for a consistent notify() call shape.
+      const confirmationMessage = isOfflineOrder
+        ? `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.`
+        : savedOrder.customerSyncWarning
+        ? `${savedOrderLabel} saved, but: ${savedOrder.customerSyncWarning}`
+        : `${savedOrderLabel} saved! ${contextLine}`;
+      notify('order_saved', confirmationMessage, { orderId: savedOrder.id, navigateToPos: true });
 
       const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
       if (isElectron) {
@@ -1022,21 +1383,22 @@ export default function POSPage() {
         // this into a real ShopSession the moment the till is back online
         // (see offline-sync.ts's reconciliation step).
         openShopLocally();
-        shopToast.success('Shop opened offline. Will sync once back online.');
+        shopToast.success('Restaurant opened offline. Will sync once back online.');
         return;
       }
       await openShopSession();
       await refreshShopSession();
-      shopToast.success('Shop opened. Orders can now be taken.');
+      shopToast.success('Restaurant opened. Orders can now be taken.');
     } catch (error) {
-      shopToast.error(error instanceof Error ? error.message : 'Failed to open shop.');
+      shopToast.error(error instanceof Error ? error.message : 'Failed to open restaurant.');
     } finally {
       setIsOpeningShop(false);
     }
   }
 
-  // The shop must be explicitly opened (see DashboardShell's "Open Shop"
-  // button / ShopSessionProvider) before any order can be rung up here -
+  // The shop must be explicitly opened (see DashboardShell's "Open
+  // Restaurant" button / ShopSessionProvider) before any order can be rung
+  // up here -
   // mirrors the same check the backend enforces in orderController.createOrder,
   // so staff see this up front instead of hitting an error after building
   // a whole cart. Loading state is skipped so the screen doesn't flash
@@ -1048,9 +1410,9 @@ export default function POSPage() {
         <div className="glass-pill mb-5 flex h-16 w-16 items-center justify-center rounded-full text-gray-400">
           <Store size={28} />
         </div>
-        <h2 className="text-xl font-black text-gray-900">The shop is closed</h2>
+        <h2 className="text-xl font-black text-gray-900">The restaurant is closed</h2>
         <p className="mt-2 max-w-sm text-sm font-bold text-gray-400">
-          Open the shop to start taking orders. Once open, every order rung up here counts toward this shift's totals until it's closed.
+          Open the restaurant to start taking orders. Once open, every order rung up here counts toward this shift's totals until it's closed.
         </p>
         {canManage ? (
           <button
@@ -1060,10 +1422,10 @@ export default function POSPage() {
             className="mt-6 flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Store size={16} />
-            {isOpeningShop ? 'Opening...' : 'Open Shop'}
+            {isOpeningShop ? 'Opening...' : 'Open Restaurant'}
           </button>
         ) : (
-          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">Ask a Manager or the Shop Owner to open the shop.</p>
+          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">Ask a Manager or the Restaurant Owner to open the restaurant.</p>
         )}
       </div>
     );
@@ -1085,12 +1447,31 @@ export default function POSPage() {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none transition focus:border-[#D6E332]" />
+                <input ref={productSearchInputRef} type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none transition focus:border-[#D6E332]" />
               </div>
               <div className="glass-pill flex items-center gap-2 self-end rounded-full p-1.5">
                 <IconToggleButton active={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid size={18} /></IconToggleButton>
                 <IconToggleButton active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={18} /></IconToggleButton>
               </div>
+            </div>
+            {/* Product Code / SKU entry - type a code, or scan a barcode
+                (a scanner just types the code fast and hits Enter), and the
+                matching product/deal is added to the cart instantly with no
+                mouse click (see handleProductCodeChange/handleProductCodeKeyDown
+                above). Down Arrow from here jumps straight to the service
+                type dropdown (Dine-In/Takeaway/Delivery) in the checkout
+                panel, per the Hotkey Navigation Order Flow. */}
+            <div className="relative mt-3 lg:max-w-xs">
+              <Barcode className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+              <input
+                ref={productCodeInputRef}
+                type="text"
+                value={productCodeInput}
+                onChange={(event) => handleProductCodeChange(event.target.value)}
+                onKeyDown={handleProductCodeKeyDown}
+                placeholder="Scan or type Product Code..."
+                className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
+              />
             </div>
             {/* Wraps onto as many lines as needed instead of scrolling
                 sideways - every category is visible and one tap away
@@ -1105,26 +1486,38 @@ export default function POSPage() {
             </div>
           </div>
 
-          {/* auto-fill/minmax instead of fixed breakpoint column counts - cards
-              always get at least ~132px so text/price/button never overflow,
-              and the browser fits as many columns as the available width
-              (which varies since the checkout panel is always pinned to the
-              right) actually allows. */}
-          <div className={viewMode === 'grid' ? 'grid grid-cols-3 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5' : 'space-y-2'}>
+          {/* Fixed Card Layout: every card in the grid gets the exact same
+              footprint (h-[266px] below) regardless of whether it's a plain
+              product or a Deal with a long sub-item list - a fixed-size
+              image + flex-col/justify-between content area means the
+              price/Select button always lands in the same spot, and a Deal's
+              extra sub-item lines scroll inside their own capped-height box
+              (see max-h-[64px] overflow-y-auto below) instead of stretching
+              the card taller than its neighbours or spilling past its edges.
+              Grid: minimum 4 cards per row at every width (grid-cols-4 is
+              the floor, never dropped to 3/2 at a narrower breakpoint the
+              way the old lg:grid-cols-3 override used to), scaling up to 5/6
+              only on wider screens. */}
+          <div className={viewMode === 'grid' ? 'grid grid-cols-4 gap-2 xl:grid-cols-5 2xl:grid-cols-6' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
-            {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group) => {
+            {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group, groupIndex) => {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
+              // Keyboard Shortcuts - grid navigation: a visible ring around
+              // whichever card the Arrow keys currently point to (see the
+              // POS-local keydown effect above) - Space adds this exact
+              // card to the cart.
+              const isKeyboardFocused = viewMode === 'grid' && groupIndex === focusedProductIndex;
               return (
-                <button key={group.key} type="button" onClick={() => handleGroupClick(group)} className={`group overflow-hidden rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-2.5 text-left backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:border-[#E2F33C]/70 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.35)] ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex flex-col'}`}>
-                  <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 aspect-[4/3] w-full'}`}>
+                <button key={group.key} type="button" onClick={() => { handleGroupClick(group); setFocusedProductIndex(groupIndex); }} className={`group overflow-hidden rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-2.5 text-left backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:border-[#E2F33C]/70 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.35)] ${isKeyboardFocused ? 'ring-2 ring-[#D6E332] ring-offset-2' : ''} ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex h-[266px] flex-col'}`}>
+                  <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 h-[110px] w-full'}`}>
                     <img src={resolveProductImage(group)} alt={group.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-110" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent" />
                   </div>
-                  <div className={`flex flex-col justify-between ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
-                    <div>
+                  <div className={`flex flex-col justify-between overflow-hidden ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
+                    <div className="min-h-0 overflow-hidden">
                       <div className="mb-0.5 flex items-start justify-between gap-1.5">
                         <div className="min-w-0">
                           <h3 className="truncate text-[13px] leading-tight font-black text-gray-800">{group.name}</h3>
@@ -1138,15 +1531,19 @@ export default function POSPage() {
                         <p className="mb-2 line-clamp-1 text-[10px] text-gray-500">{group.description}</p>
                       ) : null}
 
+                      {/* Deal Content Responsiveness: capped height + its own
+                          scrollbar - a 2-item deal and a 12-item deal render
+                          at the identical card size, the longer list just
+                          scrolls internally instead of resizing the card. */}
                       {group.isDeal && group.dealItems && group.dealItems.length > 0 ? (
-                        <div className="mt-1.5 flex flex-col gap-1 max-h-[60px] overflow-y-auto no-scrollbar">
+                        <div className="mt-1.5 flex flex-col gap-1 max-h-[64px] overflow-y-auto no-scrollbar">
                           {group.dealItems.map((dealItemId) => {
                             const subItem = products.find(p => String(p.id) === dealItemId);
                             if (!subItem) return null;
                             return (
                               <div key={dealItemId} className="text-[9px] font-bold text-gray-500 bg-gray-50 border border-gray-100 rounded-[6px] px-1.5 py-0.5 truncate flex items-center gap-1">
                                 <div className="w-1 h-1 rounded-full bg-rose-400 shrink-0"></div>
-                                <span>{subItem.name} {subItem.variation && subItem.variation !== 'Standard' ? `(${subItem.variation})` : ''}</span>
+                                <span className="truncate">{subItem.name} {subItem.variation && subItem.variation !== 'Standard' ? `(${subItem.variation})` : ''}</span>
                               </div>
                             );
                           })}
@@ -1191,13 +1588,10 @@ export default function POSPage() {
                 <Trash2 size={16} />
               </button>
             </div>
-            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="mt-3 w-full rounded-[20px] bg-[#E2F33C] px-5 py-3 text-base font-black text-black shadow-lg shadow-yellow-200/60 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
-              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
-            </button>
           </div>
 
           <div className="space-y-3 border-b border-white/40 bg-white/25 p-4">
-            <select name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
+            <select ref={orderTypeSelectRef} name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
               <option value="DineIn">Dine In</option>
               <option value="TakeAway">Take Away</option>
               <option value="Delivery">Delivery</option>
@@ -1257,72 +1651,13 @@ export default function POSPage() {
                   {tables.length === 0 ? (
                     <p className="rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-xs font-bold text-gray-400 shadow-inner">No tables configured yet.</p>
                   ) : (
-                    <>
-                      <div className="grid grid-cols-5 gap-2">
-                        {tables.map((table) => {
-                          const isSelected = orderFormData.table === table.name;
-                          const remainingMs = getTableRemainingMs(table.name);
-                          const isLocked = isTableLocked(table.name);
-                          // Once the countdown reaches zero the table stays
-                          // locked (no more silent auto-unlock) - it just
-                          // switches from a live countdown to an "Expired"
-                          // state until staff clear or extend it from the
-                          // real-time alert popup elsewhere on the Dashboard.
-                          const isExpired = isLocked && remainingMs !== null && remainingMs <= 0;
-                          return (
-                            <button
-                              key={table.id}
-                              type="button"
-                              disabled={isLocked}
-                              onClick={() => setOrderFormData((previous) => ({ ...previous, table: previous.table === table.name ? '' : table.name }))}
-                              title={
-                                isExpired
-                                  ? `Table ${table.name} - timer expired, awaiting staff to clear or extend it`
-                                  : isLocked
-                                    ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
-                                    : table.isFamily
-                                      ? `Table ${table.name} - Family Table`
-                                      : `Table ${table.name}`
-                              }
-                              className={`relative flex flex-col items-center justify-center gap-0.5 rounded-xl border px-2 py-2 text-xs font-black leading-tight backdrop-blur-md transition ${
-                                isExpired
-                                  ? 'cursor-not-allowed border-rose-300/70 bg-rose-50/50 text-rose-500 shadow-inner'
-                                  : isLocked
-                                    ? 'cursor-not-allowed border-white/40 bg-white/30 text-gray-400 shadow-inner'
-                                    : isSelected
-                                      ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]'
-                                      : table.isFamily
-                                        ? 'border-pink-200/70 bg-pink-50/60 text-pink-700 shadow-inner hover:border-pink-300'
-                                        : 'border-white/50 bg-white/50 text-gray-600 shadow-inner hover:border-[#E2F33C]/70'
-                              }`}
-                            >
-                              <span>{table.name}</span>
-                              {isExpired ? (
-                                <span className="text-[9px] font-black normal-case text-rose-500">Expired</span>
-                              ) : isLocked ? (
-                                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
-                              ) : null}
-                              {table.isFamily ? (
-                                <span className={`absolute -right-1.5 -top-1.5 rounded-full px-1 text-[8px] font-black leading-[14px] text-white ${isLocked ? 'bg-gray-400' : 'bg-pink-500'}`}>F</span>
-                              ) : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-bold">
-                        {tables.some((table) => table.isFamily) ? (
-                          <p className="flex items-center gap-1.5 text-pink-600">
-                            <span className="inline-block h-2 w-2 rounded-full bg-pink-500" /> Family Table
-                          </p>
-                        ) : null}
-                        <p className="flex items-center gap-1.5 text-gray-400">
-                          <span className="inline-block h-2 w-2 rounded-full bg-gray-300" /> Occupied (frees up when paid, cleared, or extended)
-                        </p>
-                        <p className="flex items-center gap-1.5 text-rose-500">
-                          <span className="inline-block h-2 w-2 rounded-full bg-rose-400" /> Expired - awaiting staff decision
-                        </p>
-                      </div>
-                    </>
+                    <DineInTableGrid
+                      tables={tables}
+                      activeTableOrders={activeTableOrders}
+                      tableTurnoverMinutes={tableTurnoverMinutes}
+                      selectedTable={orderFormData.table}
+                      onSelect={(name) => setOrderFormData((previous) => ({ ...previous, table: previous.table === name ? '' : name }))}
+                    />
                   )}
                 </FormField>
               </>
@@ -1381,6 +1716,9 @@ export default function POSPage() {
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
               <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
+            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
+              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
+            </button>
           </div>
         </aside>
       </div>
@@ -1428,6 +1766,19 @@ function FormField({ label, children }: { label: string; children: React.ReactNo
 }
 
 function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGroup; onSelect: (variation: Product) => void; onClose: () => void }) {
+  // Keyboard Shortcuts: Esc closes this popup instantly, same as the shared
+  // toast.tsx confirm/popup dialogs - this one's local since the picker
+  // isn't part of that shared system.
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
+
   return (
     <div className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="glass-strong w-full max-w-sm rounded-[28px] p-6" onClick={(event) => event.stopPropagation()}>
@@ -1461,6 +1812,110 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
         </button>
       </div>
     </div>
+  );
+}
+
+// The Dine-In table picker, split out of POSPage so its live 1-second
+// countdown re-render stays local to this small subtree instead of forcing
+// the entire page (product grid, cart, every form field) to re-render
+// every second - that constant background churn was the single biggest
+// cause of the POS/Sales screens feeling laggy while a cashier was
+// actually typing or clicking, since a full-page re-render was competing
+// with their input every single second, the whole time this screen was
+// open. Only mounted (and only ticking) while orderType === 'DineIn' -
+// TakeAway/Delivery orders now pay zero cost for this at all.
+//
+// A table is "locked" purely as a function of `now` vs. its occupying
+// order's turnover window (see isTableTimerExpired) - never a separate
+// "Expired" state staff have to act on. Once expired it's immediately
+// selectable again, same as any other free table, so there's no more
+// "Expired - awaiting staff decision" branch here.
+function DineInTableGrid({
+  tables,
+  activeTableOrders,
+  tableTurnoverMinutes,
+  selectedTable,
+  onSelect,
+}: {
+  tables: Table[];
+  activeTableOrders: Record<string, TableTimerOrder>;
+  tableTurnoverMinutes: number;
+  selectedTable: string;
+  onSelect: (name: string) => void;
+}) {
+  const [tick, setTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  function getTableRemainingMs(tableName: string): number | null {
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return null;
+    void tick; // re-evaluated every second purely to re-render the live countdown
+    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
+  }
+
+  function isTableLocked(tableName: string): boolean {
+    const occupying = activeTableOrders[tableName];
+    if (!occupying) return false;
+    void tick;
+    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
+  }
+
+  return (
+    <>
+      <div className="grid grid-cols-5 gap-2">
+        {tables.map((table) => {
+          const isSelected = selectedTable === table.name;
+          const remainingMs = getTableRemainingMs(table.name);
+          const isLocked = isTableLocked(table.name);
+          return (
+            <button
+              key={table.id}
+              type="button"
+              disabled={isLocked}
+              onClick={() => onSelect(table.name)}
+              title={
+                isLocked
+                  ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
+                  : table.isFamily
+                    ? `Table ${table.name} - Family Table`
+                    : `Table ${table.name}`
+              }
+              className={`relative flex flex-col items-center justify-center gap-0.5 rounded-xl border px-2 py-2 text-xs font-black leading-tight backdrop-blur-md transition ${
+                isLocked
+                  ? 'cursor-not-allowed border-white/40 bg-white/30 text-gray-400 shadow-inner'
+                  : isSelected
+                    ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]'
+                    : table.isFamily
+                      ? 'border-pink-200/70 bg-pink-50/60 text-pink-700 shadow-inner hover:border-pink-300'
+                      : 'border-white/50 bg-white/50 text-gray-600 shadow-inner hover:border-[#E2F33C]/70'
+              }`}
+            >
+              <span>{table.name}</span>
+              {isLocked ? (
+                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
+              ) : null}
+              {table.isFamily ? (
+                <span className={`absolute -right-1.5 -top-1.5 rounded-full px-1 text-[8px] font-black leading-[14px] text-white ${isLocked ? 'bg-gray-400' : 'bg-pink-500'}`}>F</span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-bold">
+        {tables.some((table) => table.isFamily) ? (
+          <p className="flex items-center gap-1.5 text-pink-600">
+            <span className="inline-block h-2 w-2 rounded-full bg-pink-500" /> Family Table
+          </p>
+        ) : null}
+        <p className="flex items-center gap-1.5 text-gray-400">
+          <span className="inline-block h-2 w-2 rounded-full bg-gray-300" /> Occupied (frees up when paid, or when its timer expires)
+        </p>
+      </div>
+    </>
   );
 }
 

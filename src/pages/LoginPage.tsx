@@ -4,6 +4,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { authLoginRequest } from "@/lib/api";
 import { isAuthenticated, setAuthSession, getAuthRole } from "@/lib/auth";
+import { getFirstAccessiblePage } from "@/lib/dashboard-pages";
 
 export default function LoginPage() {
   return <LoginPageContent />;
@@ -13,7 +14,12 @@ export default function LoginPage() {
 // role - Super Admin never sees the shop dashboard, and vice versa.
 function defaultPathForRole(role: string | null) {
   if (role === "superadmin") return "/superadmin";
-  return "/dashboard";
+  // Dashboard Permission Gate: an employee whose Role has "Hide Dashboard"
+  // checked lands on the first page their permissions DO allow instead of
+  // '/dashboard' - see lib/dashboard-pages.ts's getFirstAccessiblePage.
+  // A no-op ('/dashboard') for a Shop Owner, or an employee without that
+  // restriction, same as before this existed.
+  return getFirstAccessiblePage();
 }
 
 function LoginPageContent() {
@@ -87,7 +93,16 @@ function LoginPageContent() {
       // authController.login). By the time we have a token, the shop (if
       // any) is active and licensed.
       const role = res.user?.role ?? null;
-      const target = requestedNext || res.redirectTo || defaultPathForRole(role);
+      // Dashboard Permission Gate: the backend's own `redirectTo` (see
+      // authController.js's redirectPathFor) can't know this employee's
+      // full permission-gated page list, so it always just says
+      // "/dashboard" for any non-Super-Admin login - trusting it verbatim
+      // here would send a Hide-Dashboard employee straight to the one page
+      // they're not supposed to land on. Route that specific case back
+      // through defaultPathForRole (which DOES know, via
+      // getFirstAccessiblePage) instead; any other redirectTo value
+      // (e.g. "/superadmin") is trusted as-is.
+      const target = requestedNext || (res.redirectTo && res.redirectTo !== "/dashboard" ? res.redirectTo : defaultPathForRole(role));
       // NOT window.location.assign(target) - this app is HashRouter-based
       // (src/main.tsx), so a bare path like "/dashboard" has no meaning as
       // a real navigation target. In dev that's masked by the Vite server
@@ -114,7 +129,7 @@ function LoginPageContent() {
         } else if (error.response?.status === 402) {
           // License expired / shop suspended - a professional, specific
           // message rather than a generic "invalid credentials" error.
-          setErrorMessage(data?.message || "Your shop's license has expired or the shop has been suspended. Please contact the software provider.");
+          setErrorMessage(data?.message || "Your restaurant's license has expired or the restaurant has been suspended. Please contact the software provider.");
         } else if (!error.response) {
           // Request never got a response at all: backend unreachable,
           // CORS failure, or timeout. This is a network-layer failure,

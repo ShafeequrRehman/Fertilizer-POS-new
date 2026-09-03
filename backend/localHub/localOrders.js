@@ -351,7 +351,7 @@ function writeEdits(edits) {
   store.save(EDITS_KEY, edits);
 }
 
-function queueOrderEdit(orderId, patch, actor, kitchenPrinted, receiptPrinted) {
+function queueOrderEdit(orderId, patch, actor, kitchenPrinted, receiptPrinted, expectedVersion) {
   const edits = readEdits();
   const record = {
     id: crypto.randomUUID(),
@@ -373,6 +373,16 @@ function queueOrderEdit(orderId, patch, actor, kitchenPrinted, receiptPrinted) {
     // customerReceiptPrintedAt and DashboardShell.tsx's ReceiptPrintWatcher
     // never prints it a second time once this edit replays for real.
     receiptPrinted: !!receiptPrinted,
+    // Conflict resolution: the order.version this till last knew about,
+    // captured the moment the edit was queued (see offline-order-helpers.ts's
+    // saveOrderEditOffline). orderController.js's importOfflineOrderUpdates
+    // compares this against the order's real current version once per
+    // orderId per sync batch, so an edit built on since-stale data (another
+    // till changed this same order first) gets rejected and flagged for
+    // staff instead of silently overwriting it. Left undefined for edits
+    // queued before this field existed - those simply skip the check, same
+    // as before.
+    expectedVersion: typeof expectedVersion === "number" ? expectedVersion : undefined,
   };
   edits.push(record);
   writeEdits(edits);

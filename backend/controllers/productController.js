@@ -31,23 +31,39 @@ exports.getProduct = async (req, res) => {
 };
 
 exports.createProduct = async (req, res) => {
-  const product = await Product.create({ ...req.body, shopId: req.user.shopId });
-  res.status(201).json(product);
+  try {
+    const product = await Product.create({ ...req.body, shopId: req.user.shopId });
+    res.status(201).json(product);
+  } catch (error) {
+    // Duplicate Product Code within this shop (see Product.js's partial
+    // unique index) - give a clear message instead of a raw Mongo error.
+    if (error.code === 11000 && error.keyPattern?.productCode) {
+      return res.status(400).json({ error: `Product Code "${req.body.productCode}" is already in use by another product.` });
+    }
+    throw error;
+  }
 };
 
 exports.updateProduct = async (req, res) => {
   // Never let the request body override shopId - a product can't be
   // reassigned to a different shop via this endpoint.
   const { shopId, ...updates } = req.body;
-  const product = await Product.findOneAndUpdate(
-    { _id: req.params.id, ...shopScope(req) },
-    updates,
-    { new: true }
-  );
-  if (!product) {
-    return res.status(404).json({ error: "Product not found" });
+  try {
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, ...shopScope(req) },
+      updates,
+      { new: true }
+    );
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    res.json(product);
+  } catch (error) {
+    if (error.code === 11000 && error.keyPattern?.productCode) {
+      return res.status(400).json({ error: `Product Code "${updates.productCode}" is already in use by another product.` });
+    }
+    throw error;
   }
-  res.json(product);
 };
 
 // DELETE /api/products/:id - removes a single variation (or a whole

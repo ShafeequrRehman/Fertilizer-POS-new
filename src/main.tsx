@@ -4,6 +4,7 @@ import { HashRouter } from 'react-router-dom';
 import { Provider } from 'react-redux';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ToastProvider } from '@/lib/toast';
+import { NotificationProvider } from '@/lib/notifications';
 import './index.css';
 
 // NOTE: './App' is deliberately NOT statically imported up here anymore.
@@ -74,7 +75,9 @@ Promise.all([import('@/store'), import('./App')])
           <Provider store={store}>
             <HashRouter>
               <ToastProvider>
-                <App />
+                <NotificationProvider>
+                  <App />
+                </NotificationProvider>
               </ToastProvider>
             </HashRouter>
           </Provider>

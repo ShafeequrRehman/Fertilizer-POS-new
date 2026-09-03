@@ -4,7 +4,6 @@ import {
   Search, UserCheck, Clock, Zap,
   ShieldCheck, MoreVertical, ChevronRight, UserRoundCheck, UserRoundX
 } from 'lucide-react';
-import { TableManagementSection } from '@/components/TableManagementSection';
 import { fetchWaiters } from '@/lib/pos-api';
 import { Waiter } from '@/lib/pos-types';
 
@@ -191,10 +190,6 @@ function HRView() {
           </button>
         </div>
       </div>
-
-      <TableManagementSection
-        cardClassName="glass rounded-[40px] p-8"
-      />
 
       <WaiterRosterReadOnly />
     </div>

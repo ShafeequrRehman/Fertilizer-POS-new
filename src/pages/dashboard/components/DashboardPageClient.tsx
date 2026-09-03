@@ -1,5 +1,6 @@
 
 import { useEffect, useMemo, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip,
   AreaChart, Area
@@ -14,6 +15,8 @@ import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type B
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { getIsDashboardHidden } from '@/lib/auth';
+import { getFirstAccessiblePage } from '@/lib/dashboard-pages';
 
 type EmployeeStat = { name: string; sales: number; count: number };
 type InventoryItem = { id: string | number; name: string; stock: number };
@@ -33,7 +36,25 @@ type ServiceStats = {
   uniqueCustomers: number;
 };
 
+// Dashboard Permission Gate: an employee whose Role has "Hide Dashboard"
+// checked must not be able to reach this page even by direct navigation
+// (typing/bookmarking the '/dashboard' URL) - the sidebar link and every
+// automatic post-login redirect already steer them elsewhere (see
+// DashboardShell.tsx's nav filter and lib/dashboard-pages.ts's
+// getFirstAccessiblePage), but this is the actual enforcement point for
+// this one route. A thin wrapper around the real page component rather
+// than an early return inside it, so the redirect decision is made BEFORE
+// any of the real component's hooks/effects (data fetching, timers) ever
+// run - never violates the Rules of Hooks, and never fires a network
+// request for a page about to be redirected away from anyway.
 export default function DashboardPageClient() {
+  if (getIsDashboardHidden()) {
+    return <Navigate to={getFirstAccessiblePage()} replace />;
+  }
+  return <DashboardPageClientInner />;
+}
+
+function DashboardPageClientInner() {
   // SavedOrder from the Local Hub cache-first paint, or the narrower
   // OrderSummary shape from the live cloud poll below - stats/chart code in
   // this file only ever reads the fields both shapes have in common
@@ -502,7 +523,7 @@ function formatTime(value: Date) {
 function buildDashboardWindow(session: ShopSession | null, now: Date): BusinessWindow {
   const window = getBusinessWindow(session, now);
   if (!window.hasSession) {
-    return { ...window, label: 'No shift yet — open the shop to start counting orders' };
+    return { ...window, label: 'No shift yet — open the restaurant to start counting orders' };
   }
 
   const label = window.isOpen

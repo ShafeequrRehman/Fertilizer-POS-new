@@ -44,6 +44,10 @@ export default function ItemizedBillReceipt({
   const billTotal = order.total ?? Math.max(subtotal + scAmount - discountAmount, 0);
   const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
   const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
+  // Change-Return Calculation - see ThermalReceipt.tsx's matching comment;
+  // same idea here, just laid out to match this template's own style.
+  const cashReceived = order.cashReceived || 0;
+  const changeReturned = Math.max(cashReceived - billTotal, 0);
 
   const cashierName = getAuthUser()?.name || getAuthUser()?.username || '';
 
@@ -182,9 +186,33 @@ export default function ItemizedBillReceipt({
         <span className="pr-[1mm]">{billTotal.toFixed(0)}</span>
       </div>
 
-      {(amountTendered !== undefined || dueAmount > 0 || previousDues > 0) && (
+      {(amountTendered !== undefined || cashReceived > 0 || dueAmount > 0 || previousDues > 0) && (
         <div className="mt-2 space-y-0.5">
-          {amountTendered !== undefined && <p>Amount Tendered: {amountTendered.toFixed(0)}</p>}
+          {/* Change-Return Calculation: the exact Total Bill / Cash
+              Tendered-Received / Change Returned rows, same as a standard
+              supermarket/fast-food till receipt - only when a real cash-
+              tendered figure was actually recorded (see SalesPage.tsx's
+              Complete Payment modal). Falls back to the original single
+              "Amount Tendered" line for anything else (card/e-wallet, or
+              an older order saved before this feature existed). */}
+          {cashReceived > 0 ? (
+            <>
+              <div className="flex justify-between font-bold">
+                <span>Total Bill:</span>
+                <span className="pr-[1mm]">{billTotal.toFixed(0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Cash Tendered/Received:</span>
+                <span className="pr-[1mm]">{cashReceived.toFixed(0)}</span>
+              </div>
+              <div className="flex justify-between font-bold">
+                <span>Change Returned:</span>
+                <span className="pr-[1mm]">{changeReturned.toFixed(0)}</span>
+              </div>
+            </>
+          ) : (
+            amountTendered !== undefined && <p>Amount Tendered: {amountTendered.toFixed(0)}</p>
+          )}
           {dueAmount > 0 && <p>Due: {dueAmount.toFixed(0)}</p>}
           {previousDues > 0 && (
             // Full arrears breakdown - only for a customer who actually

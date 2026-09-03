@@ -43,12 +43,15 @@ export function ProductManagementSection({
   description?: string;
   cardClassName?: string;
 }) {
-  const { confirm } = useToast();
+  const { confirm, popup } = useToast();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  // Success confirmations only now - every error (validation or otherwise)
+  // routes through the shared popup() from useToast instead, so it's never
+  // missed as a quiet inline banner above the fold.
+  const [statusMessage, setStatusMessage] = useState<{ tone: "success"; text: string } | null>(null);
 
   // General Form states
   const [formType, setFormType] = useState<"Product" | "Deal">("Product");
@@ -71,11 +74,18 @@ export function ProductManagementSection({
   const [category, setCategory] = useState("");
   const [image, setImage] = useState("");
   const [variation, setVariation] = useState("Standard");
+  // Product Code / SKU: optional, typed or barcode-scanned on the POS
+  // screen to instantly add this exact product/deal to the cart - see
+  // POSPage.tsx's product-code entry box. Used here for a single
+  // (non-variation) product or a Deal; a multi-variation product sets its
+  // own code per size/flavour below instead (variationsData's own
+  // productCode), since each size is really a separate SKU.
+  const [productCode, setProductCode] = useState("");
 
   // Variations states (Products only) - defaults ON, see resetForm() below.
   const [hasVariations, setHasVariations] = useState(true);
-  const [variationsData, setVariationsData] = useState<Array<{ id: string; name: string; price: string; qty: string }>>([
-    { id: "1", name: "", price: "", qty: "" },
+  const [variationsData, setVariationsData] = useState<Array<{ id: string; name: string; price: string; qty: string; productCode: string }>>([
+    { id: "1", name: "", price: "", qty: "", productCode: "" },
   ]);
 
   // Deals states
@@ -109,7 +119,7 @@ export function ProductManagementSection({
         setCategories(result?.categories || ["Burgers", "Drinks", "Deals", "Sides", "Pizzas"]);
       }
     } catch (error) {
-      setStatusMessage({ tone: "error", text: error instanceof Error ? error.message : "Failed to load products." });
+      popup({ tone: "error", title: "Couldn't load products", message: error instanceof Error ? error.message : "Failed to load products." });
     } finally {
       setIsLoading(false);
     }
@@ -126,13 +136,14 @@ export function ProductManagementSection({
     setImage("");
     setFormType("Product");
     setVariation("Standard");
+    setProductCode("");
     // Defaults to ON for a brand new product - most menu items (pizzas,
     // burgers, etc.) come in more than one size, so leading with the
     // Small/Medium/Large rows front-and-center is the common case. A
     // single-price item (like a canned drink) is still just one unchecked
     // click away.
     setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "" }]);
+    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
     setDealItems([]);
   }
 
@@ -141,7 +152,7 @@ export function ProductManagementSection({
   // twice doesn't pile up duplicates.
   function applySizePreset(names: string[]) {
     setHasVariations(true);
-    setVariationsData(names.map((n, i) => ({ id: `${Date.now()}-${i}`, name: n, price: "", qty: "" })));
+    setVariationsData(names.map((n, i) => ({ id: `${Date.now()}-${i}`, name: n, price: "", qty: "", productCode: "" })));
   }
 
   function getBasePayload() {
@@ -158,42 +169,42 @@ export function ProductManagementSection({
 
   async function handleSaveProduct() {
     if (!name.trim()) {
-      setStatusMessage({ tone: "error", text: "Name is required." });
+      popup({ tone: "error", title: "Missing information", message: "Name is required." });
       return;
     }
 
     if (formType === "Product" && !category.trim()) {
-      setStatusMessage({ tone: "error", text: "Category is required." });
+      popup({ tone: "error", title: "Missing information", message: "Category is required." });
       return;
     }
 
     if (!editingId && !hasVariations && !price) {
-      setStatusMessage({ tone: "error", text: "Price is required." });
+      popup({ tone: "error", title: "Missing information", message: "Price is required." });
       return;
     }
-    
+
     if (editingId && !price) {
-      setStatusMessage({ tone: "error", text: "Price is required." });
+      popup({ tone: "error", title: "Missing information", message: "Price is required." });
       return;
     }
 
     if (formType === "Deal" && dealItems.length === 0) {
-      setStatusMessage({ tone: "error", text: "Deals must include at least one item." });
+      popup({ tone: "error", title: "Missing information", message: "Deals must include at least one item." });
       return;
     }
 
     if (formType === "Product" && !editingId && hasVariations) {
       if (variationsData.length === 0) {
-        setStatusMessage({ tone: "error", text: "Please add at least one variation, or uncheck the variations option." });
+        popup({ tone: "error", title: "Missing information", message: "Please add at least one variation, or uncheck the variations option." });
         return;
       }
       for (const v of variationsData) {
         if (!v.name.trim()) {
-           setStatusMessage({ tone: "error", text: "Variation name is required for all variations." });
+           popup({ tone: "error", title: "Missing information", message: "Variation name is required for all variations." });
            return;
         }
         if (!v.price) {
-           setStatusMessage({ tone: "error", text: `Price is required for variation "${v.name}".` });
+           popup({ tone: "error", title: "Missing information", message: `Price is required for variation "${v.name}".` });
            return;
         }
       }
@@ -223,6 +234,7 @@ export function ProductManagementSection({
             price: Number(v.price),
             stock: v.qty ? Number(v.qty) : 0,
             variation: variationName,
+            productCode: v.productCode.trim(),
           };
           if (originalGroupVariationIds.has(v.id)) {
             keptIds.add(v.id);
@@ -250,7 +262,8 @@ export function ProductManagementSection({
           ...getBasePayload(),
           price: Number(price),
           stock: qty ? Number(qty) : 0,
-          variation: formType === "Deal" ? "Deal" : variation
+          variation: formType === "Deal" ? "Deal" : variation,
+          productCode: productCode.trim(),
         };
         const updated = await updateProduct(editingId, payload);
         if (updated) {
@@ -268,7 +281,8 @@ export function ProductManagementSection({
                ...getBasePayload(),
                price: Number(v.price),
                stock: v.qty ? Number(v.qty) : 0,
-               variation: variationName
+               variation: variationName,
+               productCode: v.productCode.trim(),
              };
              const created = await createProduct(payload);
              if (created) newProducts.push(created);
@@ -282,7 +296,8 @@ export function ProductManagementSection({
             ...getBasePayload(),
             price: Number(price),
             stock: qty ? Number(qty) : 0,
-            variation: formType === "Deal" ? "Deal" : "Standard"
+            variation: formType === "Deal" ? "Deal" : "Standard",
+            productCode: productCode.trim(),
           };
           const created = await createProduct(payload);
           if (created) {
@@ -293,7 +308,7 @@ export function ProductManagementSection({
         }
       }
     } catch (error) {
-      setStatusMessage({ tone: "error", text: error instanceof Error ? error.message : "Failed to save product." });
+      popup({ tone: "error", title: "Couldn't save", message: error instanceof Error ? error.message : "Failed to save product." });
     } finally {
       setIsSaving(false);
     }
@@ -307,7 +322,8 @@ export function ProductManagementSection({
     setPrice(product.price.toString());
     setQty(product.stock > 0 ? product.stock.toString() : "");
     setImage(product.image || "");
-    
+    setProductCode(product.productCode || "");
+
     const editingDeal = product.isDeal || product.variation?.includes("Deal") || product.description?.includes("Deal") || product.category === "Deals";
     
     if (editingDeal) {
@@ -343,7 +359,7 @@ export function ProductManagementSection({
         resetForm();
       }
     } catch (error) {
-      setStatusMessage({ tone: "error", text: error instanceof Error ? error.message : "Failed to delete product." });
+      popup({ tone: "error", title: "Couldn't delete", message: error instanceof Error ? error.message : "Failed to delete product." });
     }
   }
 
@@ -368,6 +384,7 @@ export function ProductManagementSection({
         name: v.variation && v.variation !== "Standard" ? v.variation : "Standard",
         price: v.price.toString(),
         qty: v.stock > 0 ? v.stock.toString() : "",
+        productCode: v.productCode || "",
       }))
     );
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -382,7 +399,7 @@ export function ProductManagementSection({
     setCategory(group.category);
     setImage(group.image || "");
     setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "" }]);
+    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -400,7 +417,7 @@ export function ProductManagementSection({
     setCategory(groupCategory);
     setImage(groupImage);
     setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "" }]);
+    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -453,7 +470,7 @@ export function ProductManagementSection({
       <p className="max-w-2xl text-sm text-slate-500 mb-6">{description}</p>
 
       {statusMessage ? (
-        <div className={`mb-5 rounded-2xl border px-4 py-3 text-sm flex justify-between items-center ${statusMessage.tone === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+        <div className="mb-5 flex items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
           {statusMessage.text}
           <button onClick={() => setStatusMessage(null)} className="font-bold opacity-70 hover:opacity-100">×</button>
         </div>
@@ -611,6 +628,16 @@ export function ProductManagementSection({
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
+            <div className="space-y-2 md:col-span-2">
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Product Code / SKU (Optional)</label>
+              <input
+                type="text"
+                value={productCode}
+                onChange={(e) => setProductCode(e.target.value)}
+                placeholder="Type or scan a barcode - lets staff add this instantly on the POS screen"
+                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+              />
+            </div>
             {formType === "Product" && editingId && (
               <div className="space-y-2 md:col-span-2">
                 <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Variation Name</label>
@@ -700,16 +727,29 @@ export function ProductManagementSection({
                       />
                     </div>
                     <div className="w-24">
-                      <input 
-                        type="number" 
-                        placeholder="Qty" 
-                        value={v.qty} 
+                      <input
+                        type="number"
+                        placeholder="Qty"
+                        value={v.qty}
                         onChange={(e) => {
                           const newVars = [...variationsData];
                           newVars[i].qty = e.target.value;
                           setVariationsData(newVars);
-                        }} 
-                        className="w-full rounded-[14px] border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all" 
+                        }}
+                        className="w-full rounded-[14px] border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
+                      />
+                    </div>
+                    <div className="w-36">
+                      <input
+                        type="text"
+                        placeholder="Product Code / SKU"
+                        value={v.productCode}
+                        onChange={(e) => {
+                          const newVars = [...variationsData];
+                          newVars[i].productCode = e.target.value;
+                          setVariationsData(newVars);
+                        }}
+                        className="w-full rounded-[14px] border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
                       />
                     </div>
                     {variationsData.length > 1 && (
@@ -730,7 +770,7 @@ export function ProductManagementSection({
                 <button
                   type="button"
                   onClick={() => {
-                    setVariationsData([...variationsData, { id: Date.now().toString(), name: "", price: "", qty: "" }]);
+                    setVariationsData([...variationsData, { id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
                   }}
                   className="mt-3 inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-5 py-3 rounded-[16px] transition-colors shadow-sm"
                 >

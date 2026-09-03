@@ -73,7 +73,7 @@ export function CustomerOrderingSection() {
     if (!qrDataUrl) return;
     const link = document.createElement('a');
     link.href = qrDataUrl;
-    link.download = `${(shop?.name || 'shop').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-order-qr.png`;
+    link.download = `${(shop?.name || 'restaurant').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-order-qr.png`;
     link.click();
   }
 
@@ -100,7 +100,7 @@ export function CustomerOrderingSection() {
   if (!shopId) {
     return (
       <div className="rounded-[28px] border border-slate-200 bg-white p-6">
-        <p className="text-sm font-bold text-slate-500">Sign in again to load your shop details before generating a QR code.</p>
+        <p className="text-sm font-bold text-slate-500">Sign in again to load your restaurant details before generating a QR code.</p>
       </div>
     );
   }
@@ -169,7 +169,7 @@ export function CustomerOrderingSection() {
         <h3 className="text-sm font-black text-slate-900">Delivery Rider WhatsApp Number(s)</h3>
         <p className="mt-1 max-w-2xl text-xs font-bold text-slate-500">
           The moment a Delivery order is confirmed, this number gets a WhatsApp message with the customer's name,
-          phone, address, and a Google Maps link to their location - using your shop's own WhatsApp connection (see
+          phone, address, and a Google Maps link to their location - using your restaurant's own WhatsApp connection (see
           the WhatsApp page). Leave empty to skip rider notifications.
         </p>
 

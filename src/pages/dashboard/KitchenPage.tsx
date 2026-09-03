@@ -1,5 +1,6 @@
 
 import { useEffect, useState } from 'react';
+import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { ChefHat, Clock, Printer, RefreshCcw, Settings, XCircle } from 'lucide-react';
 import { fetchOrders } from '@/lib/pos-api';
 import { SavedOrder } from '@/lib/pos-types';
@@ -20,6 +21,11 @@ export default function KitchenPage() {
   const [kitchenPrinter, setKitchenPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-kitchen-printer') ?? ''));
   const [cashierPrinter, setCashierPrinter] = useState(() => typeof window === 'undefined' ? '' : (window.localStorage.getItem('preferred-cashier-printer') ?? ''));
   const { isOnline } = useNetworkStatus();
+
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  // This modal is toggled by showSettings rather than mounted/unmounted, so
+  // `active` gates the listener to only when it's actually open.
+  useBackspaceToClose(() => setShowSettings(false), showSettings);
 
   // This page always prints via the hidden auto-print iframe (see
   // handlePrint/printReadyUrl below) - it has no direct Electron IPC print

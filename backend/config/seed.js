@@ -2,6 +2,7 @@ const Permission = require("../models/Permission");
 const User = require("../models/User");
 const Customer = require("../models/Customer");
 const ShopSession = require("../models/ShopSession");
+const IngredientPurchase = require("../models/IngredientPurchase");
 const bcrypt = require("bcryptjs");
 const { PERMISSIONS } = require("./permissions");
 
@@ -93,6 +94,40 @@ async function mergeDuplicateOpenShopSessions() {
   }
 }
 
+// Dual-Status Stock Inventory Workflow: every IngredientPurchase document
+// created before models/IngredientPurchase.js gained its `status` field has
+// no `status` in the actual stored document at all (Mongoose's schema
+// `default` only applies when a document is first created, never
+// retroactively to rows already sitting in MongoDB) - so a plain query
+// filter like `{ status: "received" }`, which the Ledger/Day-End/Inventory
+// report queries now all use, would silently stop matching every one of
+// them, making real historical purchases vanish from company dues and
+// expense reports. Every one of those legacy rows was, by the OLD
+// immediate-stock-effect behavior, already folded into
+// Ingredient.currentStock/averageCost the moment it was created - i.e.
+// already fully "received" in every way that matters - so backfilling them
+// as status:"received" (with receivedAt set to their own original
+// purchaseDate, since that's the closest real date to when the goods
+// actually arrived) is not a guess, it's just recording what already
+// happened. Uses an aggregation-pipeline update ($set reading another
+// field, "$purchaseDate") rather than a plain object update, since a plain
+// update can't copy one field's value into another. Runs on every startup
+// but only ever touches rows still missing `status`, so it's a no-op once
+// every row has been migrated once.
+async function backfillIngredientPurchaseStatus() {
+  try {
+    const result = await IngredientPurchase.updateMany(
+      { status: { $exists: false } },
+      [{ $set: { status: "received", receivedAt: "$purchaseDate" } }]
+    );
+    if (result.modifiedCount > 0) {
+      console.log(`[Seed] Backfilled status="received" on ${result.modifiedCount} pre-existing ingredient purchase(s).`);
+    }
+  } catch (error) {
+    console.error("[Seed] Failed to backfill ingredient purchase status:", error.message);
+  }
+}
+
 // Runs on every backend startup. Responsibilities, all safe to repeat:
 //
 // 1. Keep the Permission catalog collection in sync with
@@ -109,6 +144,9 @@ async function mergeDuplicateOpenShopSessions() {
 // 4. Merge away any duplicate simultaneously-open shop sessions and put
 //    the new one-open-session-per-shop unique index in place (see
 //    mergeDuplicateOpenShopSessions above).
+// 5. Backfill status="received" onto pre-existing IngredientPurchase rows
+//    that predate the Dual-Status Purchase Order workflow (see
+//    backfillIngredientPurchaseStatus above).
 module.exports = async function seedDefaults() {
   try {
     for (const permission of PERMISSIONS) {
@@ -141,6 +179,8 @@ module.exports = async function seedDefaults() {
     await ShopSession.syncIndexes().catch((error) => {
       console.error("[Seed] Failed to sync ShopSession indexes:", error.message);
     });
+
+    await backfillIngredientPurchaseStatus();
   } catch (error) {
     console.error("[Seed] Failed to run startup seed:", error.message);
   }

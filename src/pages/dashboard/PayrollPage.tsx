@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import {
   Banknote, Landmark, Calendar,
   AlertCircle, CheckCircle2, ChevronLeft, ChevronRight,
@@ -269,6 +270,9 @@ function RecordPaymentModal({ row, onClose, onSaved }: { row: PayrollRow; onClos
       setSubmitting(false);
     }
   };
+
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

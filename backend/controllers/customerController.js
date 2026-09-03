@@ -101,26 +101,52 @@ exports.updateCustomer = async (req, res) => {
   res.json(serializeCustomer(customer));
 };
 
-// GET /api/customers/ledger
+// GET /api/customers/ledger?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 // Per-customer statement: every order they've placed, how much of each
 // order they've paid, and what's still outstanding - plus the older
 // lump-sum `previousDues` figure (pre-dating per-order paid/remaining
 // tracking) folded into the same "total owed" number. This is a read
 // aggregation only; it doesn't change how paidAmount/remainingAmount are
 // written (that still happens in orderController).
+//
+// `startDate`/`endDate` are optional, plain `YYYY-MM-DD` strings (same
+// format LedgerPage.tsx's Date Range picker - and RecordPage.tsx's - use
+// for their `type="date"` inputs). When both are given, they scope which
+// orders count towards `orderCount`/`totalBilled`/`totalPaid`/`orders`/
+// `lastOrderAt` - i.e. what this statement shows as "activity in this
+// period". They deliberately do NOT touch `totalOrderBalance`/`totalDue`/
+// `previousDues`: those are this customer's real balance RIGHT NOW, and an
+// old unpaid order sitting outside the picked report period still
+// genuinely counts towards it - understating it just because it falls
+// outside the dates picked for a report would make the number actively
+// wrong, not just differently-scoped. This is the same "current balance
+// vs. period activity" split any real statement/ledger makes.
 exports.getCustomerLedger = async (req, res) => {
   try {
     const scope = shopScope(req);
+    const { startDate, endDate } = req.query;
+    let rangeStart = null;
+    let rangeEnd = null;
+    if (startDate && endDate) {
+      const parsedStart = new Date(`${startDate}T00:00:00.000Z`);
+      const parsedEnd = new Date(`${endDate}T23:59:59.999Z`);
+      if (!Number.isNaN(parsedStart.getTime()) && !Number.isNaN(parsedEnd.getTime())) {
+        rangeStart = parsedStart;
+        rangeEnd = parsedEnd;
+      }
+    }
+
     const [customers, orders] = await Promise.all([
       Customer.find(scope).sort({ name: 1 }).lean(),
       // Projected to just the fields this endpoint actually reads below -
       // an unprojected find() here pulls every order's full `items` array
       // and everything else across the shop's ENTIRE order history (this
-      // intentionally isn't date-bounded, since an old unpaid order must
-      // still count towards totalOrderBalance no matter how old it is), so
-      // on a shop with a large order history that was the main cost behind
-      // this endpoint occasionally being slow enough to hit the frontend's
-      // request timeout.
+      // intentionally isn't date-bounded at the query level, even when a
+      // report range is requested, since totalOrderBalance/totalDue below
+      // still need every order regardless of the picked range - see the
+      // comment above), so on a shop with a large order history that was
+      // the main cost behind this endpoint occasionally being slow enough
+      // to hit the frontend's request timeout.
       Order.find(
         { ...scope, "customer.phone": { $exists: true, $ne: "" } },
         "customer.phone dailyOrderNumber createdAt orderType status paymentMethod total paidAmount remainingAmount"
@@ -143,8 +169,9 @@ exports.getCustomerLedger = async (req, res) => {
       // totals, but still listed in the order history below for context.
       const billable = customerOrders.filter((order) => order.status !== "cancelled");
 
-      const totalBilled = billable.reduce((sum, order) => sum + (order.total || 0), 0);
-      const totalPaid = billable.reduce((sum, order) => sum + (order.paidAmount || 0), 0);
+      // Always computed from EVERY order this customer has ever placed,
+      // never scoped to the picked report range - see this function's own
+      // header comment for why.
       const totalOrderBalance = billable.reduce((sum, order) => {
         const remaining = typeof order.remainingAmount === "number"
           ? order.remainingAmount
@@ -153,24 +180,39 @@ exports.getCustomerLedger = async (req, res) => {
       }, 0);
       const previousDues = Number(customer.previousDues || 0);
 
+      // Everything else below (orderCount, totalBilled, totalPaid,
+      // lastOrderAt, the `orders` list itself) IS scoped to the picked
+      // range when one was given - this is "what happened in this
+      // period", the actual report content.
+      const periodOrders = rangeStart
+        ? customerOrders.filter((order) => {
+            const createdAt = new Date(order.createdAt);
+            return createdAt >= rangeStart && createdAt <= rangeEnd;
+          })
+        : customerOrders;
+      const periodBillable = periodOrders.filter((order) => order.status !== "cancelled");
+      const totalBilled = periodBillable.reduce((sum, order) => sum + (order.total || 0), 0);
+      const totalPaid = periodBillable.reduce((sum, order) => sum + (order.paidAmount || 0), 0);
+
       return {
         id: String(customer._id),
         name: customer.name,
         phone: customer.phone,
         address: customer.address || "",
         previousDues,
-        orderCount: customerOrders.length,
+        orderCount: periodOrders.length,
         totalBilled,
         totalPaid,
         totalOrderBalance,
         totalDue: totalOrderBalance + previousDues,
-        lastOrderAt: customerOrders[0]?.createdAt || null,
+        lastOrderAt: periodOrders[0]?.createdAt || null,
         // Manual add/settle entries (with whatever note the cashier typed)
         // - newest first. Merged client-side (DuesPage.tsx's History
         // dropdown) with the `orders` array below, which already carries
         // its own per-order trail (dailyOrderNumber, total, paid,
         // remaining) - so between the two, every rupee that makes up
-        // totalDue traces back to either a note or an order number.
+        // totalDue traces back to either a note or an order number. Not
+        // range-scoped, same reasoning as totalOrderBalance/totalDue above.
         duesHistory: (customer.duesHistory || [])
           .slice()
           .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
@@ -182,7 +224,7 @@ exports.getCustomerLedger = async (req, res) => {
             createdBy: entry.createdBy || "",
             createdAt: entry.createdAt,
           })),
-        orders: customerOrders.map((order) => ({
+        orders: periodOrders.map((order) => ({
           id: String(order._id),
           dailyOrderNumber: order.dailyOrderNumber,
           createdAt: order.createdAt,

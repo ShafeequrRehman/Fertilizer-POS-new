@@ -10,14 +10,18 @@ import {
   getPendingOrderEdits,
   getPendingOrderCancellations,
   markOrderCancellationFailed,
+  markOrderEditFailed,
+  markLocalOrderFailed,
   getSyncStatus,
   isLocalHubReachable,
   pushOrdersCache,
   pushReferenceData,
+  pushIngredientsCache,
   syncOrderCounter,
   syncLifetimeCounter,
   pushEmployeesCache,
   pushOccupiedTablesCache,
+  pushTablesCache,
   getPendingEmployeeCreates,
   ackEmployeeCreates,
   markEmployeeCreateFailed,
@@ -29,7 +33,7 @@ import {
   markEmployeeDeleteFailed,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, fetchShopProfile, openShopSession, fetchShopSessionStatus } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, fetchShopProfile, openShopSession, fetchShopSessionStatus, fetchIngredients, fetchIngredientCategories, fetchRecipes, fetchTables } from '@/lib/pos-api';
 import { shopApi } from '@/lib/shop-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
@@ -76,6 +80,15 @@ export interface OfflineSyncResult {
   cancellationsApplied?: number;
   cancellationsFailed?: number;
   wrongKeyOrderIds?: string[];
+  // Conflict resolution surfacing - see orderController.js's
+  // importOfflineOrders/importOfflineOrderUpdates for where these
+  // `reason`-tagged failures originate. Neither is retried into eventually
+  // succeeding on its own (a table conflict needs a different table, a
+  // version conflict needs the edit redone against fresh data) - these
+  // lists are what let DashboardShell.tsx flag them for a human instead of
+  // letting them silently keep failing in the background forever.
+  tableConflictOrderIds?: string[];
+  versionConflictOrderIds?: string[];
   error?: string;
 }
 
@@ -88,9 +101,9 @@ export interface OfflineSyncResult {
 // runSyncNow's order-import phase above is all they ever need. Never
 // throws - a failed edit is reported back but doesn't block the rest of
 // the sync tick (reference-data push, etc.).
-async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
+async function syncOrderEdits(): Promise<{ applied: number; failed: number; versionConflictOrderIds: string[] }> {
   const pendingEdits = await getPendingOrderEdits();
-  if (pendingEdits.length === 0) return { applied: 0, failed: 0 };
+  if (pendingEdits.length === 0) return { applied: 0, failed: 0, versionConflictOrderIds: [] };
 
   try {
     const response = await api.post('/orders/import-offline-updates', {
@@ -108,13 +121,16 @@ async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
         // ReceiptPrintWatcher never prints a receipt this till already
         // printed offline at completion time.
         receiptPrinted: edit.receiptPrinted,
+        // Conflict resolution - see localOrders.js's queueOrderEdit and
+        // importOfflineOrderUpdates's own comment on how this is used.
+        expectedVersion: edit.expectedVersion,
       })),
     });
 
-    const { applied = [], skipped = [] } = response.data as {
+    const { applied = [], skipped = [], failed: failedEntries = [] } = response.data as {
       applied: Array<{ localEditId: string }>;
       skipped: Array<{ localEditId: string }>;
-      failed: Array<{ localEditId: string; error: string }>;
+      failed: Array<{ localEditId: string; orderId?: string; error: string; reason?: string }>;
     };
 
     // A skipped edit (e.g. the order it targeted somehow no longer
@@ -123,9 +139,21 @@ async function syncOrderEdits(): Promise<{ applied: number; failed: number }> {
     const confirmedIds = [...applied, ...skipped].map((entry) => entry.localEditId);
     await ackOrderEdits(confirmedIds);
 
-    return { applied: applied.length, failed: pendingEdits.length - confirmedIds.length };
+    // A version-conflict failure never resolves itself by retrying - the
+    // edit was built against data another till has since changed. Mark it
+    // failed (surfaced on OfflineSyncPage.tsx, same as any other failed
+    // edit) so staff know to refresh and redo it, same "reject + flag"
+    // treatment as a wrong Cancel Order Key.
+    const versionConflictOrderIds = failedEntries
+      .filter((entry) => entry.reason === 'version_conflict' && entry.orderId)
+      .map((entry) => entry.orderId as string);
+    for (const entry of failedEntries) {
+      void markOrderEditFailed(entry.localEditId, entry.error);
+    }
+
+    return { applied: applied.length, failed: pendingEdits.length - confirmedIds.length, versionConflictOrderIds };
   } catch {
-    return { applied: 0, failed: pendingEdits.length };
+    return { applied: 0, failed: pendingEdits.length, versionConflictOrderIds: [] };
   }
 }
 
@@ -320,7 +348,7 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
           imported: 0,
           skipped: 0,
           failed: 0,
-          error: 'Could not reconcile the offline shop-open with the server yet - will retry automatically.',
+          error: 'Could not reconcile opening the restaurant offline with the server yet - will retry automatically.',
         };
       }
     }
@@ -328,6 +356,7 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
 
   const pending = await getPendingLocalOrders();
   let result: OfflineSyncResult = { imported: 0, skipped: 0, failed: 0 };
+  let tableConflictLocalOrderIds: string[] = [];
 
   if (pending.length > 0) {
     try {
@@ -349,14 +378,27 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
         })),
       });
 
-      const { imported = [], skipped = [] } = response.data as {
+      const { imported = [], skipped = [], failed: failedEntries = [] } = response.data as {
         imported: Array<{ localOrderId: string }>;
         skipped: Array<{ localOrderId: string }>;
-        failed: Array<{ localOrderId: string; error: string }>;
+        failed: Array<{ localOrderId: string; error: string; reason?: string }>;
       };
 
       const confirmedIds = [...imported, ...skipped].map((entry) => entry.localOrderId);
       await ackLocalOrders(confirmedIds);
+
+      // A table-conflict failure never resolves itself by retrying - the
+      // table it was queued against already has another device's order on
+      // it. Mark it failed (surfaced on OfflineSyncPage.tsx) so it's
+      // visible, and report the still-local order ids (see
+      // localOrderToSavedOrder's "local-" prefix) so DashboardShell.tsx can
+      // point staff at the "Change Table" action that unblocks it.
+      tableConflictLocalOrderIds = failedEntries
+        .filter((entry) => entry.reason === 'table_conflict')
+        .map((entry) => `local-${entry.localOrderId}`);
+      for (const entry of failedEntries) {
+        void markLocalOrderFailed(entry.localOrderId, entry.error);
+      }
 
       result = { imported: imported.length, skipped: skipped.length, failed: pending.length - confirmedIds.length };
     } catch (error) {
@@ -416,6 +458,8 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
     cancellationsApplied: cancellationsResult.applied,
     cancellationsFailed: cancellationsResult.failed,
     wrongKeyOrderIds: cancellationsResult.wrongKeyOrderIds,
+    tableConflictOrderIds: tableConflictLocalOrderIds,
+    versionConflictOrderIds: editsResult.versionConflictOrderIds,
   };
 }
 
@@ -482,6 +526,34 @@ export async function pushCurrentReferenceData(): Promise<void> {
   }
 }
 
+// Ingredient Stock / Recipe Management's own reference-data-shaped push -
+// see backend/localHub/ingredientsCache.js. Kept separate from
+// pushCurrentReferenceData above (rather than folded into one call) since
+// these are a different, larger dataset (a shop's full ingredient/recipe
+// catalog) that only IngredientStockSection.tsx/RecipeManagementSection.tsx
+// ever need, refreshed on the same best-effort background cadence.
+export async function pushCurrentIngredientsCache(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const [ingredients, categories, recipes] = await Promise.all([
+      fetchIngredients(),
+      fetchIngredientCategories(),
+      fetchRecipes(),
+    ]);
+
+    await pushIngredientsCache({
+      ingredients: ingredients || [],
+      categories: categories || [],
+      recipes: recipes || [],
+    });
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
 // The order-list counterpart to pushCurrentReferenceData above - see
 // orderCache.js / offline-order-helpers.ts's mergeOrdersForDisplay.
 // Bounded to the last 14 days for the same reason getOrders' `since`
@@ -539,6 +611,28 @@ export async function pushCurrentOccupiedTables(): Promise<void> {
   }
 }
 
+// The Dine-In table GRID's own cache - see backend/localHub/tablesCache.js.
+// Deliberately separate from pushCurrentOccupiedTables above (which only
+// ever pushes plain table NAMES that currently have a pending order) and
+// from pushCurrentReferenceData's `tables` field (a shop's plain custom
+// LABEL list, Shop.tables) - this pushes the real Table records
+// (id/name/isFamily/isActive) the grid itself renders/locks against, so a
+// till that goes offline still sees its actual configured tables instead
+// of an empty "No tables configured yet" picker (see POSPage.tsx's
+// loadProductsFromLocalHub).
+export async function pushCurrentTablesCache(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const tables = await fetchTables();
+    await pushTablesCache(tables || []);
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
 // Mounted once near the app root (see DashboardShell.tsx) so the 5-minute
 // timer runs for the lifetime of the dashboard session, independent of
 // which page is currently open. Also exposes a manual trigger + live
@@ -570,9 +664,11 @@ export function useOfflineSync() {
       setLastResult(result);
       setLastSyncAt(new Date());
       await pushCurrentReferenceData();
+      await pushCurrentIngredientsCache();
       await pushCurrentOrdersCache();
       await pushCurrentEmployeesCache();
       await pushCurrentOccupiedTables();
+      await pushCurrentTablesCache();
       await refreshStatus();
       return result;
     } finally {

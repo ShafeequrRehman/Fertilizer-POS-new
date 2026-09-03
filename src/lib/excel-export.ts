@@ -153,3 +153,18 @@ export function downloadExcelWorkbook(sheets: ExcelSheet[], filename: string): v
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+// Task 5 (Export & WhatsApp Supplier Communication): the same workbook as
+// downloadExcelWorkbook above, but as base64 bytes instead of a browser
+// download - what pos-api.ts's sendWhatsappDocument needs. The workbook is
+// plain UTF-8 XML text (not a binary format), so this only needs a
+// TextEncoder + a plain byte->base64 loop - no Blob/FileReader round trip
+// required the way the PDF export needs (see pdf-export.tsx's
+// pdfDocumentToBase64).
+export function excelWorkbookToBase64(sheets: ExcelSheet[]): string {
+  const xml = buildExcelWorkbookXml(sheets);
+  const bytes = new TextEncoder().encode(xml);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}

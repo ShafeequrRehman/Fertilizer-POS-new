@@ -121,7 +121,7 @@ function clearSavedOrderId(shopId: string) {
 }
 
 const TRACKING_LABELS: Record<string, { label: string; tone: string }> = {
-  awaiting_confirmation: { label: 'Waiting for the shop to accept your order', tone: 'bg-amber-50 text-amber-800' },
+  awaiting_confirmation: { label: 'Waiting for the restaurant to accept your order', tone: 'bg-amber-50 text-amber-800' },
   confirmed: { label: 'Order confirmed - getting started', tone: 'bg-blue-50 text-blue-800' },
   preparing: { label: 'Preparing your order', tone: 'bg-indigo-50 text-indigo-800' },
   ready: { label: 'Ready', tone: 'bg-emerald-50 text-emerald-800' },
@@ -501,7 +501,7 @@ function ChangeRequestModal({
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Anything else to tell the shop about this request..."
+          placeholder="Anything else to tell the restaurant about this request..."
           rows={2}
           className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none"
         />
@@ -514,7 +514,7 @@ function ChangeRequestModal({
           disabled={!canSubmit}
           className="mt-4 w-full rounded-2xl bg-[#E2F33C] py-3.5 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {submitting ? 'Sending Request...' : 'Send Request to Shop'}
+          {submitting ? 'Sending Request...' : 'Send Request to Restaurant'}
         </button>
       </div>
     </div>
@@ -684,7 +684,7 @@ function OrderStatusPanel({
 
         {changeRequest && changeRequest.status === 'pending' ? (
           <div className="mt-3 rounded-2xl bg-amber-50 p-4 text-left text-xs font-bold text-amber-800">
-            <p>Your change request is waiting for the shop's approval:</p>
+            <p>Your change request is waiting for the restaurant's approval:</p>
             <ul className="mt-1.5 space-y-0.5">
               {changeRequest.addItems.map((item, index) => (
                 <li key={`add-${index}`}>+ {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</li>
@@ -940,7 +940,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         setMenu(result);
       } catch (err) {
         const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-        setLoadError(message || "Couldn't load this shop's menu. Please try again.");
+        setLoadError(message || "Couldn't load this restaurant's menu. Please try again.");
       } finally {
         setLoading(false);
       }
@@ -1181,7 +1181,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
 
       {!menu?.isOpen ? (
         <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 p-4 text-xs font-bold text-amber-800">
-          <AlertCircle size={16} /> This shop is currently closed and isn't taking orders right now.
+          <AlertCircle size={16} /> This restaurant is currently closed and isn't taking orders right now.
         </div>
       ) : null}
 
@@ -1401,7 +1401,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 ) : null}
               </div>
               {paymentMethod === 'Online' ? (
-                <p className="text-[11px] font-semibold text-gray-400">You'll pay the shop directly online (bank transfer, EasyPaisa, or JazzCash) - they'll confirm your order once payment is received.</p>
+                <p className="text-[11px] font-semibold text-gray-400">You'll pay the restaurant directly online (bank transfer, EasyPaisa, or JazzCash) - they'll confirm your order once payment is received.</p>
               ) : paymentMethod === 'JazzCash' || paymentMethod === 'EasyPaisa' ? (
                 <p className="text-[11px] font-semibold text-gray-400">You'll be taken to {paymentMethod}'s secure payment page next - your order is confirmed automatically once payment clears.</p>
               ) : null}

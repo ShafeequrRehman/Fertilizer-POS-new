@@ -237,7 +237,7 @@ export function TableManagementSection({
             type="button"
             onClick={() => void handleSaveTurnoverMinutes()}
             disabled={isSavingTurnover || isLoadingTurnover}
-            className="glass-dark rounded-2xl px-4 py-2.5 text-xs font-black disabled:cursor-not-allowed disabled:opacity-60"
+            className="glass-dark rounded-2xl px-4 py-2.5 text-xs font-normal disabled:cursor-not-allowed disabled:opacity-60"
           >
             Save
           </button>
@@ -271,7 +271,7 @@ export function TableManagementSection({
           type="button"
           onClick={() => void handleAddTable()}
           disabled={isSaving}
-          className="glass-dark inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
+          className="glass-dark inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-normal disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Plus size={16} />
           Add Table
@@ -315,7 +315,7 @@ export function TableManagementSection({
                       type="button"
                       onClick={() => void handleSaveTable(table.id)}
                       disabled={isSaving}
-                      className="rounded-2xl border-[0.5px] border-white/30 bg-gradient-to-b from-indigo-500 to-indigo-700 px-4 py-2 text-xs font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded-2xl border-[0.5px] border-white/30 bg-gradient-to-b from-indigo-500 to-indigo-700 px-4 py-2 text-xs font-normal text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       Save
                     </button>
@@ -325,7 +325,7 @@ export function TableManagementSection({
                         setEditingTableId(null);
                         setEditingTableName("");
                       }}
-                      className="glass-pill rounded-2xl px-4 py-2 text-xs font-black text-slate-700"
+                      className="glass-pill rounded-2xl px-4 py-2 text-xs font-normal text-slate-700"
                     >
                       Cancel
                     </button>
@@ -337,7 +337,7 @@ export function TableManagementSection({
                       setEditingTableId(table.id);
                       setEditingTableName(table.name);
                     }}
-                    className="glass-pill inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-xs font-black text-slate-700"
+                    className="glass-pill inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-xs font-normal text-slate-700"
                   >
                     <Pencil size={14} />
                     Update
@@ -348,7 +348,7 @@ export function TableManagementSection({
                   type="button"
                   onClick={() => void handleToggleFamily(table)}
                   disabled={isSaving}
-                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-xs font-black disabled:cursor-not-allowed disabled:opacity-60 ${table.isFamily ? "border-[0.5px] border-white/30 bg-gradient-to-b from-pink-400 to-pink-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(157,23,77,0.5)]" : "glass-pill text-slate-700"}`}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-xs font-normal disabled:cursor-not-allowed disabled:opacity-60 ${table.isFamily ? "border-[0.5px] border-white/30 bg-gradient-to-b from-pink-400 to-pink-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(157,23,77,0.5)]" : "glass-pill text-slate-700"}`}
                 >
                   <Heart size={14} fill={table.isFamily ? "currentColor" : "none"} />
                   {table.isFamily ? "Family Table" : "Mark as Family"}
@@ -358,7 +358,7 @@ export function TableManagementSection({
                   type="button"
                   onClick={() => void handleToggleActive(table)}
                   disabled={isSaving}
-                  className="glass-pill rounded-2xl px-4 py-2 text-xs font-black text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="glass-pill rounded-2xl px-4 py-2 text-xs font-normal text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {table.isActive ? "Deactivate" : "Activate"}
                 </button>
@@ -367,7 +367,7 @@ export function TableManagementSection({
                   type="button"
                   onClick={() => void handleDeleteTable(table)}
                   disabled={isSaving}
-                  className="inline-flex items-center gap-2 rounded-2xl bg-rose-50/70 px-4 py-2 text-xs font-black text-rose-600 shadow-inner disabled:cursor-not-allowed disabled:opacity-60"
+                  className="inline-flex items-center gap-2 rounded-2xl bg-rose-50/70 px-4 py-2 text-xs font-normal text-rose-600 shadow-inner disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Trash2 size={14} />
                   Delete

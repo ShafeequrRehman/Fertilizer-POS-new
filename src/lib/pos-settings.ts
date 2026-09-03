@@ -15,9 +15,7 @@ export type StoreSettings = {
   // required at signup/login, so unlike businessEmail they can't be blank.
   loginUsername?: string;
   shopName?: string;
-  storeName: string;
   businessEmail: string;
-  storeAddress: string;
   currency: string;
   timezone: string;
   taxRate: number;
@@ -46,9 +44,7 @@ export type StoreSettings = {
 };
 
 export const defaultSettings: StoreSettings = {
-  storeName: "Vanguard Retail Center",
   businessEmail: "admin@vanguard.io",
-  storeAddress: "782 Fintech Avenue, Silicon Valley, CA 94043",
   currency: "PKR (₨)",
   timezone: "Asia/Karachi",
   // No tax is added by default - the backend always computes tax as 0

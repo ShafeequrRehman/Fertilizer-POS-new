@@ -4,7 +4,7 @@ const Role = require("../models/Role");
 const Shop = require("../models/Shop");
 const Plan = require("../models/Plan");
 const StaffPayment = require("../models/StaffPayment");
-const { PERMISSIONS, PERMISSION_KEYS } = require("../config/permissions");
+const { PERMISSIONS, PERMISSION_KEYS, DEFAULT_ROLE_PRESETS } = require("../config/permissions");
 
 function safeUser(user) {
   const obj = user.toObject ? user.toObject() : user;
@@ -41,9 +41,16 @@ exports.createEmployee = async (req, res) => {
     const {
       name, username, password, email, phone, roleId,
       designation, idCardNumber, address, vehicleNumber, reference, comment, monthlySalary,
+      extraPermissions, revokedPermissions,
     } = req.body;
     if (!username || !password || !roleId) {
       return res.status(400).json({ message: "username, password, and roleId are required", reason: "validation_error" });
+    }
+    if (extraPermissions !== undefined && !validatePermissionKeys(extraPermissions)) {
+      return res.status(400).json({ message: "extraPermissions contains an unknown permission key", reason: "invalid_permissions" });
+    }
+    if (revokedPermissions !== undefined && !validatePermissionKeys(revokedPermissions)) {
+      return res.status(400).json({ message: "revokedPermissions contains an unknown permission key", reason: "invalid_permissions" });
     }
 
     const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId }).lean();
@@ -85,6 +92,8 @@ exports.createEmployee = async (req, res) => {
       reference: reference || "",
       comment: comment || "",
       monthlySalary: Number(monthlySalary) || 0,
+      extraPermissions: Array.isArray(extraPermissions) ? extraPermissions : [],
+      revokedPermissions: Array.isArray(revokedPermissions) ? revokedPermissions : [],
     });
 
     res.status(201).json({ ...safeUser(employee), roleName: role.name, permissions: role.permissions });
@@ -102,7 +111,15 @@ exports.updateEmployee = async (req, res) => {
     const {
       name, email, phone, roleId, isActive, username,
       designation, idCardNumber, address, vehicleNumber, reference, comment, monthlySalary,
+      extraPermissions, revokedPermissions,
     } = req.body;
+
+    if (extraPermissions !== undefined && !validatePermissionKeys(extraPermissions)) {
+      return res.status(400).json({ message: "extraPermissions contains an unknown permission key", reason: "invalid_permissions" });
+    }
+    if (revokedPermissions !== undefined && !validatePermissionKeys(revokedPermissions)) {
+      return res.status(400).json({ message: "revokedPermissions contains an unknown permission key", reason: "invalid_permissions" });
+    }
 
     if (username && username !== employee.username) {
       const clash = await User.findOne({ username, _id: { $ne: employee._id } }).lean();
@@ -120,6 +137,8 @@ exports.updateEmployee = async (req, res) => {
     if (reference !== undefined) employee.reference = reference;
     if (comment !== undefined) employee.comment = comment;
     if (monthlySalary !== undefined) employee.monthlySalary = Number(monthlySalary) || 0;
+    if (extraPermissions !== undefined) employee.extraPermissions = extraPermissions;
+    if (revokedPermissions !== undefined) employee.revokedPermissions = revokedPermissions;
 
     if (roleId) {
       const role = await Role.findOne({ _id: roleId, shopId: req.user.shopId }).lean();
@@ -301,9 +320,34 @@ exports.deletePayment = async (req, res) => {
 // Roles (per-shop permission sets employees are assigned to)
 // ---------------------------------------------------------------------
 
+// Shops created before the Receptionist/Stock Manager roles existed never
+// got them seeded (DEFAULT_ROLE_PRESETS only runs once, at shop-creation -
+// see superAdminController.createShop / scripts/migrateToMultiTenant.js).
+// Rather than a one-off migration script every existing shop's owner would
+// need to know to run, this idempotently backfills just those two specific
+// roles - by name, so it never touches a shop that already has them
+// (including one where the owner renamed or deleted their own copy; it
+// won't fight that choice by re-creating it every time). Cheap enough to
+// run on every listRoles call: two more Role documents to check for, once,
+// the first time this shop's owner opens the Roles tab after upgrading.
+async function ensureDefaultRolesSeeded(shopId) {
+  const namesToSeed = Object.keys(DEFAULT_ROLE_PRESETS).filter((name) =>
+    ["Receptionist", "Stock Manager"].includes(name)
+  );
+  const existing = await Role.find({ shopId, name: { $in: namesToSeed } }).select("name").lean();
+  const existingNames = new Set(existing.map((role) => role.name));
+  const missing = namesToSeed.filter((name) => !existingNames.has(name));
+  if (missing.length === 0) return;
+
+  await Role.insertMany(
+    missing.map((name) => ({ shopId, name, permissions: DEFAULT_ROLE_PRESETS[name], isSystem: true }))
+  );
+}
+
 // GET /api/shop/roles
 exports.listRoles = async (req, res) => {
   try {
+    await ensureDefaultRolesSeeded(req.user.shopId);
     res.json(await Role.find({ shopId: req.user.shopId }).sort({ name: 1 }).lean());
   } catch (error) {
     res.status(500).json({ message: "Failed to load roles", detail: error.message });
@@ -313,13 +357,13 @@ exports.listRoles = async (req, res) => {
 // POST /api/shop/roles
 exports.createRole = async (req, res) => {
   try {
-    const { name, permissions } = req.body;
+    const { name, permissions, hideDashboard } = req.body;
     if (!name) return res.status(400).json({ message: "name is required", reason: "validation_error" });
     if (permissions !== undefined && !validatePermissionKeys(permissions)) {
       return res.status(400).json({ message: "permissions contains an unknown permission key", reason: "invalid_permissions" });
     }
 
-    const role = await Role.create({ shopId: req.user.shopId, name, permissions: permissions || [] });
+    const role = await Role.create({ shopId: req.user.shopId, name, permissions: permissions || [], hideDashboard: Boolean(hideDashboard) });
     res.status(201).json(role);
   } catch (error) {
     if (error.code === 11000) return res.status(400).json({ message: "A role with that name already exists for your shop", reason: "duplicate_role" });
@@ -333,7 +377,7 @@ exports.updateRole = async (req, res) => {
     const role = await Role.findOne({ _id: req.params.id, shopId: req.user.shopId });
     if (!role) return res.status(404).json({ message: "Role not found" });
 
-    const { name, permissions } = req.body;
+    const { name, permissions, hideDashboard } = req.body;
     if (permissions !== undefined) {
       if (!validatePermissionKeys(permissions)) {
         return res.status(400).json({ message: "permissions contains an unknown permission key", reason: "invalid_permissions" });
@@ -341,6 +385,7 @@ exports.updateRole = async (req, res) => {
       role.permissions = permissions;
     }
     if (name !== undefined) role.name = name;
+    if (hideDashboard !== undefined) role.hideDashboard = Boolean(hideDashboard);
 
     await role.save();
     res.json(role);

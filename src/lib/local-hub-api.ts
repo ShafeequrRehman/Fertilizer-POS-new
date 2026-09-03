@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { getIpcRenderer } from '@/lib/electron-bridge';
 import { isDesktopApp } from '@/lib/api';
+import type { Table } from '@/lib/pos-types';
 
 // Talks to THIS till's own Local Hub (backend/localHub/server.js), always
 // on localhost since it's embedded in this same Electron app - never the
@@ -248,6 +249,55 @@ export async function getReferenceData(): Promise<ReferenceDataSnapshot> {
   return response.data;
 }
 
+// --- Ingredient Stock / Recipe Management offline snapshot ----------------
+// See backend/localHub/ingredientsCache.js for the full design - a
+// read-only cache (ingredients, categories, recipes) pushed down while
+// online, read back by IngredientStockSection.tsx/RecipeManagementSection.tsx
+// the moment a live cloud call fails, so those screens show cached data
+// with an offline estimate layered on top (see
+// offline-ingredient-helpers.ts) instead of a blank error state.
+export interface IngredientsCacheSnapshot {
+  updatedAt: string | null;
+  ingredients: unknown[];
+  categories: unknown[];
+  recipes: unknown[];
+}
+
+export async function pushIngredientsCache(data: { ingredients: unknown[]; categories: unknown[]; recipes: unknown[] }) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/ingredients-cache', data);
+}
+
+export async function getIngredientsCache(): Promise<IngredientsCacheSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<IngredientsCacheSnapshot>('/ingredients-cache');
+  return response.data;
+}
+
+// --- Dine-In table grid offline snapshot ----------------------------------
+// See backend/localHub/tablesCache.js for the full design - a read-only
+// cache of this shop's real Table records (id/name/isFamily/isActive),
+// pushed down while online, read back by POSPage.tsx the moment a live
+// GET /tables call fails. Deliberately separate from ReferenceDataSnapshot's
+// own `tables` field above (that one is just a shop's plain custom table-
+// name LABELS, Shop.tables) - this is the richer per-table record set the
+// Dine-In grid actually renders/locks against.
+export interface TablesCacheSnapshot {
+  updatedAt: string | null;
+  tables: Table[];
+}
+
+export async function pushTablesCache(tables: Table[]) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/tables-cache', { tables });
+}
+
+export async function getTablesCache(): Promise<TablesCacheSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<TablesCacheSnapshot>('/tables-cache');
+  return response.data;
+}
+
 export async function createLocalOrder(
   payload: object,
   actor?: { name?: string; deviceLabel?: string },
@@ -327,6 +377,11 @@ export interface LocalOrderEditRecord {
   // Delivery orders print their receipt at completion, not placement - see
   // SalesPage.tsx's saveUpdate).
   receiptPrinted?: boolean;
+  // Conflict resolution - the order.version this till last knew about when
+  // the edit was queued. See orderController.js's importOfflineOrderUpdates
+  // for how a mismatch (another till changed this order first) gets
+  // rejected and flagged instead of silently applied.
+  expectedVersion?: number;
 }
 
 // Mutates a still-unsynced local order's own queued payload directly -
@@ -349,9 +404,10 @@ export async function queueOrderEdit(
   actor?: { name?: string; deviceLabel?: string },
   kitchenPrinted = false,
   receiptPrinted = false,
+  expectedVersion?: number,
 ): Promise<LocalOrderEditRecord> {
   if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor, kitchenPrinted, receiptPrinted });
+  const response = await hub.post<LocalOrderEditRecord>(`/orders/${orderId}/edits`, { payload, actor, kitchenPrinted, receiptPrinted, expectedVersion });
   return response.data;
 }
 

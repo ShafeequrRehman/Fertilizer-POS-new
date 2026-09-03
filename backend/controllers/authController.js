@@ -29,10 +29,35 @@ function redirectPathFor(role) {
 // Employee permissions are resolved from their assigned Role at the moment
 // a token is issued (login or refresh), then denormalized into the JWT -
 // see auth/tokenService.js for the tradeoffs of that approach.
+//
+// Dynamic Permissions: the role's own set is only the DEFAULT - a Shop
+// Owner can grant this one account an extra key their role doesn't have
+// (User.extraPermissions) or take one away that their role does grant
+// (User.revokedPermissions), edited per-account from Manage Staff (see
+// shopOwnerController.updateEmployee). revokedPermissions is applied last
+// so an explicit revoke always wins over both the role AND an extra grant -
+// there's no way to end up with a key that's simultaneously "revoked" and
+// still present.
 async function resolveEmployeePermissions(user) {
-  if (user.role !== "employee" || !user.employeeRoleId) return [];
-  const role = await Role.findById(user.employeeRoleId).lean();
-  return role ? role.permissions : [];
+  if (user.role !== "employee") return [];
+  const role = user.employeeRoleId ? await Role.findById(user.employeeRoleId).lean() : null;
+  const base = role ? role.permissions : [];
+  const extra = Array.isArray(user.extraPermissions) ? user.extraPermissions : [];
+  const revoked = new Set(Array.isArray(user.revokedPermissions) ? user.revokedPermissions : []);
+  return Array.from(new Set([...base, ...extra])).filter((key) => !revoked.has(key));
+}
+
+// Dashboard Permission Gate: whether THIS employee's assigned Role has the
+// "Hide Dashboard" toggle set (see Role.js's own comment on why this is a
+// standalone opt-out flag rather than a `permissions` entry). Always false
+// for a Shop Owner/Super Admin - same "can never be locked out of their
+// own shop" rule every other permission check in this app already follows
+// (see hasPermission/requirePermission short-circuiting true for those
+// roles) - so this is only ever even consulted for role === "employee".
+async function resolveHideDashboard(user) {
+  if (user.role !== "employee" || !user.employeeRoleId) return false;
+  const role = await Role.findById(user.employeeRoleId).select("hideDashboard").lean();
+  return Boolean(role?.hideDashboard);
 }
 
 async function issueTokenPair(user, permissions) {
@@ -183,6 +208,7 @@ exports.login = async (req, res) => {
 
     // 6. generate JWT (+ refresh token)
     const permissions = await resolveEmployeePermissions(user);
+    const hideDashboard = await resolveHideDashboard(user);
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueTokenPair(user, permissions);
 
     // 7. redirect according to role
@@ -194,6 +220,7 @@ exports.login = async (req, res) => {
       shop: { id: shop._id, name: shop.name, status: shop.status, enabledPages: shop.enabledPages ?? null },
       license: { status: license.status, expiryDate: license.expiryDate },
       permissions,
+      hideDashboard,
       redirectTo: redirectPathFor(user.role),
     });
   } catch (error) {

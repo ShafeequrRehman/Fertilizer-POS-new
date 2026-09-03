@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Plus, KeyRound, Trash2, X, ShieldCheck, RefreshCcw, Pencil, WifiOff, Eye } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useBackspaceToClose } from "@/lib/keyboard-shortcuts";
+import { Plus, KeyRound, Trash2, X, ShieldCheck, ShieldPlus, RefreshCcw, Pencil, WifiOff, Eye } from "lucide-react";
 import { shopApi, type EmployeeSummary, type RoleSummary, type PermissionDef } from "@/lib/shop-api";
 import { STAFF_DESIGNATIONS } from "@/lib/staff-designations";
 import { useToast } from "@/lib/toast";
@@ -34,6 +35,10 @@ export default function EmployeesPage() {
   const [viewTarget, setViewTarget] = useState<EmployeeSummary | null>(null);
   const [showRoleEditor, setShowRoleEditor] = useState<RoleSummary | "new" | null>(null);
   const [resetTarget, setResetTarget] = useState<EmployeeSummary | null>(null);
+  // Dynamic Permissions: per-account grant/revoke on top of whatever
+  // employeeRoleId's own permission set defaults to - see
+  // EmployeePermissionsModal's own comment.
+  const [permTarget, setPermTarget] = useState<EmployeeSummary | null>(null);
 
   // Desktop + genuinely offline (the network-status hook does a real
   // backend round-trip, not just navigator.onLine - see network-status.ts)
@@ -217,6 +222,9 @@ export default function EmployeesPage() {
                         <button type="button" title="Edit staff details" onClick={() => setEditTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
                           <Pencil size={15} />
                         </button>
+                        <button type="button" title="Grant or revoke individual permissions" onClick={() => setPermTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
+                          <ShieldPlus size={15} />
+                        </button>
                         <button type="button" title="Reset password" onClick={() => setResetTarget(emp)} className="rounded-full border border-gray-200 p-2 text-gray-500 hover:bg-gray-100">
                           <KeyRound size={15} />
                         </button>
@@ -242,6 +250,9 @@ export default function EmployeesPage() {
                   <button type="button" onClick={() => removeRole(role)} className="text-gray-400 hover:text-red-500"><Trash2 size={14} /></button>
                 </div>
               </div>
+              {role.hideDashboard ? (
+                <span className="mb-1.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Hides Dashboard</span>
+              ) : null}
               <div className="flex flex-wrap gap-1.5">
                 {role.permissions.length === 0 ? (
                   <span className="text-xs text-gray-400">No permissions assigned</span>
@@ -270,6 +281,15 @@ export default function EmployeesPage() {
           onEdit={() => { setEditTarget(viewTarget); setViewTarget(null); }}
         />
       ) : null}
+      {permTarget ? (
+        <EmployeePermissionsModal
+          employee={permTarget}
+          roles={roles}
+          permissions={permissions}
+          onClose={() => setPermTarget(null)}
+          onSaved={load}
+        />
+      ) : null}
       {showRoleEditor ? (
         <RoleEditorModal
           role={showRoleEditor === "new" ? null : showRoleEditor}
@@ -296,6 +316,8 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 }
 
 function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  useBackspaceToClose(onClose);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
@@ -614,6 +636,11 @@ function RoleEditorModal({
 }) {
   const [name, setName] = useState(role?.name || "");
   const [selected, setSelected] = useState<Set<string>>(new Set(role?.permissions || []));
+  // Dashboard Permission Gate: "If a specific staff role has this
+  // permission restricted, they must not see or access the main Dashboard
+  // page upon logging in." Defaults to false (Dashboard visible, same as
+  // every role before this existed) - only an explicit check hides it.
+  const [hideDashboard, setHideDashboard] = useState(Boolean(role?.hideDashboard));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -634,7 +661,7 @@ function RoleEditorModal({
     setSubmitting(true);
     setError("");
     try {
-      const payload = { name, permissions: Array.from(selected) };
+      const payload = { name, permissions: Array.from(selected), hideDashboard };
       if (role) {
         await shopApi.updateRole(role._id, payload);
       } else {
@@ -653,6 +680,15 @@ function RoleEditorModal({
     <ModalShell title={role ? `Edit Role — ${role.name}` : "New Role"} onClose={onClose}>
       <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
         <TextField label="Role Name" value={name} onChange={setName} />
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5" checked={hideDashboard} onChange={(e) => setHideDashboard(e.target.checked)} />
+            <span>
+              <span className="font-medium">Hide Dashboard</span>
+              <span className="block text-xs text-gray-500">Staff with this role won't see or be able to open the main Dashboard home page after logging in - they land on their first available page instead.</span>
+            </span>
+          </label>
+        </div>
         {Object.entries(grouped).map(([module, perms]) => (
           <div key={module}>
             <div className="mb-1 text-xs font-semibold uppercase text-gray-400">{module}</div>
@@ -673,6 +709,117 @@ function RoleEditorModal({
       {error ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{error}</div> : null}
       <button type="button" disabled={submitting || !name} onClick={submit} className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white disabled:opacity-50">
         {submitting ? "Saving..." : "Save Role"}
+      </button>
+    </ModalShell>
+  );
+}
+
+// Dynamic Permissions: "the Admin must have the capability to manually
+// edit an individual staff account later to grant or revoke specific
+// additional page permissions dynamically" - every checkbox starts at
+// exactly what this ONE account's role grants (roleBasePermissions), so an
+// admin only ever has to touch the handful of keys they actually want to
+// differ. Saving computes the diff against that same base and sends it as
+// two small arrays (extraPermissions/revokedPermissions) rather than one
+// flat "final list" - that's what backend/models/User.js actually stores,
+// so the override survives the employee later being reassigned to a
+// different role (see authController.resolveEmployeePermissions).
+function EmployeePermissionsModal({
+  employee,
+  roles,
+  permissions,
+  onClose,
+  onSaved,
+}: {
+  employee: EmployeeSummary;
+  roles: RoleSummary[];
+  permissions: PermissionDef[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const roleBasePermissions = useMemo(() => {
+    if (employee.employeeRoleId && typeof employee.employeeRoleId === "object") return employee.employeeRoleId.permissions;
+    return roles.find((r) => r._id === employee.employeeRoleId)?.permissions || [];
+  }, [employee, roles]);
+  const roleBaseSet = new Set(roleBasePermissions);
+
+  const [selected, setSelected] = useState<Set<string>>(() => {
+    const extra = employee.extraPermissions || [];
+    const revoked = new Set(employee.revokedPermissions || []);
+    return new Set([...roleBasePermissions, ...extra].filter((key) => !revoked.has(key)));
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const grouped = permissions.reduce<Record<string, PermissionDef[]>>((acc, p) => {
+    (acc[p.module] ||= []).push(p);
+    return acc;
+  }, {});
+
+  const toggle = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError("");
+    try {
+      const extraPermissions = Array.from(selected).filter((key) => !roleBaseSet.has(key));
+      const revokedPermissions = roleBasePermissions.filter((key) => !selected.has(key));
+      await shopApi.updateEmployee(employee._id, { extraPermissions, revokedPermissions });
+      toast.success(`Permissions updated for "${employee.name}".`);
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Failed to save permissions");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ModalShell title={`Permissions — ${employee.name}`} onClose={onClose}>
+      <p className="mb-4 text-xs text-gray-500">
+        Starts from this account's role. Check a box to grant that permission to <span className="font-semibold">{employee.name}</span> specifically; uncheck one their role would otherwise grant to take it away - just for this account.
+      </p>
+      <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+        {Object.entries(grouped).map(([module, perms]) => (
+          <div key={module}>
+            <div className="mb-1 text-xs font-semibold uppercase text-gray-400">{module}</div>
+            <div className="space-y-1">
+              {perms.map((p) => {
+                const fromRole = roleBaseSet.has(p.key);
+                const isChecked = selected.has(p.key);
+                const isOverridden = isChecked !== fromRole;
+                return (
+                  <label key={p.key} className="flex items-start gap-2 text-sm">
+                    <input type="checkbox" className="mt-0.5" checked={isChecked} onChange={() => toggle(p.key)} />
+                    <span>
+                      <span className="font-medium">{p.label}</span>
+                      {isOverridden ? (
+                        <span className={`ml-2 rounded-full px-1.5 py-0.5 text-[10px] font-bold uppercase ${isChecked ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-600"}`}>
+                          {isChecked ? "Added" : "Removed"}
+                        </span>
+                      ) : fromRole ? (
+                        <span className="ml-2 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-gray-500">Role default</span>
+                      ) : null}
+                      <span className="block text-xs text-gray-400">{p.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      {error ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{error}</div> : null}
+      <button type="button" disabled={submitting} onClick={submit} className="mt-4 w-full rounded-lg bg-black py-2 font-bold text-white disabled:opacity-50">
+        {submitting ? "Saving..." : "Save Permissions"}
       </button>
     </ModalShell>
   );

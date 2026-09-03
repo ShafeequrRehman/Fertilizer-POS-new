@@ -8,6 +8,8 @@ const orderCache = require("./orderCache");
 const localStaff = require("./localStaff");
 const employeesCache = require("./employeesCache");
 const occupiedTablesCache = require("./occupiedTablesCache");
+const ingredientsCache = require("./ingredientsCache");
+const tablesCache = require("./tablesCache");
 
 // The Local Hub: a small, self-contained Express server that runs inside
 // the desktop (Electron) app ALWAYS, independent of whether this till
@@ -215,6 +217,30 @@ app.get("/occupied-tables-cache", requirePairingKey, (req, res) => {
   res.json(occupiedTablesCache.get());
 });
 
+// Ingredient Stock / Recipe Management offline snapshot - see
+// ingredientsCache.js for the full design. Same push (loopback)/read
+// (pairing-key) shape as the caches above.
+app.post("/ingredients-cache", requireLoopback, (req, res) => {
+  const snapshot = ingredientsCache.set(req.body || {});
+  res.json(snapshot);
+});
+
+app.get("/ingredients-cache", requirePairingKey, (req, res) => {
+  res.json(ingredientsCache.get());
+});
+
+// Dine-In table grid offline snapshot - see tablesCache.js for the full
+// design. Same push (loopback)/read (pairing-key) shape as the caches
+// above.
+app.post("/tables-cache", requireLoopback, (req, res) => {
+  const snapshot = tablesCache.set(req.body?.tables);
+  res.json(snapshot);
+});
+
+app.get("/tables-cache", requirePairingKey, (req, res) => {
+  res.json(tablesCache.get());
+});
+
 // Queue an order locally - called by a paired phone's Checkout screen, or
 // by the till's own POS page, whenever the cloud is unreachable.
 app.post("/orders", requirePairingKey, (req, res) => {
@@ -283,7 +309,14 @@ app.patch("/orders/local/:localId", requirePairingKey, (req, res) => {
 // Case 2: the order already has a real cloud _id - queue the edit for the
 // sync engine to replay against the real document.
 app.post("/orders/:orderId/edits", requirePairingKey, (req, res) => {
-  const record = localOrders.queueOrderEdit(req.params.orderId, req.body?.payload || {}, req.body?.actor || null, !!req.body?.kitchenPrinted, !!req.body?.receiptPrinted);
+  const record = localOrders.queueOrderEdit(
+    req.params.orderId,
+    req.body?.payload || {},
+    req.body?.actor || null,
+    !!req.body?.kitchenPrinted,
+    !!req.body?.receiptPrinted,
+    typeof req.body?.expectedVersion === "number" ? req.body.expectedVersion : undefined
+  );
   res.status(201).json(record);
 });
 

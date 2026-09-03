@@ -16,12 +16,31 @@ const PERMISSIONS = [
   { key: "sales.refund", label: "Refund Sales", module: "Sales", description: "Process refunds on completed orders." },
   { key: "sales.print", label: "Print Bills", module: "Sales", description: "Print or reprint customer and kitchen receipts." },
   { key: "inventory.manage", label: "Manage Inventory", module: "Inventory", description: "Add, edit, and manage products, categories, and stock levels." },
+  // Narrower than inventory.manage - grants the Ingredient Stock page
+  // (ingredients, categories, incoming purchases) WITHOUT Recipe
+  // Management access. Introduced for the Stock Manager role (see
+  // DEFAULT_ROLE_PRESETS below), whose whole job is tracking raw stock and
+  // supplier dues, not defining how much of each ingredient a recipe uses.
+  // Every route that already accepts inventory.manage for ingredient/
+  // purchase access accepts this too (see middleware/requireAnyPermission.js
+  // and its callers) - inventory.manage still covers everything stock.manage
+  // does, for roles (Manager, Store Keeper) that should keep seeing both
+  // Ingredient Stock and Recipe Management.
+  { key: "stock.manage", label: "Manage Ingredient Stock", module: "Inventory", description: "Add ingredients/categories, log incoming purchases, and manage supplier records - without Recipe Management access." },
   { key: "customers.manage", label: "Manage Customers", module: "Customers", description: "Add, edit, and search customer records." },
   { key: "dues.manage", label: "Manage Customer Dues", module: "Customers", description: "Adjust and clear customer outstanding balances." },
   { key: "suppliers.manage", label: "Manage Suppliers", module: "Purchasing", description: "Add, edit, and manage supplier records." },
   { key: "purchases.manage", label: "Manage Purchases", module: "Purchasing", description: "Create and manage purchase orders." },
   { key: "expenses.manage", label: "Manage Expenses", module: "Accounting", description: "Record and manage shop expenses." },
   { key: "reports.view", label: "View Reports", module: "Reports", description: "View sales, inventory, and financial reports." },
+  // Two narrow slices of "Reports" for roles that must never see
+  // restaurant-wide revenue/COGS/net-profit figures (see
+  // reportController.getMySalesReport / getInventoryReport, which return
+  // only the data these keys authorize - not just a UI-hidden superset of
+  // the full report). Independent of reports.view: a role can hold one,
+  // both, or neither of these without ever gaining the full Day-End report.
+  { key: "reports.view.own_sales", label: "View Own Sales Report", module: "Reports", description: "View only their own daily personal sales - no restaurant-wide analytics, cost, or profit figures." },
+  { key: "reports.view.inventory", label: "View Inventory Reports", module: "Reports", description: "View kitchen stock purchase logs and supplier dues - no revenue or profit figures." },
   { key: "employees.manage", label: "Manage Employees", module: "Employees", description: "Create, edit, and remove employee accounts and roles." },
   { key: "settings.manage", label: "Manage Settings", module: "Settings", description: "Change shop profile, receipt, and hardware settings." },
   { key: "whatsapp.manage", label: "Manage WhatsApp", module: "Settings", description: "Connect WhatsApp and send messages to customers." },
@@ -43,6 +62,18 @@ const DEFAULT_ROLE_PRESETS = {
   ],
   Accountant: ["reports.view", "expenses.manage", "purchases.manage", "dues.manage"],
   "Store Keeper": ["inventory.manage", "suppliers.manage", "purchases.manage"],
+  // Front-of-house only: POS + Sales + printing bills, and their own daily
+  // sales figures - deliberately NOTHING else (no inventory, no customer/
+  // dues management, no the full Reports page). See dashboard-pages.ts's
+  // own comment on how this maps to sidebar visibility.
+  Receptionist: ["sales.create", "sales.print", "reports.view.own_sales"],
+  // Kitchen stock only: ingredients, categories, purchase logging, and
+  // supplier records - deliberately NOT inventory.manage (which would also
+  // unlock Recipe Management) and NOT purchases.manage (which would also
+  // unlock the standalone Purchase page) - see requireAnyPermission.js's
+  // callers for how stock.manage alone still covers real ingredient/
+  // purchase actions.
+  "Stock Manager": ["stock.manage", "suppliers.manage", "reports.view.inventory"],
 };
 
 module.exports = { PERMISSIONS, PERMISSION_KEYS, DEFAULT_ROLE_PRESETS };

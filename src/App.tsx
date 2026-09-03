@@ -13,6 +13,9 @@ import EditOrderPage from '@/pages/dashboard/sales/EditOrderPage';
 import PrintOrderPage from '@/pages/dashboard/sales/PrintOrderPage';
 import AccountingPage from '@/pages/dashboard/AccountingPage';
 import PurchasePage from '@/pages/dashboard/PurchasePage';
+import IngredientStockPage from '@/pages/dashboard/IngredientStockPage';
+import RecipeManagementPage from '@/pages/dashboard/RecipeManagementPage';
+import DiningTablesPage from '@/pages/dashboard/DiningTablesPage';
 import ManagementPage from '@/pages/dashboard/ManagementPage';
 import DuesPage from '@/pages/dashboard/DuesPage';
 import LedgerPage from '@/pages/dashboard/LedgerPage';
@@ -34,6 +37,7 @@ import PlansPage from '@/pages/superadmin/PlansPage';
 import PaymentsPage from '@/pages/superadmin/PaymentsPage';
 import LogsPage from '@/pages/superadmin/LogsPage';
 import SuperAdminSettingsPage from '@/pages/superadmin/SettingsPage';
+import { getFirstAccessiblePage } from '@/lib/dashboard-pages';
 
 // Route table for the three-tier multi-tenant app:
 //   /dashboard/*   - Shop Owner + Employee (shop's day-to-day POS/business)
@@ -55,7 +59,12 @@ export default function App() {
     <>
       <RouteLogger />
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        {/* Dashboard Permission Gate: an already-authenticated employee
+            whose Role hides the Dashboard lands on their own first
+            accessible page instead - see lib/dashboard-pages.ts's
+            getFirstAccessiblePage (a no-op '/dashboard' for everyone
+            else, same as before this existed). */}
+        <Route path="/" element={<Navigate to={getFirstAccessiblePage()} replace />} />
 
         <Route element={<PublicOnlyRoute />}>
           <Route path="/login" element={<LoginPage />} />
@@ -75,6 +84,9 @@ export default function App() {
             <Route path="sales/print/:id" element={<PrintOrderPage />} />
             <Route path="accounting" element={<AccountingPage />} />
             <Route path="purchase" element={<PurchasePage />} />
+            <Route path="ingredient-stock" element={<IngredientStockPage />} />
+            <Route path="recipe-management" element={<RecipeManagementPage />} />
+            <Route path="dining-tables" element={<DiningTablesPage />} />
             <Route path="management" element={<ManagementPage />} />
             <Route path="dues" element={<DuesPage />} />
             <Route path="ledger" element={<LedgerPage />} />
@@ -105,7 +117,7 @@ export default function App() {
           </Route>
         </Route>
 
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route path="*" element={<Navigate to={getFirstAccessiblePage()} replace />} />
       </Routes>
     </>
   );

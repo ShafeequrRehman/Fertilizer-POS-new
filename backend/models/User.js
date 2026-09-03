@@ -51,6 +51,18 @@ const userSchema = new mongoose.Schema(
       ref: "Role",
       default: null,
     },
+    // Per-account overrides on top of employeeRoleId's own permission set -
+    // "Dynamic Permissions": every employee defaults to exactly their
+    // role's permissions, but a Shop Owner can grant this one specific
+    // person an extra key their role doesn't have (extraPermissions), or
+    // take away one their role does grant (revokedPermissions), without
+    // needing a whole separate Role just for them. Computed into the
+    // access token at login/refresh as (role.permissions U extraPermissions)
+    // - revokedPermissions - see authController.resolveEmployeePermissions.
+    // Only meaningful for role: "employee"; both default to empty (no
+    // override at all - effective permissions are exactly the role's own).
+    extraPermissions: { type: [String], default: [] },
+    revokedPermissions: { type: [String], default: [] },
     // Staff directory fields (Manage Staff page) - only meaningful for
     // role: "employee". `designation` is the job title shown throughout
     // the app (Chief, Manager, Cashier, Order Taker, Waiter, etc.) and is

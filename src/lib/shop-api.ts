@@ -24,6 +24,12 @@ export interface EmployeeSummary {
   reference?: string;
   comment?: string;
   monthlySalary?: number;
+  // Dynamic Permissions: per-account overrides on top of employeeRoleId's
+  // own permission set - see backend/models/User.js's own comment.
+  // extraPermissions grants a key the role doesn't have; revokedPermissions
+  // takes away one the role does. Both default to empty (no override).
+  extraPermissions?: string[];
+  revokedPermissions?: string[];
 }
 
 export interface PayrollRow {
@@ -64,6 +70,10 @@ export interface RoleSummary {
   _id: string;
   name: string;
   permissions: string[];
+  // Dashboard Permission Gate: opt-out toggle (default false/visible) -
+  // see backend/models/Role.js's own comment on why this is a standalone
+  // field rather than a `permissions` entry.
+  hideDashboard?: boolean;
   isSystem: boolean;
 }
 

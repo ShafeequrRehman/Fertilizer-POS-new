@@ -1,5 +1,6 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { CheckCircle2, XCircle, Info, AlertTriangle, X } from "lucide-react";
+import { isTypingTarget } from "@/lib/keyboard-shortcuts";
 
 // Lightweight in-house toast + confirm-dialog system. This replaces native
 // window.alert()/window.confirm() everywhere in the app: those are
@@ -110,6 +111,36 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const popup = useCallback((options: PopupOptions) => {
     setPopupState({ id: ++idCounter, tone: options.tone ?? "info", title: options.title, message: options.message });
   }, []);
+
+  // Keyboard Shortcuts: Esc, or now Backspace (Universal Popup-Close Hotkey
+  // - see keyboard-shortcuts.ts's useBackspaceToClose, though this dialog
+  // predates that hook and already had its own app-wide Esc listener, so
+  // Backspace is just added alongside it here rather than switching this
+  // file over), instantly closes whichever popup/confirm dialog is on top -
+  // this is the shared modal system every "customer details required"/
+  // "error"/success popup in the app already routes through (see this
+  // file's own header comment), so this one listener covers all of them
+  // app-wide instead of needing a close handler wired into every modal
+  // individually. Backspace is guarded by isTypingTarget so it still just
+  // deletes a character normally inside, say, a confirm dialog that ever
+  // grows a text field - it only closes the dialog when focus isn't on
+  // one. Popup (z-[220]) sits above Confirm (z-[210]), so it's checked
+  // first when both would otherwise be open at once.
+  useEffect(() => {
+    function handleGlobalClose(event: KeyboardEvent) {
+      if (event.key !== "Escape" && !(event.key === "Backspace" && !isTypingTarget(event.target))) return;
+      if (popupState) {
+        setPopupState(null);
+        return;
+      }
+      if (confirmState) {
+        respond(false);
+      }
+    }
+    window.addEventListener("keydown", handleGlobalClose);
+    return () => window.removeEventListener("keydown", handleGlobalClose);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [popupState, confirmState]);
 
   return (
     <ToastContext.Provider value={{ toast, confirm, popup }}>

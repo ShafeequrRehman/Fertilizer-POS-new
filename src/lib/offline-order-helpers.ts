@@ -147,9 +147,23 @@ export function applyPatchOptimistically(order: SavedOrder, patch: OrderUpdatePa
   }
 
   if (patch.action === 'completeAndSettle') {
+    // Bug fix: this used to overwrite paidAmount with the WHOLE amount sent
+    // (patch.paidAmount), which for "Full Payment"/"Pay Full" is this
+    // order's own bill PLUS whatever of the customer's other outstanding
+    // dues got collected alongside it (see SalesPage.tsx/RecordPage.tsx's
+    // own `payable = owed + customerDue`) - only the portion up to what
+    // THIS order still actually owes belongs on it; the backend's real
+    // completeAndSettle (orderController.js) already applies the same
+    // this-order-first rule before any leftover spills into previousDues/
+    // other orders, so this optimistic local preview has to agree with it,
+    // or the receipt printed immediately (before the cloud sync ever
+    // reconciles this) could show the wrong Paid/Due figures.
+    const thisOrderDue = Math.max(next.total - (next.paidAmount || 0), 0);
+    const paidNow = Math.max(Number(patch.paidAmount) || 0, 0);
+    const appliedToThis = Math.min(thisOrderDue, paidNow);
     next.status = 'completed';
-    next.paidAmount = Math.max(Number(patch.paidAmount) || 0, 0);
-    next.remainingAmount = Math.max(next.total - next.paidAmount, 0);
+    next.paidAmount = Number(next.paidAmount || 0) + appliedToThis;
+    next.remainingAmount = Math.max(thisOrderDue - appliedToThis, 0);
     if (typeof patch.paymentMethod === 'string') next.paymentMethod = patch.paymentMethod;
     if (typeof patch.note === 'string') next.note = patch.note;
   } else {
@@ -196,7 +210,14 @@ export async function saveOrderEditOffline(order: SavedOrder, patch: OrderUpdate
     const record = await updateQueuedLocalOrder(localId, patch, receiptPrinted);
     return localOrderToSavedOrder(record);
   }
-  await queueOrderEdit(order.id, patch, undefined, kitchenPrinted, receiptPrinted);
+  // Conflict resolution: order.version is whatever this till last knew
+  // about this order (from its own cache/refresh - see pos-types.ts's
+  // SavedOrder). Carried through so orderController.js's
+  // importOfflineOrderUpdates can tell a genuinely stale edit (another
+  // till changed this order first, while both were offline) apart from
+  // this till's own coherent, already-ordered sequence of queued edits -
+  // see that function's own comment for the full reasoning.
+  await queueOrderEdit(order.id, patch, undefined, kitchenPrinted, receiptPrinted, order.version);
   const updated = applyPatchOptimistically(order, patch);
 
   // Patch the Local Hub's orderCache with this order's new state right now,

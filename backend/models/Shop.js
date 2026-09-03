@@ -67,6 +67,13 @@ const shopSchema = new mongoose.Schema(
     // orderController.createOrder/importOfflineOrders, same pattern as
     // ShopSession.orderCounter.
     orderSequenceCounter: { type: Number, default: 0 },
+    // Permanent, all-time counter backing each IngredientPurchase's
+    // human-readable Purchase Order Number ("PO-000123" - see
+    // ingredientPurchaseController.createPurchase) - same never-resets,
+    // atomically-$inc'd pattern as orderSequenceCounter above, just a
+    // completely separate counter since a purchase order and a sales
+    // order are never the same sequence.
+    purchaseOrderSequenceCounter: { type: Number, default: 0 },
     // A shop's own custom table labels for DineIn seating (e.g. ["M1"..
     // "M8", "FM1".."FM8", "OUT1".."OUT8"] for a shop with Male/Family/
     // Outdoor sections), in the exact order they should be offered/shown.

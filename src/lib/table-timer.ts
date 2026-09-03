@@ -13,6 +13,21 @@
 
 import type { SavedOrder } from './pos-types';
 
+// How often a screen showing table occupancy (POSPage's Dine-In grid,
+// SalesPage's Change Table modal) re-checks which tables have an active
+// order. There's no push/websocket channel in this app, so a short poll is
+// how a second terminal finds out a table just got occupied or freed up.
+export const TABLE_STATUS_POLL_MS = 5000;
+
+// mm:ss countdown display, shared by every screen that shows a table's
+// remaining time so they never format it differently from one another.
+export function formatTableCountdown(remainingMs: number) {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 export interface TableTimerOrder {
   createdAt: string;
   timerExtendedMinutes?: number;

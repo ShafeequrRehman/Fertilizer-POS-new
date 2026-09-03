@@ -5,9 +5,9 @@ import {
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
   Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
-  Menu, X, Smartphone
+  Menu, X, Smartphone, Boxes, ChefHat, Table2
 } from 'lucide-react';
-import { clearAuthSession, getAuthRole, hasPermission, isPageEnabled } from '@/lib/auth';
+import { clearAuthSession, getAuthRole, getAuthShop, hasPermission, hasAnyPermission, isPageEnabled, getIsDashboardHidden } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
 import { useOfflineSync } from '@/lib/offline-sync';
 import { isDesktopApp, logoutRequest } from '@/lib/api';
@@ -15,11 +15,12 @@ import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, closeShopSession,
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
 import { useToast } from '@/lib/toast';
-import TableTimerAlertWatcher from '@/components/TableTimerAlertWatcher';
+import { useNotifications, formatNotificationAge, NOTIFICATION_ICON, NOTIFICATION_ICON_BG, EDITABLE_WINDOW_MS, type AppNotification } from '@/lib/notifications';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { getIpcRenderer } from '@/lib/electron-bridge';
 import { reportPrintOutcome } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
+import { FOCUS_PRODUCT_SEARCH_EVENT } from '@/lib/keyboard-shortcuts';
 
 // Icons keyed by DASHBOARD_PAGES's `key` - kept separate from that shared
 // list since it lives in lib/ and can't hold JSX.
@@ -29,6 +30,9 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   sales: <BarChart3 size={18} />,
   accounting: <Calculator size={18} />,
   purchase: <Package size={18} />,
+  'ingredient-stock': <Boxes size={18} />,
+  'recipe-management': <ChefHat size={18} />,
+  'dining-tables': <Table2 size={18} />,
   management: <Users size={18} />,
   dues: <FileText size={18} />,
   ledger: <BookText size={18} />,
@@ -72,15 +76,61 @@ export default function DashboardShell() {
     // (requireShopOwner) - hide them from employees entirely rather than
     // showing a link that always 403s.
     .filter((item) => (item.key !== 'employees' && item.key !== 'payroll') || role === 'shopowner')
-    .filter((item) => !item.permission || hasPermission(item.permission))
+    // Dashboard Permission Gate: hides the Dashboard home link itself when
+    // this employee's assigned Role has "Hide Dashboard" checked - see
+    // getIsDashboardHidden's own comment (never true for a Shop Owner).
+    .filter((item) => item.key !== 'dashboard' || !getIsDashboardHidden())
+    .filter((item) => !item.permission || (Array.isArray(item.permission) ? hasAnyPermission(item.permission) : hasPermission(item.permission)))
     .filter((item) => isPageEnabled(item.key))
     .map((item) => ({ ...item, icon: PAGE_ICONS[item.key] }));
+
+  // Keyboard Shortcuts - Core Navigation: F1/F2/F3 work from anywhere in
+  // the dashboard (not just while the POS/Sales page itself is focused),
+  // wired up once here rather than duplicated on every page. F-keys never
+  // type a character into a field, so unlike the Ctrl+S/Enter/Arrow/+-
+  // shortcuts each page wires up locally (see POSPage.tsx), these don't
+  // need an isTypingTarget guard. Each one is a no-op if this employee's
+  // Role doesn't even have that page in their nav (same gate navItems
+  // above already applies) - a hotkey shouldn't be a backdoor around the
+  // permission system.
+  useEffect(() => {
+    function handleGlobalShortcut(event: KeyboardEvent) {
+      if (event.key === 'F1') {
+        event.preventDefault();
+        if (navItems.some((item) => item.key === 'pos')) navigate('/dashboard/pos');
+        return;
+      }
+      if (event.key === 'F2') {
+        event.preventDefault();
+        if (navItems.some((item) => item.key === 'sales')) navigate('/dashboard/sales');
+        return;
+      }
+      if (event.key === 'F3') {
+        event.preventDefault();
+        if (!navItems.some((item) => item.key === 'pos')) return;
+        if (pathname !== '/dashboard/pos') {
+          navigate('/dashboard/pos');
+          // POSPage needs a moment to mount and register its own listener
+          // for this event before it's actually able to hear it.
+          window.setTimeout(() => window.dispatchEvent(new Event(FOCUS_PRODUCT_SEARCH_EVENT)), 120);
+        } else {
+          window.dispatchEvent(new Event(FOCUS_PRODUCT_SEARCH_EVENT));
+        }
+      }
+    }
+    window.addEventListener('keydown', handleGlobalShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalShortcut);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   // Runs the 5-minute offline sync timer (see lib/offline-sync.ts) for the
   // lifetime of the dashboard session - a no-op outside the Electron app,
   // and harmless to mount even for shops that never use offline mode.
   const { lastResult } = useOfflineSync();
   const { toast: syncToast } = useToast();
+  // Shared by both kitchen watchers below (see their own comments) instead
+  // of each running its own independent copy of this poll.
+  const categoryLookupRef = useCategoryLookupRef();
 
   // A Cancel Order made offline is trusted immediately (see
   // CancelOrderModal.tsx) and only actually verified against the real
@@ -95,6 +145,30 @@ export default function DashboardShell() {
         lastResult.wrongKeyOrderIds.length === 1
           ? `An offline cancellation used the wrong Cancel Order Key - order ${lastResult.wrongKeyOrderIds[0]} was NOT cancelled. Redo it with the correct key.`
           : `${lastResult.wrongKeyOrderIds.length} offline cancellations used the wrong Cancel Order Key and were NOT applied. Redo them with the correct key.`,
+      );
+    }
+    // Conflict resolution: two devices both placed a Dine-In order for the
+    // same table while offline, unaware of each other (see
+    // orderController.js's importOfflineOrders). The loser stays queued
+    // (still a local-<uuid> order) - staff just need to pick a different
+    // table for it via the normal Change Table action, and it'll sync on
+    // the next tick.
+    if (lastResult?.tableConflictOrderIds && lastResult.tableConflictOrderIds.length > 0) {
+      syncToast.error(
+        lastResult.tableConflictOrderIds.length === 1
+          ? `An offline order's table was also taken by another device. Change its table to sync it.`
+          : `${lastResult.tableConflictOrderIds.length} offline orders' tables were also taken by another device. Change their tables to sync them.`,
+      );
+    }
+    // Conflict resolution: an offline edit was built against an order
+    // version another till has since changed (see importOfflineOrderUpdates).
+    // Rejected rather than silently overwritten - staff need to refresh
+    // that order and redo the edit against its real current state.
+    if (lastResult?.versionConflictOrderIds && lastResult.versionConflictOrderIds.length > 0) {
+      syncToast.error(
+        lastResult.versionConflictOrderIds.length === 1
+          ? `An offline edit conflicted with a change from another device on order ${lastResult.versionConflictOrderIds[0]}. Refresh and redo that edit.`
+          : `${lastResult.versionConflictOrderIds.length} offline edits conflicted with changes from another device. Refresh and redo those edits.`,
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -113,8 +187,8 @@ export default function DashboardShell() {
       {/* Floating frosted sidebar (macOS Finder / Sonoma-style) - detached
           from the edge with its own rounded glass panel on desktop, sliding
           in as a full-height glass panel on mobile (see sidebarOpen below). */}
-      <KitchenPrintWatcher />
-      <KitchenUpdateWatcher />
+      <KitchenPrintWatcher categoryLookupRef={categoryLookupRef} />
+      <KitchenUpdateWatcher categoryLookupRef={categoryLookupRef} />
       <div className="glass-app-bg flex min-h-screen font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
         {sidebarOpen ? (
           <div
@@ -134,7 +208,15 @@ export default function DashboardShell() {
               <div className="rounded-lg bg-black p-1">
                 <div className="text-[10px] text-white">*</div>
               </div>
-              <span className="text-xl font-bold tracking-tight">Starline</span>
+              {/* Whatever name the Super Admin gave this shop at creation
+                  (Shop.name, cached at login - see auth.ts's SessionShop)
+                  - "Starline" is only the fallback for the rare case that
+                  cache is somehow missing. The Shop Owner can override it
+                  from Settings > Restaurant Profile (Restaurant Name),
+                  which patches this same cached value via
+                  updateCachedShopName so it shows up here immediately, no
+                  re-login needed. */}
+              <span className="text-xl font-bold tracking-tight">{getAuthShop()?.name || 'Starline'}</span>
             </div>
             <button
               type="button"
@@ -175,15 +257,19 @@ export default function DashboardShell() {
               <OfflineModeToggle />
               <UpdateStatusBadge />
             </div>
-            <div className="flex flex-wrap items-center gap-3">
+            {/* ml-auto keeps this group hugging the right edge even when it
+                wraps onto its own row below the left group - plain
+                `justify-between` on the parent has no effect on a line
+                that only contains one flex item, which is what let this
+                whole group (and the bell button inside it) drift toward
+                the left on a narrower window instead of staying at the
+                right. */}
+            <div className="ml-auto flex flex-wrap items-center gap-3">
               <InstallAppButton />
               <TopAction icon={<Search size={18} />} className="hidden sm:flex" />
               <TopAction icon={<Cloud size={18} />} className="hidden sm:flex" />
               <TopAction icon={<MessageCircle size={18} />} />
-              <div className="relative">
-                <TopAction icon={<Bell size={18} />} />
-                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-sm">2</span>
-              </div>
+              <NotificationBellButton />
               <button
                 type="button"
                 onClick={async () => {
@@ -201,7 +287,6 @@ export default function DashboardShell() {
           <Outlet />
         </main>
       </div>
-      <TableTimerAlertWatcher />
     </ShopSessionProvider>
   );
 }
@@ -301,6 +386,14 @@ const KITCHEN_POLL_INTERVAL_MS = 1500;
 // whatever was last fetched (or an empty lookup, before the first fetch
 // resolves - everything routes to the kitchen printer either way, the
 // same behavior as before this split existed) if a refresh ever fails.
+//
+// Called ONCE here in DashboardShell and passed down as a prop to both
+// watchers below, rather than each watcher calling this hook itself - they
+// used to each run their own independent copy of this poll, meaning two
+// separate fetchProducts() calls (plus two Map rebuilds) every single
+// minute for the exact same data, for the entire time any dashboard page
+// is open. One shared instance halves that redundant background network
+// and CPU work.
 const CATEGORY_LOOKUP_REFRESH_MS = 60000;
 
 function useCategoryLookupRef() {
@@ -325,10 +418,9 @@ function useCategoryLookupRef() {
   return lookupRef;
 }
 
-function KitchenPrintWatcher() {
+function KitchenPrintWatcher({ categoryLookupRef }: { categoryLookupRef: React.MutableRefObject<Map<string, string>> }) {
   const { toast } = useToast();
   const inFlightRef = useRef<Set<string>>(new Set());
-  const categoryLookupRef = useCategoryLookupRef();
   // ToastProvider rebuilds its `toast` object every render (it's a plain
   // object literal, not memoized), so depending on `toast` directly in the
   // effect below would tear down and restart this poll loop constantly -
@@ -432,10 +524,9 @@ function KitchenPrintWatcher() {
 // that came from a phone.
 const KITCHEN_UPDATE_POLL_INTERVAL_MS = 1500; // see KITCHEN_POLL_INTERVAL_MS above
 
-function KitchenUpdateWatcher() {
+function KitchenUpdateWatcher({ categoryLookupRef }: { categoryLookupRef: React.MutableRefObject<Map<string, string>> }) {
   const { toast } = useToast();
   const inFlightRef = useRef<Set<string>>(new Set());
-  const categoryLookupRef = useCategoryLookupRef();
   const toastRef = useRef(toast);
   toastRef.current = toast;
 
@@ -519,18 +610,18 @@ function ShopStatusControl() {
     setBusy(true);
     try {
       if (isDesktopApp() && !isOnline) {
-        // Same offline path as POSPage's "Open Shop" button - see
+        // Same offline path as POSPage's "Open Restaurant" button - see
         // shop-session.tsx's openLocally() and offline-sync.ts's
         // reconciliation step for how this becomes a real ShopSession.
         openLocally();
-        toast.success('Shop opened offline. Will sync once back online.');
+        toast.success('Restaurant opened offline. Will sync once back online.');
         return;
       }
       await openShopSession();
       await refresh();
-      toast.success('Shop opened. Orders can now be taken.');
+      toast.success('Restaurant opened. Orders can now be taken.');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to open shop.');
+      toast.error(error instanceof Error ? error.message : 'Failed to open restaurant.');
     } finally {
       setBusy(false);
     }
@@ -548,7 +639,7 @@ function ShopStatusControl() {
         const extra = orders.length > 8 ? `\n...and ${orders.length - 8} more` : '';
         setBusy(false);
         const confirmed = await confirm(
-          `${orders.length} order${orders.length === 1 ? ' is' : 's are'} still pending or unpaid:\n\n${preview}${extra}\n\nClose the shop anyway? These orders stay in the system either way.`,
+          `${orders.length} order${orders.length === 1 ? ' is' : 's are'} still pending or unpaid:\n\n${preview}${extra}\n\nClose the restaurant anyway? These orders stay in the system either way.`,
           { title: 'Unresolved orders', confirmText: 'Close Anyway', tone: 'danger' }
         );
         if (confirmed) {
@@ -560,10 +651,10 @@ function ShopStatusControl() {
       await refresh();
       if (result.session) {
         const s = result.session.summary;
-        toast.success(`Shop closed. ${s.orderCount} order${s.orderCount === 1 ? '' : 's'}, PKR ${s.totalSales.toLocaleString()} total sales.`);
+        toast.success(`Restaurant closed. ${s.orderCount} order${s.orderCount === 1 ? '' : 's'}, PKR ${s.totalSales.toLocaleString()} total sales.`);
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to close shop.');
+      toast.error(error instanceof Error ? error.message : 'Failed to close restaurant.');
     } finally {
       setBusy(false);
     }
@@ -579,11 +670,11 @@ function ShopStatusControl() {
         type="button"
         onClick={handleOpen}
         disabled={busy || !canManage}
-        title={canManage ? 'Open the shop to start taking orders' : 'Only a Manager or Shop Owner can open the shop'}
+        title={canManage ? 'Open the restaurant to start taking orders' : 'Only a Manager or Restaurant Owner can open the restaurant'}
         className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <Store size={16} />
-        {busy ? 'Opening...' : 'Open Shop'}
+        {busy ? 'Opening...' : 'Open Restaurant'}
       </button>
     );
   }
@@ -608,7 +699,7 @@ function ShopStatusControl() {
           className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Lock size={16} />
-          {busy ? 'Closing...' : 'Close Shop'}
+          {busy ? 'Closing...' : 'Close Restaurant'}
         </button>
       )}
     </div>
@@ -776,6 +867,128 @@ function TopAction({ icon, className = '' }: { icon: React.ReactNode; className?
   return (
     <div className={`clickable glass-pill rounded-full p-2.5 text-gray-500 transition-colors hover:bg-white/70 ${className}`}>
       {icon}
+    </div>
+  );
+}
+
+// Real notification bell - replaces the old hardcoded "Bell icon + red 2
+// badge" placeholder. Shows the live unread count, and a dropdown of every
+// notification fired this session (table timer expiries, order saves,
+// order completions - see lib/notifications.tsx). Only an order_saved row
+// is clickable: within EDITABLE_WINDOW_MS of being saved it jumps straight
+// to that order's Edit screen (Technical Requirement #3 - "before it
+// cooks"), past that window it instead fires a "Time Over" notification
+// and does NOT navigate, since the kitchen slip has already gone out.
+// Every other kind (table_timer_expired, order_completed) is view-only in
+// this history, per that same requirement.
+function NotificationBellButton() {
+  const navigate = useNavigate();
+  const { notifications, unreadCount, markAllRead, notify } = useNotifications();
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  function toggleOpen() {
+    setOpen((previous) => {
+      const next = !previous;
+      if (next) markAllRead();
+      return next;
+    });
+  }
+
+  // Only order_saved rows are clickable, jumping to Edit within the
+  // 10-minute window (or firing "Time Over" past it). Table timers no
+  // longer need a staff decision at all - an expiry auto-clears the table
+  // by itself (see lib/notifications.tsx's poll), so table_timer_expired
+  // rows, like order_completed/info, are purely informational history.
+  function handleRowClick(notification: AppNotification) {
+    if (notification.kind !== 'order_saved' || !notification.orderId) return;
+    const withinWindow = Date.now() - notification.createdAt <= EDITABLE_WINDOW_MS;
+    if (withinWindow) {
+      setOpen(false);
+      navigate(`/dashboard/sales/${notification.orderId}/edit`);
+    } else {
+      notify('info', "Time Over - this order already went to the kitchen and can no longer be edited from here.");
+    }
+  }
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        onClick={toggleOpen}
+        aria-label="Notifications"
+        className="clickable glass-pill rounded-full p-2.5 text-gray-500 transition-colors hover:bg-white/70"
+      >
+        <Bell size={18} />
+      </button>
+      {unreadCount > 0 ? (
+        <span className="pointer-events-none absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-sm">
+          {unreadCount > 9 ? '9+' : unreadCount}
+        </span>
+      ) : null}
+      {/* Always viewport-fixed (never `absolute` off the bell button itself)
+          and anchored to the window's own top-right corner, not to
+          wherever this button happens to land. The header's right-hand
+          icon group (`flex flex-wrap`) can wrap onto its own line on a
+          narrower window, and that wrapped line isn't right-aligned - so
+          the bell button itself can end up sitting well left-of-center
+          (see screenshot bug report). An `absolute right-0` panel anchored
+          to that button would then extend left underneath the fixed,
+          opaque sidebar, and because this panel is glass/backdrop-blur,
+          the sidebar's own colors bled through visually looking like
+          truncated/unreadable text on its left edge - not an actual clip,
+          but just as unreadable. Anchoring to the viewport instead makes
+          this panel's position completely independent of the trigger's
+          layout position, so it can never overlap the sidebar at any
+          window size. z-[400] clears both the sidebar (z-50) and the
+          toast stack (z-[350]) with real margin. */}
+      {open ? (
+        <div className="glass-strong fixed inset-x-4 top-24 z-[400] max-h-[70vh] overflow-y-auto rounded-2xl p-2 sm:inset-x-auto sm:left-auto sm:right-4 sm:top-20 sm:w-80">
+          <p className="px-3 py-2 text-xs font-black uppercase tracking-wide text-gray-500">Notifications</p>
+          {notifications.length === 0 ? (
+            <p className="px-3 py-8 text-center text-sm font-bold text-gray-400">No notifications yet.</p>
+          ) : (
+            <div className="space-y-1">
+              {notifications.map((notification) => {
+                const isOrderSaved = notification.kind === 'order_saved';
+                const isEditable = isOrderSaved && Date.now() - notification.createdAt <= EDITABLE_WINDOW_MS;
+                return (
+                  <button
+                    key={notification.id}
+                    type="button"
+                    disabled={!isOrderSaved}
+                    onClick={() => handleRowClick(notification)}
+                    className={`flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition ${
+                      isOrderSaved ? 'cursor-pointer hover:bg-white/70' : 'cursor-default'
+                    }`}
+                  >
+                    <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white shadow-inner ${NOTIFICATION_ICON_BG[notification.kind]}`}>
+                      {NOTIFICATION_ICON[notification.kind]}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-bold leading-snug text-gray-900">{notification.message}</p>
+                      <p className="mt-0.5 text-[11px] font-bold text-gray-400">
+                        {formatNotificationAge(notification.createdAt)}
+                        {isOrderSaved ? (isEditable ? ' · Tap to edit' : ' · Edit window closed') : ''}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useBackspaceToClose } from "@/lib/keyboard-shortcuts";
 import { useNavigate } from "react-router-dom";
 import { getUsers, createUser, updateUser, deleteUser } from "@/lib/api";
 import { getAuthRole } from "@/lib/auth";
@@ -86,6 +87,11 @@ export default function AdminPage() {
     setIsModalOpen(false);
     setEditingUser(null);
   };
+
+  // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
+  // This modal is toggled by isModalOpen rather than mounted/unmounted, so
+  // `active` gates the listener to only when it's actually open.
+  useBackspaceToClose(handleCloseModal, isModalOpen);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

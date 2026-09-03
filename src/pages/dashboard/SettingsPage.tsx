@@ -12,12 +12,43 @@ import { SidebarPagesSection } from '@/components/SidebarPagesSection';
 import { CustomerOrderingSection } from '@/components/CustomerOrderingSection';
 import { ReceiptAutoPrintSection } from '@/components/ReceiptAutoPrintSection';
 import { getStoreSettings, saveStoreSettings, StoreSettings, CURRENCIES, TIMEZONES } from '@/lib/pos-settings';
-import { fetchPrinters } from '@/lib/pos-api';
+import { fetchPrinters, fetchShopProfile, updateShopProfile } from '@/lib/pos-api';
+import { updateCachedShopName } from '@/lib/auth';
+import { useToast } from '@/lib/toast';
 
 export default function SettingsPage() {
-  const [activeSection, setActiveSection] = useState("Store Profile");
+  const { toast } = useToast();
+  const [activeSection, setActiveSection] = useState("Restaurant Profile");
   const [settings, setSettings] = useState<StoreSettings | null>(null);
   const [printers, setPrinters] = useState<string[]>([]);
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Shop Name (shown in the dashboard sidebar - see DashboardShell.tsx) and
+  // Shop Address, both backed by the Shop model itself (Shop.name/
+  // Shop.address), fetched together in one request. Initially whatever the
+  // Super Admin set when this shop was created; editable here from then on,
+  // right alongside the rest of this Store Profile form. There used to be
+  // separate, purely local "Store Name"/"Store Address" fields here too
+  // (plain localStorage, never read by anything else in the app - not even
+  // the receipt header/address, which have always been their own separate
+  // fields below), so both have been replaced by these rather than kept
+  // alongside them. Loaded async on mount (a real network call, unlike
+  // everything else on this page), so they start blank until
+  // fetchShopProfile resolves; saved together with the rest of the form via
+  // the Save Changes button below.
+  const [shopName, setShopName] = useState('');
+  const [shopAddress, setShopAddress] = useState('');
+  const [shopProfileLoading, setShopProfileLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      setShopProfileLoading(true);
+      const profile = await fetchShopProfile();
+      if (profile?.name) setShopName(profile.name);
+      if (profile?.address !== undefined) setShopAddress(profile.address);
+      setShopProfileLoading(false);
+    })();
+  }, []);
 
   useEffect(() => {
     setSettings(getStoreSettings());
@@ -50,10 +81,35 @@ export default function SettingsPage() {
     }
   };
 
-  const saveSettings = () => {
+  // Saves everything on this page in one action: the local, per-device
+  // StoreSettings blob (instant, synchronous) plus the Shop Name/Shop
+  // Address fields above, in one combined backend call to /shop/profile -
+  // see shopProfileLoading's own comment on why these two are different
+  // from the rest of this page.
+  const saveSettings = async () => {
     if (settings) {
       saveStoreSettings(settings);
-      // alert("Settings saved successfully!");
+    }
+
+    const trimmedShopName = shopName.trim();
+    const trimmedShopAddress = shopAddress.trim();
+    if (!trimmedShopName) {
+      toast.success('Settings saved.');
+      return;
+    }
+
+    setSavingSettings(true);
+    const result = await updateShopProfile({ name: trimmedShopName, address: trimmedShopAddress });
+    setSavingSettings(false);
+    if (result) {
+      setShopName(trimmedShopName);
+      setShopAddress(trimmedShopAddress);
+      // Patches the cached session so DashboardShell's sidebar picks this
+      // up immediately (see auth.ts's own comment) - no re-login needed.
+      updateCachedShopName(trimmedShopName);
+      toast.success('Settings saved.');
+    } else {
+      toast.error('Settings saved, but the shop name/address failed to sync - check your connection and try again.');
     }
   };
 
@@ -67,7 +123,7 @@ export default function SettingsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const menuItems = [
-    { id: "Store Profile", icon: <Store size={18} /> },
+    { id: "Restaurant Profile", icon: <Store size={18} /> },
     { id: "Manage Products", icon: <Package size={18} /> },
     { id: "Manage Receipt", icon: <Receipt size={18} /> },
     { id: "Sidebar Pages", icon: <Eye size={18} /> },
@@ -147,8 +203,12 @@ export default function SettingsPage() {
           </h1>
           <p className="text-slate-500 font-bold">Configure your workspace and global preferences.</p>
         </div>
-        <button onClick={saveSettings} className="flex items-center gap-2 px-6 py-3 border-[0.5px] border-white/30 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)]">
-          <Save size={18} /> Save Changes
+        <button
+          onClick={() => void saveSettings()}
+          disabled={savingSettings}
+          className="flex items-center gap-2 px-6 py-3 border-[0.5px] border-white/30 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] disabled:opacity-50"
+        >
+          <Save size={18} /> {savingSettings ? 'Saving...' : 'Save Changes'}
         </button>
       </div>
 
@@ -250,32 +310,36 @@ export default function SettingsPage() {
             <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Store Name</label>
-                <input 
-                  type="text" 
-                  value={settings.storeName}
-                  onChange={e => handleSettingChange('storeName', e.target.value)}
-                  className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none" 
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Restaurant Name</label>
+                <input
+                  type="text"
+                  value={shopName}
+                  onChange={e => setShopName(e.target.value)}
+                  disabled={shopProfileLoading}
+                  placeholder="Your restaurant's name"
+                  className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none disabled:opacity-50"
                 />
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Business Email</label>
-                <input 
-                  type="email" 
+                <input
+                  type="email"
                   value={settings.businessEmail}
                   onChange={e => handleSettingChange('businessEmail', e.target.value)}
-                  className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none" 
+                  className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none"
                 />
               </div>
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Store Address</label>
-              <textarea 
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Restaurant Address</label>
+              <textarea
                 rows={3}
-                value={settings.storeAddress}
-                onChange={e => handleSettingChange('storeAddress', e.target.value)}
-                className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none resize-none" 
+                value={shopAddress}
+                onChange={e => setShopAddress(e.target.value)}
+                disabled={shopProfileLoading}
+                placeholder="Your restaurant's address"
+                className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none resize-none disabled:opacity-50"
               />
             </div>
 
