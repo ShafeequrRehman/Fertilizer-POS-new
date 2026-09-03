@@ -72,4 +72,31 @@ function convertQuantity(value, fromUnit, toUnit) {
   return (value * fromFactor) / toFactor;
 }
 
-module.exports = { INGREDIENT_UNITS, UNIT_FAMILY, getRecipeUnitOptions, convertQuantity };
+// Safe Math Deduction/Addition Logic (floating-point round-off fix):
+// Ingredient.currentStock is a plain fractional number (e.g. kg), and every
+// place that adds to or subtracts from it directly with `+`/`-` risks
+// classic JS float noise compounding over hundreds of orders/purchases/
+// restocks - `1 - 0.2` itself is fine, but many repeated operations can
+// drift into something like `58.499999999999996`, which then prints as
+// visible garbage on every screen/export that shows currentStock.
+//
+// Fix: never add/subtract the raw fractional numbers directly. Convert each
+// operand to an integer "milli-unit" first (grams for a kg-tracked
+// ingredient, millilitres for a litre-tracked one, thousandths of a piece
+// for pcs - the *1000 scale is generic, not literally grams-only), do the
+// actual arithmetic as plain integers (which floating point represents and
+// adds/subtracts exactly, no rounding error possible), then convert back
+// with a hard 3-decimal round via toFixed. Every mutation of
+// Ingredient.currentStock in this codebase (stockService.js's
+// deductStockForItems/restoreStockForOrder, ingredientController.js's
+// restockIngredient, ingredientPurchaseController.js's
+// applyPurchaseToIngredientStock) is built on these two primitives so none
+// of them can reintroduce the drift on their own.
+function toMilliUnits(value) {
+  return Math.round(Number(value || 0) * 1000);
+}
+function fromMilliUnits(milliUnits) {
+  return parseFloat((milliUnits / 1000).toFixed(3));
+}
+
+module.exports = { INGREDIENT_UNITS, UNIT_FAMILY, getRecipeUnitOptions, convertQuantity, toMilliUnits, fromMilliUnits };

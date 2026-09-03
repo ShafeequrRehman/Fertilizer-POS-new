@@ -1274,7 +1274,13 @@ export default function SalesPage() {
           doesn't fit at all - it stacks to one column instead: order list
           on top, detail panel underneath. */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_300px] sm:gap-4 lg:min-h-[calc(100vh-14rem)] lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,26%)] lg:gap-6 lg:items-stretch">
-        <section className="min-w-0 space-y-5 lg:flex lg:min-h-0 lg:flex-col">
+        {/* @container: the order grid below must size its column count off
+            THIS element's own pixel width, not the viewport's - the split
+            two-pane layout above (order list + detail panel, 74%/26% at lg)
+            means this section is routinely much narrower than the viewport,
+            so a viewport-based md:/xl: breakpoint was jumping to 4 columns
+            in a pane only wide enough to comfortably fit 3. */}
+        <section className="min-w-0 space-y-5 lg:flex lg:min-h-0 lg:flex-col @container">
           <div className="glass rounded-[32px] p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
@@ -1316,12 +1322,14 @@ export default function SalesPage() {
             <Surface text={statusTab === 'pending' ? 'No pending orders matched the current filters.' : 'No completed orders matched the current filters.'} />
           ) : null}
           {!loading && activeOrders.length > 0 ? (
-            // Dynamic Expanding Grid: minimum 3 order cards per row on
-            // smaller displays (grid-cols-3 floor), automatically expanding
-            // to 4/5/6 as the screen widens - never dropped below 3 at any
-            // width, unlike the old lg:grid-cols-3 override that used to
-            // undercut a wider baseline.
-            <div className="grid grid-cols-3 gap-3 md:grid-cols-4 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2 xl:grid-cols-5 2xl:grid-cols-6">
+            // Dynamic Expanding Grid: minimum 3 order cards per row, always -
+            // never dropped below 3 at any width. Scales up to 4/5/6 using
+            // CONTAINER queries (@2xl/@3xl/@5xl, keyed off the @container
+            // section above) rather than viewport breakpoints, so the step
+            // up actually tracks this pane's own available width instead of
+            // the full browser window - the two-pane split layout means
+            // those routinely disagree (see the @container comment above).
+            <div className="grid grid-cols-3 gap-3 @2xl:grid-cols-4 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2 @3xl:grid-cols-5 @5xl:grid-cols-6">
               {pagedOrders.map((order) => {
                 const isSelected = selectedOrder?.id === order.id;
                 const heroImage = resolveOrderImage(order.items);
@@ -1813,7 +1821,18 @@ function phoneLabel(order: SavedOrder) {
   return 'No phone';
 }
 function prettyType(order: SavedOrder) { return order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery'; }
-function age(createdAt: string) { const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000); return mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} hr ${mins % 60} min ago`; }
+// Dynamic Days-Based Order Duration Format: past 24 hours (1440 minutes),
+// switch from a growing "hr min" figure (which got unreadable past a day -
+// "26 hr 12 min ago", "72 hr 0 min ago") to whole Days - "1 Day ago",
+// "3 Days ago" - since once an order's been sitting that long, the exact
+// minute no longer matters, only roughly how many days it's been.
+function age(createdAt: string) {
+  const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000);
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)} hr ${mins % 60} min ago`;
+  const days = Math.floor(mins / 1440);
+  return `${days} Day${days === 1 ? '' : 's'} ago`;
+}
 function orderNumber(order: SavedOrder) { return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, '0'); }
 function hasCustomerPhone(order: SavedOrder) { return Boolean(order.customer.phone && order.customer.phone !== '03000000000'); }
 function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }

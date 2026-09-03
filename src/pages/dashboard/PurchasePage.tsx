@@ -456,7 +456,7 @@ export default function PurchasePage() {
     openNewOrderModal(
       lowStockIngredients.map((ing) => ({
         ingredientId: ing.id,
-        quantity: String(Math.max(ing.lowStockThreshold - ing.currentStock, 1)),
+        quantity: String(Math.max(Number((ing.lowStockThreshold - ing.currentStock).toFixed(3)), 1)),
       })),
     );
   }

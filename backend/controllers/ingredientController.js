@@ -3,7 +3,7 @@ const Ingredient = require("../models/Ingredient");
 const Recipe = require("../models/Recipe");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { INGREDIENT_UNITS, UNIT_FAMILY } = require("../config/ingredientUnits");
+const { INGREDIENT_UNITS, UNIT_FAMILY, toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
 
 // ---------------------------------------------------------------------
 // Ingredient Categories (Task 1: "the Stock Manager can categorize these
@@ -184,7 +184,14 @@ exports.restockIngredient = async (req, res) => {
   }
   const ingredient = await Ingredient.findOne({ _id: req.params.id, ...shopScope(req) });
   if (!ingredient) return res.status(404).json({ error: "Ingredient not found" });
-  ingredient.currentStock = Math.max(Number(ingredient.currentStock || 0) + quantity, 0);
+  // Safe Math Addition Logic (floating-point round-off fix) - same
+  // integer-milli-unit round-trip as stockService.js/
+  // ingredientPurchaseController.js (see ingredientUnits.js's own comment),
+  // so a manual restock/wastage-correction entry can't reintroduce the
+  // same drift plain `+`/`-` on the raw fractional numbers would.
+  const beforeMilli = toMilliUnits(ingredient.currentStock);
+  const deltaMilli = toMilliUnits(quantity);
+  ingredient.currentStock = Math.max(fromMilliUnits(beforeMilli + deltaMilli), 0);
   await ingredient.save();
   res.json(ingredient);
 };

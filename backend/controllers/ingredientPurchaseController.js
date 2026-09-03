@@ -3,6 +3,7 @@ const IngredientPurchase = require("../models/IngredientPurchase");
 const Ingredient = require("../models/Ingredient");
 const Shop = require("../models/Shop");
 const { shopScope } = require("../middleware/attachShopScope");
+const { toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
 
 // Formats a shop's permanent purchaseOrderSequenceCounter into the
 // human-readable invoice number every logged batch gets ("PO-000123") -
@@ -39,7 +40,12 @@ async function reservePurchaseOrderNumber(shopId) {
 async function applyPurchaseToIngredientStock(ingredient, qty, purchaseRate) {
   const oldStock = Number(ingredient.currentStock || 0);
   const oldAverage = Number(ingredient.averageCost || 0);
-  const newStock = oldStock + qty;
+  // Safe Math Addition Logic (floating-point round-off fix) - same
+  // integer-milli-unit round-trip as stockService.js's
+  // deductStockForItems/restoreStockForOrder (see ingredientUnits.js's own
+  // comment), so a purchase batch folding into currentStock can't
+  // reintroduce the same drift on the "stock coming IN" side.
+  const newStock = fromMilliUnits(toMilliUnits(oldStock) + toMilliUnits(qty));
   ingredient.averageCost = newStock > 0 ? (oldStock * oldAverage + qty * purchaseRate) / newStock : purchaseRate;
   ingredient.currentStock = newStock;
   await ingredient.save();

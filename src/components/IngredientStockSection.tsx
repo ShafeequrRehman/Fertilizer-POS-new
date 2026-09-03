@@ -30,6 +30,19 @@ function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
 }
 
+// Display-layer defensive rounding for currentStock. The backend now
+// guarantees every NEW currentStock value is clean (see
+// backend/config/ingredientUnits.js's toMilliUnits/fromMilliUnits) and
+// backfills already-stored values on startup (seed.js's
+// backfillIngredientStockPrecision) - but a value fetched into the browser
+// before that migration ran, or any other not-yet-covered edge case, should
+// still never render raw float noise like "48.699999999999996kg" on
+// screen. Rounds to 3 decimals and strips trailing zeros (48.700 -> 48.7),
+// same "clean number" shape the backend itself produces.
+function formatStockQty(value: number) {
+  return Number((Number(value) || 0).toFixed(3));
+}
+
 // "Date and Timestamp" (Task 2) - a Daily Purchase Details Sheet needs both
 // which day AND what time a batch was actually logged, not just a bare
 // date, since a company can be delivered to more than once in the same
@@ -577,7 +590,7 @@ export function IngredientStockSection({
     return filteredIngredients.map((i) => [
       i.name,
       i.unit,
-      i.currentStock,
+      formatStockQty(i.currentStock),
       i.averageCost > 0 ? formatMoney(i.averageCost) : '—',
     ]);
   }
@@ -693,7 +706,7 @@ export function IngredientStockSection({
         ...filteredIngredients.map((i) => [
           { value: i.name },
           { value: i.unit },
-          { value: i.currentStock, style: { align: 'Right' as const } },
+          { value: formatStockQty(i.currentStock), style: { align: 'Right' as const } },
           { value: i.averageCost, style: { align: 'Right' as const, format: '"Rs "#,##0.00' } },
         ]),
       ],
@@ -765,7 +778,7 @@ export function IngredientStockSection({
     return filteredIngredients.map((ingredient) => {
       const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
       return [
-        `${ingredient.name}: ${ingredient.currentStock}${ingredient.unit} remaining`,
+        `${ingredient.name}: ${formatStockQty(ingredient.currentStock)}${ingredient.unit} remaining`,
         ingredient.categoryId ? categoryNameById.get(ingredient.categoryId) || 'Uncategorized' : 'Uncategorized',
         isLow ? 'LOW STOCK' : 'OK',
       ];
@@ -815,7 +828,7 @@ export function IngredientStockSection({
         ...filteredIngredients.map((ingredient) => {
           const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
           return [
-            { value: `${ingredient.name}: ${ingredient.currentStock}${ingredient.unit} remaining` },
+            { value: `${ingredient.name}: ${formatStockQty(ingredient.currentStock)}${ingredient.unit} remaining` },
             { value: ingredient.categoryId ? categoryNameById.get(ingredient.categoryId) || 'Uncategorized' : 'Uncategorized' },
             { value: isLow ? 'LOW STOCK' : 'OK', style: isLow ? { bold: true, color: 'B91C1C' } : undefined },
           ];
@@ -1290,7 +1303,7 @@ export function IngredientStockSection({
                 {filteredIngredients.map((i) => (
                   <div key={i.id} className="flex items-center justify-between gap-3 rounded-2xl bg-white ring-1 ring-emerald-100 px-4 py-3">
                     <span className="text-sm font-bold text-slate-700 truncate">{i.name}</span>
-                    <span className="text-sm font-black text-emerald-700 shrink-0">{i.currentStock}{i.unit}</span>
+                    <span className="text-sm font-black text-emerald-700 shrink-0">{formatStockQty(i.currentStock)}{i.unit}</span>
                   </div>
                 ))}
               </div>
@@ -1327,7 +1340,7 @@ export function IngredientStockSection({
                   </div>
                   <div className="flex items-center gap-4 shrink-0">
                     <div className={`text-[15px] font-black ${isLow ? "text-rose-600" : "text-slate-900"}`}>
-                      {ingredient.currentStock}{ingredient.unit}
+                      {formatStockQty(ingredient.currentStock)}{ingredient.unit}
                     </div>
                     <div className="flex items-center gap-1.5">
                       <button

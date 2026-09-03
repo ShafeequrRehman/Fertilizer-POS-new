@@ -3,6 +3,7 @@ const User = require("../models/User");
 const Customer = require("../models/Customer");
 const ShopSession = require("../models/ShopSession");
 const IngredientPurchase = require("../models/IngredientPurchase");
+const Ingredient = require("../models/Ingredient");
 const bcrypt = require("bcryptjs");
 const { PERMISSIONS } = require("./permissions");
 
@@ -128,6 +129,31 @@ async function backfillIngredientPurchaseStatus() {
   }
 }
 
+// Floating-Point Round-Off Fix: every NEW mutation of Ingredient.
+// currentStock now goes through the Safe Math Deduction/Addition Logic (see
+// ingredientUnits.js's toMilliUnits/fromMilliUnits, used by stockService.js/
+// ingredientController.js/ingredientPurchaseController.js), which
+// self-heals any already-corrupted value the next time it's touched. This
+// backfill just fixes existing corrupted values (e.g. "58.499999999999996")
+// immediately on startup, instead of waiting for each ingredient's next
+// order/purchase/restock to happen to repair it. Uses MongoDB's own
+// $round (server-side, no need to load every ingredient into Node) - runs
+// on every startup but is a no-op past the first time, since a value
+// already rounded to 3 decimals is unaffected by rounding it again.
+async function backfillIngredientStockPrecision() {
+  try {
+    const result = await Ingredient.updateMany(
+      {},
+      [{ $set: { currentStock: { $round: ["$currentStock", 3] }, averageCost: { $round: ["$averageCost", 3] } } }]
+    );
+    if (result.modifiedCount > 0) {
+      console.log(`[Seed] Rounded floating-point drift out of currentStock/averageCost on ${result.modifiedCount} ingredient(s).`);
+    }
+  } catch (error) {
+    console.error("[Seed] Failed to backfill ingredient stock precision:", error.message);
+  }
+}
+
 // Runs on every backend startup. Responsibilities, all safe to repeat:
 //
 // 1. Keep the Permission catalog collection in sync with
@@ -147,6 +173,9 @@ async function backfillIngredientPurchaseStatus() {
 // 5. Backfill status="received" onto pre-existing IngredientPurchase rows
 //    that predate the Dual-Status Purchase Order workflow (see
 //    backfillIngredientPurchaseStatus above).
+// 6. Round away any pre-existing floating-point drift in stored
+//    Ingredient.currentStock/averageCost values (see
+//    backfillIngredientStockPrecision above).
 module.exports = async function seedDefaults() {
   try {
     for (const permission of PERMISSIONS) {
@@ -181,6 +210,7 @@ module.exports = async function seedDefaults() {
     });
 
     await backfillIngredientPurchaseStatus();
+    await backfillIngredientStockPrecision();
   } catch (error) {
     console.error("[Seed] Failed to run startup seed:", error.message);
   }
