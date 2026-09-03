@@ -5,6 +5,7 @@ import { Provider } from 'react-redux';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ToastProvider } from '@/lib/toast';
 import { NotificationProvider } from '@/lib/notifications';
+import { installGlobalClickSound } from '@/lib/audio-feedback';
 import './index.css';
 
 // NOTE: './App' is deliberately NOT statically imported up here anymore.
@@ -84,6 +85,12 @@ Promise.all([import('@/store'), import('./App')])
         </ErrorBoundary>
       </React.StrictMode>,
     );
+
+    // Global UI Audio Feedback System: one document-level click listener,
+    // installed once here rather than per-page - see audio-feedback.ts's
+    // own comment on why this needs zero changes to individual
+    // button/card components anywhere else in the app.
+    installGlobalClickSound();
 
     // React 18's createRoot().render() performs its initial commit
     // synchronously for the very first render, so by this point the app

@@ -22,34 +22,61 @@ export interface DashboardPageDef {
    * 'inventory.manage').
    */
   permission?: string | string[];
+  /**
+   * Visual Hotkey Badge Tags: the global page-switching hotkey this page
+   * responds to (see DashboardShell.tsx's handleGlobalShortcut listener,
+   * which handles F1 through F10 - F11/F12 are left alone since browsers
+   * reserve those for fullscreen/devtools). F3 used to be a POS-internal
+   * "focus product search" action rather than a page link; that behavior
+   * was removed so F3 could join the same sequential F1-F10 page mapping
+   * as every other hotkeyed page here, per the "systematically map
+   * shortcut keys... no page left out" request - there are more sidebar
+   * pages than safely-usable function keys, so only the first 10 (by this
+   * array's own order) get one; everything after Ledger is intentionally
+   * left without a badge. Omitted means no badge/shortcut. Rendered as a
+   * small bracketed tag next to the label in NavItem, purely
+   * presentational - this field does not itself wire up the keyboard
+   * listener.
+   */
+  hotkey?: string;
 }
 
 export const DASHBOARD_PAGES: DashboardPageDef[] = [
-  { key: 'dashboard', label: 'Dashboard', href: '/dashboard' },
-  { key: 'pos', label: 'POS', href: '/dashboard/pos', permission: 'sales.create' },
-  { key: 'sales', label: 'Sales', href: '/dashboard/sales', permission: 'sales.create' },
-  { key: 'accounting', label: 'Accounting', href: '/dashboard/accounting', permission: 'expenses.manage' },
-  { key: 'purchase', label: 'Purchase', href: '/dashboard/purchase', permission: 'purchases.manage' },
+  // Sidebar/Route Bypass Bug Fix: `permission: 'view.dashboard'` on top of
+  // (not instead of) the existing hideDashboard role toggle - see
+  // getIsDashboardHidden's own comment and config/permissions.js's
+  // view.dashboard entry for why both independently gate this same item.
+  { key: 'dashboard', label: 'Dashboard', href: '/dashboard', permission: 'view.dashboard' },
+  { key: 'pos', label: 'POS', href: '/dashboard/pos', permission: 'sales.create', hotkey: 'F1' },
+  { key: 'sales', label: 'Sales', href: '/dashboard/sales', permission: 'sales.create', hotkey: 'F2' },
+  { key: 'accounting', label: 'Accounting', href: '/dashboard/accounting', permission: 'expenses.manage', hotkey: 'F3' },
+  { key: 'purchase', label: 'Purchase', href: '/dashboard/purchase', permission: 'purchases.manage', hotkey: 'F4' },
   // Moved out of Settings so they're directly reachable from the sidebar
   // instead of hidden behind a Settings sub-menu tab. Ingredient Stock
   // accepts EITHER 'inventory.manage' (Manager/Store Keeper, who should
   // reach both Ingredient Stock and Recipe Management) OR the narrower
   // 'stock.manage' (Stock Manager role - see config/permissions.js -
   // deliberately excluded from Recipe Management below, matching that
-  // role's "Ingredient Stock only" restriction). Dining Tables is
-  // deliberately left ungated: table CRUD itself has no permission
-  // requirement on the backend (see tableRoutes.js's own comment - only the
-  // turnover-timer setting needs 'settings.manage'), so every shop member
-  // can reach it, matching that same boundary.
-  { key: 'ingredient-stock', label: 'Ingredient Stock', href: '/dashboard/ingredient-stock', permission: ['inventory.manage', 'stock.manage'] },
-  { key: 'recipe-management', label: 'Recipe Management', href: '/dashboard/recipe-management', permission: 'inventory.manage' },
-  { key: 'dining-tables', label: 'Dining Tables', href: '/dashboard/dining-tables' },
-  { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage' },
-  { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage' },
-  { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage' },
+  // role's "Ingredient Stock only" restriction).
+  { key: 'ingredient-stock', label: 'Ingredient Stock', href: '/dashboard/ingredient-stock', permission: ['inventory.manage', 'stock.manage'], hotkey: 'F5' },
+  { key: 'recipe-management', label: 'Recipe Management', href: '/dashboard/recipe-management', permission: 'inventory.manage', hotkey: 'F6' },
+  // Sidebar/Route Bypass Bug Fix: this used to be deliberately ungated
+  // (table CRUD itself has no backend permission requirement - see
+  // tableRoutes.js's own comment, only the turnover-timer setting needs
+  // 'settings.manage' - so every shop member could reach it regardless).
+  // Now gated on the sidebar/route level by the new 'manage.tables' key -
+  // note the backend table CRUD endpoints themselves are unchanged and
+  // still open to any shop member, so this is a workspace-layout/UI
+  // restriction, not (yet) a backend access boundary.
+  { key: 'dining-tables', label: 'Dining Tables', href: '/dashboard/dining-tables', permission: 'manage.tables', hotkey: 'F7' },
+  { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F8' },
+  { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F9' },
+  { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F10' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
-  { key: 'offline', label: 'Connect Devices', href: '/dashboard/offline' },
+  // Sidebar/Route Bypass Bug Fix: same story as Dining Tables above - used
+  // to be ungated, now requires 'manage.devices'.
+  { key: 'offline', label: 'Connect Devices', href: '/dashboard/offline', permission: 'manage.devices' },
   // Role-gated (shop owner only) rather than permission-gated in
   // DashboardShell.tsx - kept here anyway so it still shows up as a
   // toggleable row in the Super Admin's page picker.
@@ -81,9 +108,16 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
 export function getFirstAccessiblePage(): string {
   const role = getAuthRole();
   // Shop Owner/Super Admin can never have Dashboard hidden (see
-  // getIsDashboardHidden) - and Super Admin doesn't even use this page
-  // list at all (see App.tsx's separate /superadmin tree).
-  if (role !== 'employee' || !getIsDashboardHidden()) return '/dashboard';
+  // getIsDashboardHidden/hasPermission both short-circuiting true for
+  // those roles) - and Super Admin doesn't even use this page list at all
+  // (see App.tsx's separate /superadmin tree). Checks BOTH independent
+  // Dashboard gates (see config/permissions.js's view.dashboard comment) so
+  // an employee who merely lacks the 'view.dashboard' permission (role
+  // never granted it, or it was revoked just for them) gets routed to
+  // their real first page immediately on login, instead of landing on
+  // '/dashboard' first and only then being bounced by
+  // DashboardPageClient.tsx's own route guard.
+  if (role !== 'employee' || (!getIsDashboardHidden() && hasPermission('view.dashboard'))) return '/dashboard';
 
   const firstAllowed = DASHBOARD_PAGES.find((item) => {
     if ((item.key === 'employees' || item.key === 'payroll') && role !== 'shopowner') return false;

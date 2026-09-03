@@ -16,7 +16,7 @@ import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReacha
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
-import { isTypingTarget, FOCUS_PRODUCT_SEARCH_EVENT, useBackspaceToClose } from '@/lib/keyboard-shortcuts';
+import { isTypingTarget, useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -140,10 +140,63 @@ export default function POSPage() {
   // mean right after adding it - clicking any cart row's own qty buttons
   // (handleIncreaseQty/handleDecreaseQty) also re-targets it here.
   const [activeCartItemIndex, setActiveCartItemIndex] = useState<number | null>(null);
+  // Quick Delivery Charges preset (Free/30/50/Custom row) - only ever
+  // read/shown for orderType 'Delivery' (see the orderType-change effect
+  // below, which resets this back to 0 the moment the cashier switches
+  // away from Delivery, so a stale fee can never silently ride along on a
+  // DineIn/TakeAway order). isCustomDeliveryFee toggles the manual numeric
+  // input open instead of one of the fixed presets.
+  const [deliveryFee, setDeliveryFee] = useState(0);
+  const [isCustomDeliveryFee, setIsCustomDeliveryFee] = useState(false);
 
   const suggestionRef = useRef<HTMLDivElement>(null);
   const phoneInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  // Strict Delivery Field Validation: the address input is the one field
+  // among Name/Phone/Address that never had a ref before this feature -
+  // validateOrderForm focuses this directly the moment a Delivery order is
+  // saved with no address, same as it already does for phone/name.
+  const addressInputRef = useRef<HTMLInputElement>(null);
+  // Instant Cursor Redirection (no popup): which of the three mandatory
+  // Delivery fields just got force-focused because Save was attempted (via
+  // click, or the Ctrl+S/Enter shortcut - see the keydown effect below)
+  // while it was still empty/invalid. Drives a temporary red-border flash
+  // on that exact input (see deliveryFlashClass) - cleared automatically a
+  // moment later so the flash reads as a pulse of attention, not a
+  // permanent error state once the cashier starts typing.
+  const [flashField, setFlashField] = useState<'phone' | 'customer' | 'address' | null>(null);
+  const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
+  }, []);
+
+  function flashAndFocus(field: 'phone' | 'customer' | 'address') {
+    const ref = field === 'phone' ? phoneInputRef : field === 'customer' ? nameInputRef : addressInputRef;
+    ref.current?.focus();
+    if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
+    setFlashField(field);
+    flashTimeoutRef.current = setTimeout(() => setFlashField(null), 1200);
+  }
+
+  function deliveryFlashClass(field: 'phone' | 'customer' | 'address') {
+    return flashField === field ? ' !border-rose-500 ring-2 ring-rose-300' : '';
+  }
+
+  // Strict Disabled Button State: the single source of truth for whether
+  // Save Order should look/behave disabled for a Delivery order - reused by
+  // both the button's own disabled attribute/style below AND
+  // validateOrderForm (so the Ctrl+S/Enter shortcut, which calls
+  // handleSaveOrder directly and never touches the button element, is
+  // caught by the exact same rule instead of a second, possibly-drifting
+  // copy of it).
+  function getMissingDeliveryField(): 'phone' | 'customer' | 'address' | null {
+    if (orderFormData.orderType !== 'Delivery') return null;
+    if (!orderFormData.phone.trim() || !/^03\d{9}$/.test(orderFormData.phone)) return 'phone';
+    if (!orderFormData.customer.trim()) return 'customer';
+    if (!orderFormData.address.trim()) return 'address';
+    return null;
+  }
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const productCodeInputRef = useRef<HTMLInputElement>(null);
   // Debounce/Timeout Mechanism for the Product Code box - see
@@ -151,7 +204,6 @@ export default function POSPage() {
   // fixes. Same ref+setTimeout/clearTimeout pattern as searchTimeoutRef
   // above, just its own independent timer.
   const productCodeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // F3 (see DashboardShell.tsx's global shortcut handler) focuses this.
   const productSearchInputRef = useRef<HTMLInputElement>(null);
   // The "service options dropdown" (Dine-In/Takeaway/Delivery) - Down Arrow
   // from the Product Code box jumps straight here, per the Hotkey
@@ -479,6 +531,18 @@ export default function POSPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTableOrders]);
 
+  // Quick Delivery Charges preset only ever means anything on a Delivery
+  // order - switching the order type away from Delivery (even after
+  // picking a preset) drops it straight back to 0 and closes the Custom
+  // input, so a fee picked earlier can never silently ride along onto a
+  // DineIn/TakeAway order that gets saved afterward.
+  useEffect(() => {
+    if (orderFormData.orderType !== 'Delivery') {
+      setDeliveryFee(0);
+      setIsCustomDeliveryFee(false);
+    }
+  }, [orderFormData.orderType]);
+
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (
@@ -574,7 +638,12 @@ export default function POSPage() {
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const tax = (subtotal * taxRate) / 100;
-  const total = subtotal + tax;
+  // Quick Delivery Charges preset - only ever non-zero while orderType is
+  // 'Delivery' (see the reset effect above), added straight onto the
+  // total exactly like backend/controllers/orderController.js's
+  // recalculateTotals does server-side.
+  const effectiveDeliveryFee = orderFormData.orderType === 'Delivery' ? deliveryFee : 0;
+  const total = subtotal + tax + effectiveDeliveryFee;
 
   function addToCart(product: Product) {
     // Same product and same variation merge into one cart row, matching your older POS logic.
@@ -681,22 +750,10 @@ export default function POSPage() {
     }
   }
 
-  // Keyboard Shortcuts - F3 (see DashboardShell.tsx's global shortcut
-  // handler) focuses the product search box once this page is mounted and
-  // listening for it - if F3 was pressed from a different dashboard page,
-  // DashboardShell navigates here first and dispatches this same event a
-  // moment later, once this effect has had a chance to register.
-  useEffect(() => {
-    function handleFocusSearch() {
-      productSearchInputRef.current?.focus();
-    }
-    window.addEventListener(FOCUS_PRODUCT_SEARCH_EVENT, handleFocusSearch);
-    return () => window.removeEventListener(FOCUS_PRODUCT_SEARCH_EVENT, handleFocusSearch);
-  }, []);
-
   // Keyboard Shortcuts - Operational & Checkout, grid navigation, and
   // Dynamic Numerical Quantities: all POS-screen-local (only active while
-  // this page is mounted, unlike F1/F2/F3 above which work from any
+  // this page is mounted, unlike the F1-F10 sidebar page hotkeys - see
+  // DashboardShell.tsx's global shortcut handler - which work from any
   // dashboard page). Guarded by isTypingTarget so normal typing/selection
   // in the phone/customer/address/note fields, the service type dropdown,
   // and the Product Code box (which handles its own Enter/Down Arrow
@@ -981,12 +1038,32 @@ export default function POSPage() {
       return true;
     }
 
-    // TakeAway and Delivery: name, phone, and address are all optional now -
-    // a walk-in counter customer or a quick phone order can check out with
-    // none of them, same as DineIn already allowed. If a phone IS entered
-    // though, it still has to be a real, valid number, and a name is
-    // required alongside it - a phone with no name (or an invalid one) is
-    // more likely a typo than a deliberate walk-in, and a due left on a
+    // Strict Delivery Field Validation: unlike DineIn/TakeAway (name/phone/
+    // address optional below), a Delivery order can't be handed to a rider
+    // with no idea who to deliver to or where - Customer Name, Phone, and
+    // Address are all mandatory here. No popup for this one: the Save
+    // button is already visually/strictly disabled the whole time a field
+    // is missing (see getMissingDeliveryField, used both for the button's
+    // own disabled attribute and here), so the only way this branch is
+    // even reached with a field still missing is the Ctrl+S/Enter shortcut
+    // bypassing the disabled button - silently redirect focus to the exact
+    // field (with a temporary red-border flash - see deliveryFlashClass)
+    // instead of interrupting with a modal.
+    if (orderFormData.orderType === 'Delivery') {
+      const missing = getMissingDeliveryField();
+      if (missing) {
+        flashAndFocus(missing);
+        return false;
+      }
+      return true;
+    }
+
+    // TakeAway: name, phone, and address are all optional - a walk-in
+    // counter customer or a quick phone order can check out with none of
+    // them, same as DineIn already allowed. If a phone IS entered though,
+    // it still has to be a real, valid number, and a name is required
+    // alongside it - a phone with no name (or an invalid one) is more
+    // likely a typo than a deliberate walk-in, and a due left on a
     // phone-but-no-name order can't reliably be found again later.
     if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty.');
     if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a phone number is entered.');
@@ -1067,6 +1144,7 @@ export default function POSPage() {
         total,
         subtotal,
         tax: tax,
+        deliveryFee: effectiveDeliveryFee,
         orderType: orderFormData.orderType,
         customer: { name: customerName, phone: customerPhone, address: orderFormData.address },
         address: orderFormData.address,
@@ -1599,10 +1677,10 @@ export default function POSPage() {
 
             <div className="relative space-y-3">
               <FormField label="Phone Number">
-                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('phone')}`} />
               </FormField>
               <FormField label="Customer Name">
-                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('customer')}`} />
               </FormField>
 
               {showSuggestions && (suggestions.length > 0 || showNewCustomerPrompt) ? (
@@ -1634,8 +1712,31 @@ export default function POSPage() {
             </div>
 
             <FormField label="Address">
-              <input name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+              <input ref={addressInputRef} name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('address')}`} />
             </FormField>
+
+            {orderFormData.orderType === 'Delivery' ? (
+              <FormField label="Delivery Fee">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <DeliveryFeeButton label="Free" active={!isCustomDeliveryFee && deliveryFee === 0} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(0); }} />
+                  <DeliveryFeeButton label="30" active={!isCustomDeliveryFee && deliveryFee === 30} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(30); }} />
+                  <DeliveryFeeButton label="50" active={!isCustomDeliveryFee && deliveryFee === 50} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(50); }} />
+                  <DeliveryFeeButton label="Custom" active={isCustomDeliveryFee} onClick={() => setIsCustomDeliveryFee(true)} />
+                </div>
+                {isCustomDeliveryFee ? (
+                  <input
+                    type="number"
+                    min={0}
+                    autoFocus
+                    value={deliveryFee === 0 ? '' : deliveryFee}
+                    onChange={(event) => setDeliveryFee(Math.max(Number(event.target.value) || 0, 0))}
+                    placeholder="Enter custom delivery fee"
+                    className="mt-1.5 w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none"
+                  />
+                ) : null}
+              </FormField>
+            ) : null}
+
             <FormField label="Order Note">
               <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
@@ -1714,9 +1815,12 @@ export default function POSPage() {
             <div className="space-y-1.5 rounded-[20px] bg-white/50 p-3 shadow-inner">
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Items Total</span><span>PKR {subtotal}</span></div>
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
+              {orderFormData.orderType === 'Delivery' ? (
+                <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Delivery Fee</span><span>{effectiveDeliveryFee > 0 ? `PKR ${effectiveDeliveryFee}` : 'Free'}</span></div>
+              ) : null}
               <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
-            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0 || getMissingDeliveryField() !== null} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
               {isSavingOrder ? 'Saving Order...' : 'Save Order'}
             </button>
           </div>
@@ -1926,6 +2030,17 @@ function PaymentButton({ icon, label, active, onClick }: { icon: React.ReactNode
         {icon}
         <span className="text-[9px] font-bold uppercase tracking-wide">{label}</span>
       </div>
+    </button>
+  );
+}
+
+// Quick Delivery Charges preset button (Free/30/50/Custom) - same active/
+// inactive visual language as PaymentButton above, just compact enough to
+// sit four-across in the delivery checkout panel.
+function DeliveryFeeButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={`rounded-xl border px-3 py-1.5 text-xs font-bold transition ${active ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>
+      {label}
     </button>
   );
 }

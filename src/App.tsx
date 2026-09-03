@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ProtectedRoute from '@/routes/ProtectedRoute';
+import RequirePermission from '@/routes/RequirePermission';
 import PublicOnlyRoute from '@/routes/PublicOnlyRoute';
 import LoginPage from '@/pages/LoginPage';
 import LicenseExpiredPage from '@/pages/LicenseExpiredPage';
@@ -86,13 +87,26 @@ export default function App() {
             <Route path="purchase" element={<PurchasePage />} />
             <Route path="ingredient-stock" element={<IngredientStockPage />} />
             <Route path="recipe-management" element={<RecipeManagementPage />} />
-            <Route path="dining-tables" element={<DiningTablesPage />} />
+            {/* Sidebar/Route Bypass Bug Fix: this route (and Connect Devices
+                below) used to be reachable by typing the URL directly even
+                when the sidebar link was hidden - dashboard-pages.ts's
+                `permission` field only ever controlled DashboardShell.tsx's
+                nav-item filter, not the route itself, and no route guard
+                existed here at all. RequirePermission (see
+                routes/RequirePermission.tsx) closes that gap by bouncing an
+                employee lacking 'manage.tables'/'manage.devices' back to
+                '/dashboard'. */}
+            <Route element={<RequirePermission permission="manage.tables" />}>
+              <Route path="dining-tables" element={<DiningTablesPage />} />
+            </Route>
             <Route path="management" element={<ManagementPage />} />
             <Route path="dues" element={<DuesPage />} />
             <Route path="ledger" element={<LedgerPage />} />
             <Route path="record" element={<RecordPage />} />
             <Route path="shifts" element={<ShiftsPage />} />
-            <Route path="offline" element={<OfflineSyncPage />} />
+            <Route element={<RequirePermission permission="manage.devices" />}>
+              <Route path="offline" element={<OfflineSyncPage />} />
+            </Route>
             <Route path="payroll" element={<PayrollPage />} />
             <Route path="reports" element={<ReportsPage />} />
             <Route path="admin" element={<AdminPage />} />

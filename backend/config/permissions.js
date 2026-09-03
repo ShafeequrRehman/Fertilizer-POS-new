@@ -46,6 +46,32 @@ const PERMISSIONS = [
   { key: "whatsapp.manage", label: "Manage WhatsApp", module: "Settings", description: "Connect WhatsApp and send messages to customers." },
   { key: "shop.session.manage", label: "Open / Close Shop", module: "Sales", description: "Open the shop to start taking orders, and close it at end of day to lock in the shift's order count and totals." },
   { key: "orders.record.view", label: "View Daily Record", module: "Sales", description: "View the full list of every order (pending, completed, paid, cancelled) placed during the current shift." },
+  // Sidebar/Route Bypass Bug Fix: Dashboard, Dining Tables, and Connect
+  // Devices used to have NO permission requirement at all in
+  // dashboard-pages.ts ("deliberately left ungated") - so unchecking
+  // anything for a role/employee had no effect on them whatsoever, they
+  // always stayed visible in the sidebar AND reachable by typing the URL
+  // directly. These three keys plug those pages into the exact same
+  // grant/revoke system (Role.permissions + User.extraPermissions/
+  // revokedPermissions - see authController.resolveEmployeePermissions) as
+  // every other permission, so they render as ordinary checkboxes in both
+  // the Role Editor and the per-employee override modal automatically (see
+  // EmployeesPage.tsx's RoleEditorModal/EmployeePermissionsModal, which are
+  // driven entirely off this catalog's `module` grouping - no UI code
+  // change needed there). Backfilled onto every pre-existing Role by
+  // seed.js's backfillWorkspaceAccessPermissions so nobody's current access
+  // silently breaks the moment this ships - see that migration's own
+  // comment.
+  //
+  // view.dashboard is intentionally independent of, and additional to, the
+  // existing Role.hideDashboard toggle (Dashboard Permission Gate) - that
+  // one is role-wide only and has no per-employee override; this key is
+  // the one a Shop Owner can now also revoke for a single employee (e.g.
+  // "Hasan" in the override modal) without touching the whole role. Either
+  // one hiding it is enough - see dashboard-pages.ts/DashboardPageClient.tsx.
+  { key: "view.dashboard", label: "View Dashboard", module: "Workspace Access", description: "See the main Dashboard home page (sales/order overview) after logging in." },
+  { key: "manage.tables", label: "Manage Dining Tables", module: "Workspace Access", description: "View and manage the Dining Tables page - table layout, categories, and turnover timers." },
+  { key: "manage.devices", label: "Manage Connect Devices", module: "Workspace Access", description: "View and manage the Connect Devices page - local network/offline sync setup." },
 ];
 
 const PERMISSION_KEYS = PERMISSIONS.map((permission) => permission.key);
@@ -53,27 +79,35 @@ const PERMISSION_KEYS = PERMISSIONS.map((permission) => permission.key);
 // Sensible starting permission sets for the default roles the migration /
 // shop-creation flow seeds automatically. Shop owners can freely edit or
 // delete these afterward - they are not hardcoded elsewhere.
+// Sidebar/Route Bypass Bug Fix: every default role below gets all three
+// new Workspace Access keys (view.dashboard/manage.tables/manage.devices) -
+// before those keys existed, Dashboard/Dining Tables/Connect Devices were
+// ungated and every role could already see them, so a freshly-seeded shop
+// should keep that exact behavior on day one. A Shop Owner can freely
+// uncheck any of these per-role (or per-employee) afterward.
+const WORKSPACE_ACCESS_DEFAULTS = ["view.dashboard", "manage.tables", "manage.devices"];
+
 const DEFAULT_ROLE_PRESETS = {
-  Cashier: ["sales.create", "sales.print", "customers.manage"],
+  Cashier: ["sales.create", "sales.print", "customers.manage", ...WORKSPACE_ACCESS_DEFAULTS],
   Manager: [
     "sales.create", "sales.edit", "sales.delete", "sales.refund", "sales.print",
     "inventory.manage", "customers.manage", "dues.manage", "reports.view", "shop.session.manage",
-    "orders.record.view",
+    "orders.record.view", ...WORKSPACE_ACCESS_DEFAULTS,
   ],
-  Accountant: ["reports.view", "expenses.manage", "purchases.manage", "dues.manage"],
-  "Store Keeper": ["inventory.manage", "suppliers.manage", "purchases.manage"],
+  Accountant: ["reports.view", "expenses.manage", "purchases.manage", "dues.manage", ...WORKSPACE_ACCESS_DEFAULTS],
+  "Store Keeper": ["inventory.manage", "suppliers.manage", "purchases.manage", ...WORKSPACE_ACCESS_DEFAULTS],
   // Front-of-house only: POS + Sales + printing bills, and their own daily
   // sales figures - deliberately NOTHING else (no inventory, no customer/
   // dues management, no the full Reports page). See dashboard-pages.ts's
   // own comment on how this maps to sidebar visibility.
-  Receptionist: ["sales.create", "sales.print", "reports.view.own_sales"],
+  Receptionist: ["sales.create", "sales.print", "reports.view.own_sales", ...WORKSPACE_ACCESS_DEFAULTS],
   // Kitchen stock only: ingredients, categories, purchase logging, and
   // supplier records - deliberately NOT inventory.manage (which would also
   // unlock Recipe Management) and NOT purchases.manage (which would also
   // unlock the standalone Purchase page) - see requireAnyPermission.js's
   // callers for how stock.manage alone still covers real ingredient/
   // purchase actions.
-  "Stock Manager": ["stock.manage", "suppliers.manage", "reports.view.inventory"],
+  "Stock Manager": ["stock.manage", "suppliers.manage", "reports.view.inventory", ...WORKSPACE_ACCESS_DEFAULTS],
 };
 
-module.exports = { PERMISSIONS, PERMISSION_KEYS, DEFAULT_ROLE_PRESETS };
+module.exports = { PERMISSIONS, PERMISSION_KEYS, DEFAULT_ROLE_PRESETS, WORKSPACE_ACCESS_DEFAULTS };

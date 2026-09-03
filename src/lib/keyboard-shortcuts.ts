@@ -52,10 +52,3 @@ export function useBackspaceToClose(onClose: () => void, active = true) {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose, active]);
 }
-
-// Window CustomEvent names the global and local shortcut layers use to talk
-// to each other across separate route pages (F3 needs to jump to the POS
-// screen *and then* focus its search box, but DashboardShell has no direct
-// reference to POSPage's search input - it only knows POSPage is listening
-// for this event once it mounts).
-export const FOCUS_PRODUCT_SEARCH_EVENT = 'pos-shortcuts:focus-search';

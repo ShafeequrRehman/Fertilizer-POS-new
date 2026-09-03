@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { CheckCircle2, XCircle, Info, AlertTriangle, X } from "lucide-react";
 import { isTypingTarget } from "@/lib/keyboard-shortcuts";
+import { playToastSound } from "@/lib/audio-feedback";
 
 // Lightweight in-house toast + confirm-dialog system. This replaces native
 // window.alert()/window.confirm() everywhere in the app: those are
@@ -88,6 +89,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const id = ++idCounter;
     setToasts((prev) => [...prev, { id, tone, message }]);
     window.setTimeout(() => dismiss(id), 4000);
+    // Global UI Audio Feedback System: every toast (success/error/info/
+    // warning) funnels through this one function, so this is the single
+    // place that needs to play the Toast/Notification Sound.
+    playToastSound();
   }, [dismiss]);
 
   const toast = {
@@ -124,7 +129,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // individually. Backspace is guarded by isTypingTarget so it still just
   // deletes a character normally inside, say, a confirm dialog that ever
   // grows a text field - it only closes the dialog when focus isn't on
-  // one. Popup (z-[220]) sits above Confirm (z-[210]), so it's checked
+  // one. Popup (z-[520]) sits above Confirm (z-[510]), so it's checked
   // first when both would otherwise be open at once.
   useEffect(() => {
     function handleGlobalClose(event: KeyboardEvent) {
@@ -149,7 +154,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {/* Toast stack - styled like an iOS/iPhone notification banner: a
           colored "app icon" badge, a bold short label, and the message
           underneath, all on a frosted glass card. */}
-      <div className="fixed top-5 right-5 z-[200] flex w-full max-w-sm flex-col gap-2.5 pointer-events-none">
+      <div className="fixed top-5 right-5 z-[500] flex w-full max-w-sm flex-col gap-2.5 pointer-events-none">
         {toasts.map((t) => {
           const meta = TONE_META[t.tone];
           return (
@@ -176,10 +181,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         })}
       </div>
 
-      {/* Confirm (Yes/No) dialog */}
+      {/* Confirm (Yes/No) dialog - deliberately one of the highest z-indexes
+          in the whole app (see the Close Shop flow's own comment in
+          DashboardShell.tsx's handleClose for why this can end up needing
+          to sit above another already-open modal, like the Day-End Closing
+          Summary sheet, rather than being hidden behind it). */}
       {confirmState && (
         <div
-          className="glass-overlay fixed inset-0 z-[210] flex items-center justify-center p-4"
+          className="glass-overlay fixed inset-0 z-[510] flex items-center justify-center p-4"
           onClick={() => respond(false)}
         >
           <div
@@ -218,7 +227,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           cancelled"). */}
       {popupState && (
         <div
-          className="glass-overlay fixed inset-0 z-[220] flex items-center justify-center p-4"
+          className="glass-overlay fixed inset-0 z-[520] flex items-center justify-center p-4"
           onClick={() => setPopupState(null)}
         >
           <div

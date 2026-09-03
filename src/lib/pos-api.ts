@@ -989,6 +989,13 @@ export async function respondToOrderChangeRequest(id: string, action: 'approve' 
 export interface ShopProfile {
   _id?: string;
   name?: string;
+  // Already stored/returned by the backend (Shop.phone, spread straight
+  // through by shopOwnerController.getOwnShop - see its own comment on
+  // which fields it strips vs. keeps) but never declared here since
+  // nothing in this app's UI read it before the Shop Closing Summary's
+  // "Send WhatsApp to Owner" button, which prefills its phone-number field
+  // from this.
+  phone?: string;
   address?: string;
   enabledPages?: string[] | null;
   hasPageVisibilityKey?: boolean;

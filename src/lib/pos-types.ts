@@ -383,6 +383,14 @@ export interface DayEndReport {
   kitchenStockPurchaseCount: number;
   netProfit: number;
   orderCount: number;
+  // Day-End Shop Closing Summary: order count split by orderType, always
+  // all three keys present (0 for a type with no orders in range) - see
+  // reportController.getDayEndReport's own comment.
+  orderTypeBreakdown: { DineIn: number; TakeAway: number; Delivery: number };
+  // Total still-owed amount (sum of Order.remainingAmount) across every
+  // non-cancelled order in range - what the Close Shop screen shows as
+  // "Outstanding Due".
+  totalDue: number;
   expenseCount: number;
   expenseBreakdown: DayEndExpenseBreakdown[];
   kitchenStockDetails: KitchenStockDetail[];
@@ -523,6 +531,9 @@ export interface OrderFormData {
   note: string;
   waiter: string;
   table: string;
+  // Quick Delivery Charges preset (Free/30/50/Custom row) - only ever
+  // meaningful for orderType 'Delivery'. Undefined/0 for every other order.
+  deliveryFee?: number;
 }
 
 export interface OrderPayload {
@@ -557,6 +568,11 @@ export interface OrderPayload {
   total: number;
   subtotal: number;
   tax: number;
+  // Quick Delivery Charges preset (POSPage.tsx's Free/30/50/Custom row) -
+  // folded into `total` server-side by recalculateTotals (orderController.js),
+  // never trusted as authoritative from this payload alone. 0/undefined for
+  // every non-Delivery order.
+  deliveryFee?: number;
   orderType: OrderType;
   customer: {
     name: string;

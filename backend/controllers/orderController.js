@@ -29,12 +29,17 @@ function computeDiscountAmount(discount, subtotal) {
 // No tax is added by default (previously a hardcoded 10% of subtotal) - the
 // discount, if any, is subtracted straight from the subtotal to get the
 // final payable total - never trusted from the client's own "total" field.
-function recalculateTotals(items, discount) {
+// deliveryFee (Quick Delivery Charges preset - POSPage.tsx's Free/30/50/
+// Custom row) is added back AFTER the discount, never discounted itself -
+// a % discount off the food subtotal shouldn't also silently shave money
+// off a flat delivery charge.
+function recalculateTotals(items, discount, deliveryFee) {
   const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
   const tax = 0;
   const discountAmount = computeDiscountAmount(discount, subtotal);
-  const total = Math.max(subtotal + tax - discountAmount, 0);
-  return { subtotal, tax, total, discountAmount };
+  const deliveryFeeAmount = Math.max(Number(deliveryFee) || 0, 0);
+  const total = Math.max(subtotal + tax - discountAmount, 0) + deliveryFeeAmount;
+  return { subtotal, tax, total, discountAmount, deliveryFee: deliveryFeeAmount };
 }
 
 // Only ever stores a discount when it actually reduced the total by
@@ -47,6 +52,26 @@ function buildDiscountRecord(discount, discountAmount) {
     value: Number(discount.value) || 0,
     amount: discountAmount,
   };
+}
+
+// Delivery Field Validation (Task: Strict Delivery Field Validation): the
+// UI already forces this (POSPage.tsx's handleSaveOrder focuses the exact
+// missing input before it ever calls the API), but a saved order is
+// permanent and this same createOrder path is also hit directly by
+// importOfflineOrders and the public/offline sync flows - so the name/
+// phone/address requirement is re-checked here too rather than trusted
+// from the client, same reasoning as recalculateTotals never trusting the
+// client's own total. Only ever applies to orderType "Delivery" - DineIn/
+// TakeAway keep these fields optional exactly as before.
+function validateDeliveryFields(payload) {
+  if (payload.orderType !== "Delivery") return null;
+  const name = (payload.customer?.name || "").trim();
+  const phone = (payload.customer?.phone || "").trim();
+  const address = (payload.customer?.address || payload.address || "").trim();
+  if (!name) return { field: "name", error: "Customer name is required for Delivery orders." };
+  if (!phone) return { field: "phone", error: "Phone number is required for Delivery orders." };
+  if (!address) return { field: "address", error: "Delivery address is required for Delivery orders." };
+  return null;
 }
 
 function kitchenItemKey(item) {
@@ -487,7 +512,12 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    const totals = recalculateTotals(payload.items || [], payload.discount);
+    const deliveryFieldError = validateDeliveryFields(payload);
+    if (deliveryFieldError) {
+      return res.status(400).json({ error: deliveryFieldError.error, reason: "delivery_field_required", field: deliveryFieldError.field });
+    }
+
+    const totals = recalculateTotals(payload.items || [], payload.discount, payload.deliveryFee);
 
     // Task 3 (Recipe/Stock Management): deduct raw-ingredient stock the
     // moment this order is placed - that's when the kitchen actually starts
@@ -505,6 +535,7 @@ exports.createOrder = async (req, res) => {
       subtotal: totals.subtotal,
       tax: totals.tax,
       total: totals.total,
+      deliveryFee: totals.deliveryFee,
       discount: buildDiscountRecord(payload.discount, totals.discountAmount),
       dailyOrderNumber,
       shopSequenceNumber,
@@ -807,7 +838,18 @@ exports.importOfflineOrders = async (req, res) => {
           }
         }
 
-        const totals = recalculateTotals(payload.items || [], payload.discount);
+        const deliveryFieldError = validateDeliveryFields(payload);
+        if (deliveryFieldError) {
+          failed.push({
+            localOrderId: entry.localOrderId,
+            error: deliveryFieldError.error,
+            reason: "delivery_field_required",
+            field: deliveryFieldError.field,
+          });
+          continue;
+        }
+
+        const totals = recalculateTotals(payload.items || [], payload.discount, payload.deliveryFee);
 
         // Same real-time deduction as the online createOrder path above -
         // an offline order was already cooked/served on the till in the
@@ -825,6 +867,7 @@ exports.importOfflineOrders = async (req, res) => {
           subtotal: totals.subtotal,
           tax: totals.tax,
           total: totals.total,
+          deliveryFee: totals.deliveryFee,
           discount: buildDiscountRecord(payload.discount, totals.discountAmount),
           dailyOrderNumber,
           shopSequenceNumber,
@@ -1169,7 +1212,7 @@ async function applyOrderPatch(order, patch, req, options) {
     }
 
     if (itemsOrDiscountChanged) {
-      const totals = recalculateTotals(order.items, order.discount);
+      const totals = recalculateTotals(order.items, order.discount, order.deliveryFee);
       order.subtotal = totals.subtotal;
       order.tax = totals.tax;
       order.total = totals.total;

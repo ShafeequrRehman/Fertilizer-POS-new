@@ -5,6 +5,7 @@ import { clearOrderTableTimer, fetchOrders, fetchTableSettings } from "@/lib/pos
 import type { SavedOrder } from "@/lib/pos-types";
 import { isTableTimerExpired, tableTimerAlertKey } from "@/lib/table-timer";
 import { hasPermission } from "@/lib/auth";
+import { playToastSound } from "@/lib/audio-feedback";
 
 // Real-time operational-event notification system - separate from the
 // generic toast/popup/confirm system in lib/toast.tsx (that one stays for
@@ -169,6 +170,14 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       timersRef.current.delete(item.id);
     }, TOAST_DURATION_MS);
     timersRef.current.set(item.id, timer);
+    // Global UI Audio Feedback System: every real-time notification (bell
+    // history + its own toast stack, both set above) funnels through this
+    // one notify() call, so this is the single place that needs to play
+    // the Toast/Notification Sound for this system (separate from
+    // toast.tsx's own push(), which covers its own toast/popup/confirm
+    // system - the two are independent notification mechanisms in this
+    // app, see this file's own header comment).
+    playToastSound();
 
     if (meta?.navigateToPos && pathnameRef.current !== "/dashboard/pos") {
       navigate("/dashboard/pos");

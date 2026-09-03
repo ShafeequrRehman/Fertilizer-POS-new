@@ -15,6 +15,7 @@
 import type { ReactElement } from 'react';
 import { Document, Page, Text, View, StyleSheet, pdf } from '@react-pdf/renderer';
 import { getAuthShop } from '@/lib/auth';
+import { playPrintSound } from '@/lib/audio-feedback';
 
 export interface PdfStat {
   label: string;
@@ -198,6 +199,11 @@ export function ReportPdfDocument({
 // read and used together.
 // eslint-disable-next-line react-refresh/only-export-components
 export async function downloadPdfDocument(document: ReactElement, filename: string): Promise<void> {
+  // Global UI Audio Feedback System: every "Download/Print PDF" button in
+  // the app funnels through this one function - fired immediately, before
+  // the (synchronous but non-zero-cost) PDF render below, so it reads as
+  // an instant response to the click rather than a delayed afterthought.
+  playPrintSound();
   // Callers pass a <ReportPdfDocument> element (or any other component
   // that itself renders down to a <Document>), not a <Document> element
   // directly - react-pdf's own `pdf()` typing wants the latter, but at

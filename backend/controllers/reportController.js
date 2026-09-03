@@ -19,8 +19,17 @@ const KITCHEN_STOCK_CATEGORY = "Kitchen Stock";
 function resolveRange(query) {
   const { startDate, endDate } = query;
   if (startDate && endDate) {
-    const start = new Date(`${startDate}T00:00:00.000Z`);
-    const end = new Date(`${endDate}T23:59:59.999Z`);
+    // Day-End Shop Closing Summary passes full ISO timestamps (the current
+    // open ShopSession's exact openedAt, and "now") instead of plain
+    // YYYY-MM-DD dates - a shift can start and end mid-day, so widening it
+    // out to midnight-to-midnight the way the Reports page's Daily/
+    // Monthly/Yearly picker intentionally does would pull in orders from
+    // BEFORE the shop opened (e.g. a previous shift earlier that same
+    // calendar day). Detected by the presence of "T" - a plain date string
+    // never contains one, an ISO timestamp always does - so this stays
+    // fully backward compatible with every existing YYYY-MM-DD caller.
+    const start = startDate.includes("T") ? new Date(startDate) : new Date(`${startDate}T00:00:00.000Z`);
+    const end = endDate.includes("T") ? new Date(endDate) : new Date(`${endDate}T23:59:59.999Z`);
     if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
       return { start, end };
     }
@@ -49,6 +58,14 @@ function resolveRange(query) {
 //                        per category so a manager can see where money went.
 //   Net Profit         = Total Revenue - Total Product Cost - Other Expenses.
 //
+// Day-End Shop Closing Summary (the "Close Shop" screen, DashboardShell.tsx's
+// ShopClosingSummaryModal) reuses this exact endpoint - scoped to the
+// current open ShopSession's [openedAt, now) window instead of an
+// arbitrary picked range - for its own Total Orders (Dine-In/Takeaway/
+// Delivery split, via orderTypeBreakdown) and Outstanding Due figures
+// (totalDue), on top of the Revenue/Expenses/Net Profit this already
+// computed.
+//
 // Ingredient Purchase Workflow enhancement: every IngredientPurchase batch
 // logged in range (see ingredientPurchaseController.createPurchase) is
 // ALSO surfaced here, grouped under a single "Kitchen Stock" heading in
@@ -76,7 +93,7 @@ exports.getDayEndReport = async (req, res) => {
     const shopObjectId = new mongoose.Types.ObjectId(shopId);
     const { start, end } = resolveRange(req.query);
 
-    const [orderTotals, expenseTotals, expenseByCategory, kitchenStockPurchaseDocs] = await Promise.all([
+    const [orderTotals, orderTypeTotals, expenseTotals, expenseByCategory, kitchenStockPurchaseDocs] = await Promise.all([
       Order.aggregate([
         { $match: { shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } } },
         {
@@ -86,8 +103,24 @@ exports.getDayEndReport = async (req, res) => {
             costOfGoods: { $sum: "$costPrice" },
             grossProfit: { $sum: "$grossProfit" },
             orderCount: { $sum: 1 },
+            // Shop Closing Summary: total still-owed amount across every
+            // non-cancelled order in range - remainingAmount is already
+            // clamped/maintained by every place that ever touches it (see
+            // Order.js's own comment), so a plain $sum here is exact, no
+            // extra "only if status !== paid" filter needed - a fully-paid
+            // order's remainingAmount is already 0.
+            totalDue: { $sum: "$remainingAmount" },
           },
         },
+      ]),
+      // Day-End Shop Closing Summary: order count split by orderType
+      // (DineIn/TakeAway/Delivery - see Order.js's enum) - a separate
+      // $group (keyed by orderType instead of null) rather than trying to
+      // fold this into the aggregate above, since a single $group can only
+      // ever produce one row per distinct _id.
+      Order.aggregate([
+        { $match: { shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } } },
+        { $group: { _id: "$orderType", count: { $sum: 1 } } },
       ]),
       Expense.aggregate([
         { $match: { shopId: shopObjectId, date: { $gte: start, $lte: end } } },
@@ -121,6 +154,18 @@ exports.getDayEndReport = async (req, res) => {
     const revenue = orderTotals[0]?.revenue || 0;
     const costOfGoods = orderTotals[0]?.costOfGoods || 0;
     const orderCount = orderTotals[0]?.orderCount || 0;
+    const totalDue = Math.round((orderTotals[0]?.totalDue || 0) * 100) / 100;
+    // Day-End Shop Closing Summary: always all three keys, even at 0 - a
+    // shift with zero Delivery orders should still show "Delivery: 0" on
+    // the closing screen rather than omitting the row entirely, which is
+    // why this starts as a fixed object instead of building it purely from
+    // whatever _id values the aggregate happened to return.
+    const orderTypeBreakdown = { DineIn: 0, TakeAway: 0, Delivery: 0 };
+    for (const row of orderTypeTotals) {
+      if (row._id && Object.prototype.hasOwnProperty.call(orderTypeBreakdown, row._id)) {
+        orderTypeBreakdown[row._id] = row.count;
+      }
+    }
     const otherExpenses = expenseTotals[0]?.total || 0;
     const expenseCount = expenseTotals[0]?.count || 0;
     const kitchenStockPurchases = kitchenStockPurchaseDocs.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
@@ -153,6 +198,8 @@ exports.getDayEndReport = async (req, res) => {
       kitchenStockPurchaseCount,
       netProfit,
       orderCount,
+      orderTypeBreakdown,
+      totalDue,
       expenseCount,
       expenseBreakdown,
       kitchenStockDetails: kitchenStockPurchaseDocs.map((p) => ({

@@ -1,3 +1,5 @@
+import { playPrintSound } from "@/lib/audio-feedback";
+
 // Shared "did this print actually go out?" reporter - every print call
 // site in the app (POSPage, SalesPage, EditOrderPage, CancelOrderModal,
 // DashboardShell's background watchers, PrintOrderPage, and the hidden
@@ -28,6 +30,12 @@ export interface ToastLike {
 }
 
 export function reportPrintOutcome(promise: Promise<unknown>, label: string, toast: ToastLike): void {
+  // Global UI Audio Feedback System: fires immediately (not after the
+  // print promise resolves) - the Print Sound is meant to confirm the
+  // button press itself, the same instant the print request went out,
+  // not "the print definitely succeeded" (that's still toast.success/
+  // error below, once the real outcome is known).
+  playPrintSound();
   promise
     .then((result) => {
       const outcome = result as PrintOutcome | undefined;

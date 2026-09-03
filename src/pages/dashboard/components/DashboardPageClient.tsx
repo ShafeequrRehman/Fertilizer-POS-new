@@ -15,7 +15,7 @@ import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type B
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
-import { getIsDashboardHidden } from '@/lib/auth';
+import { getIsDashboardHidden, hasPermission } from '@/lib/auth';
 import { getFirstAccessiblePage } from '@/lib/dashboard-pages';
 
 type EmployeeStat = { name: string; sales: number; count: number };
@@ -37,7 +37,11 @@ type ServiceStats = {
 };
 
 // Dashboard Permission Gate: an employee whose Role has "Hide Dashboard"
-// checked must not be able to reach this page even by direct navigation
+// checked, OR whose resolved permissions don't include 'view.dashboard'
+// (the role never granted it, or a Shop Owner explicitly revoked it for
+// just this one employee via the Manage Staff override modal - see
+// config/permissions.js's own comment on why these are two independent
+// gates), must not be able to reach this page even by direct navigation
 // (typing/bookmarking the '/dashboard' URL) - the sidebar link and every
 // automatic post-login redirect already steer them elsewhere (see
 // DashboardShell.tsx's nav filter and lib/dashboard-pages.ts's
@@ -48,7 +52,7 @@ type ServiceStats = {
 // run - never violates the Rules of Hooks, and never fires a network
 // request for a page about to be redirected away from anyway.
 export default function DashboardPageClient() {
-  if (getIsDashboardHidden()) {
+  if (getIsDashboardHidden() || !hasPermission('view.dashboard')) {
     return <Navigate to={getFirstAccessiblePage()} replace />;
   }
   return <DashboardPageClientInner />;

@@ -122,6 +122,12 @@ const orderSchema = new mongoose.Schema(
       address: { type: String, default: "" },
     },
     address: { type: String, default: "" },
+    // Quick Delivery Charges preset (POSPage.tsx's Free/30/50/Custom row) -
+    // only ever meaningful for orderType "Delivery", folded straight into
+    // `total` by recalculateTotals (orderController.js) alongside
+    // subtotal/discount, same single-source-of-truth pattern as discount
+    // itself. Stays 0 for every non-Delivery order.
+    deliveryFee: { type: Number, default: 0, min: 0 },
     note: { type: String, default: "" },
     waiter: { type: String, default: "" },
     table: { type: String, default: "" },

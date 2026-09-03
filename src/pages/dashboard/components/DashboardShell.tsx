@@ -20,7 +20,7 @@ import { getStoreSettings } from '@/lib/pos-settings';
 import { getIpcRenderer } from '@/lib/electron-bridge';
 import { reportPrintOutcome } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
-import { FOCUS_PRODUCT_SEARCH_EVENT } from '@/lib/keyboard-shortcuts';
+import ShopClosingSummaryModal from '@/pages/dashboard/components/ShopClosingSummaryModal';
 
 // Icons keyed by DASHBOARD_PAGES's `key` - kept separate from that shared
 // list since it lives in lib/ and can't hold JSX.
@@ -84,39 +84,26 @@ export default function DashboardShell() {
     .filter((item) => isPageEnabled(item.key))
     .map((item) => ({ ...item, icon: PAGE_ICONS[item.key] }));
 
-  // Keyboard Shortcuts - Core Navigation: F1/F2/F3 work from anywhere in
-  // the dashboard (not just while the POS/Sales page itself is focused),
-  // wired up once here rather than duplicated on every page. F-keys never
-  // type a character into a field, so unlike the Ctrl+S/Enter/Arrow/+-
-  // shortcuts each page wires up locally (see POSPage.tsx), these don't
-  // need an isTypingTarget guard. Each one is a no-op if this employee's
-  // Role doesn't even have that page in their nav (same gate navItems
-  // above already applies) - a hotkey shouldn't be a backdoor around the
-  // permission system.
+  // Keyboard Shortcuts - Core Navigation: every DASHBOARD_PAGES entry that
+  // carries a `hotkey` (F1-F10 - see that file's own comment on why it
+  // stops there) works from anywhere in the dashboard, not just while that
+  // page itself is focused - wired up once here rather than duplicated on
+  // every page. F-keys never type a character into a field, so unlike the
+  // Ctrl+S/Enter/Arrow/+- shortcuts each page wires up locally (see
+  // POSPage.tsx), these don't need an isTypingTarget guard. Driven
+  // straight off navItems (this employee's own permission/enabledPages-
+  // filtered nav, not the raw DASHBOARD_PAGES list) so a hotkey can never
+  // navigate somewhere their sidebar wouldn't also let them click - a
+  // hotkey shouldn't be a backdoor around the permission system. F3 used
+  // to be a POS-internal "focus product search" shortcut instead of a page
+  // link; that behavior was removed so F3 could take its place in this
+  // same sequential mapping like every other hotkeyed page.
   useEffect(() => {
     function handleGlobalShortcut(event: KeyboardEvent) {
-      if (event.key === 'F1') {
-        event.preventDefault();
-        if (navItems.some((item) => item.key === 'pos')) navigate('/dashboard/pos');
-        return;
-      }
-      if (event.key === 'F2') {
-        event.preventDefault();
-        if (navItems.some((item) => item.key === 'sales')) navigate('/dashboard/sales');
-        return;
-      }
-      if (event.key === 'F3') {
-        event.preventDefault();
-        if (!navItems.some((item) => item.key === 'pos')) return;
-        if (pathname !== '/dashboard/pos') {
-          navigate('/dashboard/pos');
-          // POSPage needs a moment to mount and register its own listener
-          // for this event before it's actually able to hear it.
-          window.setTimeout(() => window.dispatchEvent(new Event(FOCUS_PRODUCT_SEARCH_EVENT)), 120);
-        } else {
-          window.dispatchEvent(new Event(FOCUS_PRODUCT_SEARCH_EVENT));
-        }
-      }
+      const match = navItems.find((item) => item.hotkey === event.key);
+      if (!match) return;
+      event.preventDefault();
+      navigate(match.href);
     }
     window.addEventListener('keydown', handleGlobalShortcut);
     return () => window.removeEventListener('keydown', handleGlobalShortcut);
@@ -234,6 +221,7 @@ export default function DashboardShell() {
                 icon={item.icon}
                 label={item.label}
                 href={item.href}
+                hotkey={item.hotkey}
                 active={pathname === item.href}
                 onNavigate={() => setSidebarOpen(false)}
               />
@@ -605,6 +593,13 @@ function ShopStatusControl() {
   const canManage = hasPermission('shop.session.manage');
   const [busy, setBusy] = useState(false);
   const { isOnline } = useNetworkStatus();
+  // Day-End Shop Closing Summary Sheet: "Close Restaurant" now opens this
+  // review screen first instead of closing immediately - handleClose
+  // itself (unresolved-orders confirmation, the actual close call, the
+  // success toast) is unchanged and untouched, just triggered from the
+  // modal's own confirm button now (see onConfirmClose below) instead of
+  // straight off this button's onClick.
+  const [showClosingSummary, setShowClosingSummary] = useState(false);
 
   async function handleOpen() {
     setBusy(true);
@@ -638,13 +633,27 @@ function ShopStatusControl() {
         const preview = orders.slice(0, 8).map((o) => `#${o.dailyOrderNumber ?? o.id.slice(-4)} - ${o.status === 'pending' ? 'pending' : `PKR ${o.remainingAmount} due`}`).join('\n');
         const extra = orders.length > 8 ? `\n...and ${orders.length - 8} more` : '';
         setBusy(false);
-        const confirmed = await confirm(
+        // Sequence bug fix: this used to `await confirm(...)` right here,
+        // which meant handleClose's own promise didn't resolve until the
+        // cashier answered the Unresolved Orders dialog. That's harmless
+        // when this button called handleClose directly, but the Day-End
+        // Closing Summary sheet's own Confirm button (ShopClosingSummaryModal)
+        // awaits this same handleClose (via onConfirmClose) and only
+        // dismisses itself once that promise resolves - so that modal sat
+        // frozen on "Closing..." for as long as the confirm dialog stayed
+        // unanswered, and the confirm dialog itself was rendering underneath
+        // that still-open modal the whole time (see toast.tsx's z-index
+        // bump for the other half of that). Firing this off instead of
+        // awaiting it lets handleClose (and therefore the summary modal)
+        // return/dismiss the instant the pending-order check comes back,
+        // while the Unresolved Orders dialog still opens and drives its own
+        // "Close Anyway" -> handleClose(true) recursion independently.
+        void confirm(
           `${orders.length} order${orders.length === 1 ? ' is' : 's are'} still pending or unpaid:\n\n${preview}${extra}\n\nClose the restaurant anyway? These orders stay in the system either way.`,
           { title: 'Unresolved orders', confirmText: 'Close Anyway', tone: 'danger' }
-        );
-        if (confirmed) {
-          await handleClose(true);
-        }
+        ).then((confirmed) => {
+          if (confirmed) void handleClose(true);
+        });
         return;
       }
 
@@ -694,13 +703,21 @@ function ShopStatusControl() {
       {canManage && (
         <button
           type="button"
-          onClick={() => handleClose(false)}
+          onClick={() => setShowClosingSummary(true)}
           disabled={busy}
           className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Lock size={16} />
           {busy ? 'Closing...' : 'Close Restaurant'}
         </button>
+      )}
+      {showClosingSummary && (
+        <ShopClosingSummaryModal
+          session={session}
+          closing={busy}
+          onClose={() => setShowClosingSummary(false)}
+          onConfirmClose={() => handleClose(false)}
+        />
       )}
     </div>
   );
@@ -831,12 +848,14 @@ function NavItem({
   icon,
   label,
   href,
+  hotkey,
   active,
   onNavigate,
 }: {
   icon: React.ReactNode;
   label: string;
   href?: string;
+  hotkey?: string;
   active?: boolean;
   onNavigate?: () => void;
 }) {
@@ -846,11 +865,29 @@ function NavItem({
       : 'text-gray-500 hover:bg-white/50'
   }`;
 
+  // Visual Hotkey Badge Tag: a small bracketed [F1]-style chip pinned to
+  // the right edge of the row (ml-auto on the label wrapper below pushes
+  // it there regardless of label length) - subtle enough not to compete
+  // with the label/icon, but always legible against either nav-item state
+  // (the active item's own yellow-green gradient background needs a
+  // darker/more opaque chip than the plain-text inactive rows do, or it'd
+  // wash out).
+  const badge = hotkey ? (
+    <span
+      className={`ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${
+        active ? 'bg-black/15 text-black/70' : 'bg-black/5 text-gray-400'
+      }`}
+    >
+      {hotkey}
+    </span>
+  ) : null;
+
   if (!href) {
     return (
       <div className={`${className} cursor-default`}>
         {icon}
-        <span className="text-sm">{label}</span>
+        <span className="flex min-w-0 flex-1 items-center text-sm">{label}</span>
+        {badge}
       </div>
     );
   }
@@ -858,7 +895,8 @@ function NavItem({
   return (
     <Link to={href} className={className} onClick={onNavigate}>
       {icon}
-      <span className="text-sm">{label}</span>
+      <span className="flex min-w-0 flex-1 items-center text-sm">{label}</span>
+      {badge}
     </Link>
   );
 }
