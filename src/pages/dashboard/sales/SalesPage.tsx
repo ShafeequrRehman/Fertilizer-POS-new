@@ -1322,14 +1322,11 @@ export default function SalesPage() {
             <Surface text={statusTab === 'pending' ? 'No pending orders matched the current filters.' : 'No completed orders matched the current filters.'} />
           ) : null}
           {!loading && activeOrders.length > 0 ? (
-            // Dynamic Expanding Grid: minimum 3 order cards per row, always -
-            // never dropped below 3 at any width. Scales up to 4/5/6 using
-            // CONTAINER queries (@2xl/@3xl/@5xl, keyed off the @container
-            // section above) rather than viewport breakpoints, so the step
-            // up actually tracks this pane's own available width instead of
-            // the full browser window - the two-pane split layout means
-            // those routinely disagree (see the @container comment above).
-            <div className="grid grid-cols-3 gap-3 @2xl:grid-cols-4 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2 @3xl:grid-cols-5 @5xl:grid-cols-6">
+            // Fixed Grid: exactly 3 order cards per row on every desktop
+            // width - no step-up at any container breakpoint (previously
+            // scaled to 4/5/6 via @2xl/@3xl/@5xl; removed per requirement
+            // that Sales always shows 3 cards regardless of screen size).
+            <div className="grid grid-cols-3 gap-3 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
               {pagedOrders.map((order) => {
                 const isSelected = selectedOrder?.id === order.id;
                 const heroImage = resolveOrderImage(order.items);

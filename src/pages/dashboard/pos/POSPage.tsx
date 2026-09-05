@@ -1572,11 +1572,10 @@ export default function POSPage() {
               extra sub-item lines scroll inside their own capped-height box
               (see max-h-[64px] overflow-y-auto below) instead of stretching
               the card taller than its neighbours or spilling past its edges.
-              Grid: minimum 4 cards per row at every width (grid-cols-4 is
-              the floor, never dropped to 3/2 at a narrower breakpoint the
-              way the old lg:grid-cols-3 override used to), scaling up to 5/6
-              only on wider screens. */}
-          <div className={viewMode === 'grid' ? 'grid grid-cols-4 gap-2 xl:grid-cols-5 2xl:grid-cols-6' : 'space-y-2'}>
+              Grid: fixed at exactly 4 cards per row on every desktop width
+              (grid-cols-4, no xl/2xl step-up) - never 3/2 at a narrower
+              breakpoint, never 5/6 at a wider one. */}
+          <div className={viewMode === 'grid' ? 'grid grid-cols-4 gap-2' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
             {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group, groupIndex) => {
