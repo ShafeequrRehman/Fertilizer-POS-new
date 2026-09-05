@@ -105,7 +105,11 @@ export default function AddItemsManager({
               {categories.map((item) => <button key={item} type="button" onClick={() => setCategory(item)} className={`rounded-full px-4 py-2 text-sm font-bold ${category === item ? 'bg-black text-white' : 'bg-[#F6F7FB] text-gray-500'}`}>{item}</button>)}
             </div>
 
-            <div className="grid max-h-[360px] grid-cols-3 gap-3 overflow-y-auto pr-1">
+            {/* 1 column on phone - each card has a 64px image plus three
+                lines of text next to it, which has no room to breathe at 3
+                (or even 2) columns on a narrow screen. 2 columns once
+                there's some width (sm), 3 once there's plenty (lg). */}
+            <div className="grid max-h-[360px] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
               {visibleProducts.map((product) => (
                 <button key={product.id} type="button" onClick={() => addDraft({ name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image })} className="group flex items-center gap-3 rounded-[24px] border border-transparent bg-[#FAFBFC] p-3 text-left transition hover:border-[#D6E332]">
                   <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-2xl bg-slate-100 shadow-inner">

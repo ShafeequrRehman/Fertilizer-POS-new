@@ -224,6 +224,15 @@ export default function SalesPage() {
   // from also triggering an unwanted scroll-to-bottom before the person has
   // clicked anything.
   const userSelectedOrderRef = useRef(false);
+  // Bumped on every selectOrder() call, even when the clicked card is the
+  // same order that's already selected (e.g. the very first card, which
+  // loadFromCache/refresh already auto-selected on page load - see
+  // userSelectedOrderRef's own comment). The scroll effect below is keyed
+  // on selectedOrder?.id/status, so clicking a card that doesn't change
+  // either of those would otherwise skip the effect entirely and silently
+  // eat the first click. Including this tick in the dependency array makes
+  // "click this same order again" register as a real trigger too.
+  const [selectionTick, setSelectionTick] = useState(0);
   // Order list shows 10, "Load More" grows it by 10 - same pattern as
   // Record/Ledger/Dues.
   const [visibleOrderCount, setVisibleOrderCount] = useState(10);
@@ -357,9 +366,11 @@ export default function SalesPage() {
     });
     return () => cancelAnimationFrame(frame);
     // Deliberately NOT depending on the whole selectedOrder object - see
-    // comment above.
+    // comment above. selectionTick IS included so re-clicking the same
+    // already-selected card (id/status unchanged) still re-runs this -
+    // see selectionTick's own comment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedOrder?.id, selectedOrder?.status]);
+  }, [selectedOrder?.id, selectedOrder?.status, selectionTick]);
 
   // A customer can have more than one order open at once now, so "Previous
   // Dues" here means the customer's TRUE outstanding balance - every other
@@ -540,8 +551,29 @@ export default function SalesPage() {
         fetchList({ status: 'pending' }),
         fetchShopSessionHistory(),
       ]);
-      const latestSession = history && history.length > 0 ? history[0] : null;
-      setShopSession(latestSession);
+      // BUG FIX: this used to be `setShopSession(latestSession)` unconditionally
+      // - including `null` whenever `history` came back empty for any reason
+      // (a transient blip, replica lag, or this shop's session simply not
+      // having landed in ShopSession history yet). That silently wiped out an
+      // already-known-good "shop is open" state a few seconds after the page
+      // first painted it correctly from the cache (loadFromCache/
+      // useShopSession), and getBusinessWindow/filterOrdersInBusinessWindow
+      // treat "no session" as "match nothing" - so every shift-scoped number
+      // on this page (Completed, Cancelled, the Completed tab's own list)
+      // would flash to 0 the moment this 45-second poll's history fetch came
+      // back empty, even though the shop was genuinely still open the whole
+      // time. Only ever UPGRADE the persisted shopSession state here; never
+      // downgrade it to "we don't know" just because one poll's history
+      // array was empty - same "don't wipe good state over a transient
+      // hiccup" reasoning as the recentData/isStale guards around setOrders
+      // below. `latestSession` (used just below for THIS call's own scoping
+      // math) still falls back to whatever this render already knew, so a
+      // one-off empty history fetch doesn't wrongly scope this pass's data
+      // to "no session" either.
+      const latestSession = history && history.length > 0 ? history[0] : shopSession;
+      if (history && history.length > 0) {
+        setShopSession(history[0]);
+      }
 
       const isStale = localEditVersionRef.current !== versionAtStart;
 
@@ -694,6 +726,7 @@ export default function SalesPage() {
   // hydrated it) skips the extra round trip entirely.
   function selectOrder(order: SavedOrder) {
     userSelectedOrderRef.current = true;
+    setSelectionTick((tick) => tick + 1);
     setSelectedOrder(order);
     // Discount now lives on the order-details card itself (see the
     // Complete Order button's own comment below), not the payment modal -
@@ -1256,7 +1289,7 @@ export default function SalesPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3 sm:space-y-6">
       {status ? <Banner tone={status.tone} text={status.text} /> : null}
       {/* 2-up on phone widths (a 4-up row left ~85px per card, which
           truncated every currency value down to "Rs 45,2..." - illegible),
@@ -1322,11 +1355,13 @@ export default function SalesPage() {
             <Surface text={statusTab === 'pending' ? 'No pending orders matched the current filters.' : 'No completed orders matched the current filters.'} />
           ) : null}
           {!loading && activeOrders.length > 0 ? (
-            // Fixed Grid: exactly 3 order cards per row on every desktop
-            // width - no step-up at any container breakpoint (previously
-            // scaled to 4/5/6 via @2xl/@3xl/@5xl; removed per requirement
-            // that Sales always shows 3 cards regardless of screen size).
-            <div className="grid grid-cols-3 gap-3 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
+            // Grid: 1 column on a real phone (this pane is full-width there,
+            // and even 2 narrow order cards side by side truncated every
+            // currency value), 2 once the container has some breathing room,
+            // then a flat 3 from @lg up and never higher - no step-up to
+            // 4/5/6 at any wider container width (removed per requirement
+            // that Sales always shows exactly 3 cards on desktop).
+            <div className="grid grid-cols-1 gap-3 @xs:grid-cols-2 @lg:grid-cols-3 lg:min-h-0 lg:flex-1 lg:content-start lg:overflow-y-auto lg:pr-2">
               {pagedOrders.map((order) => {
                 const isSelected = selectedOrder?.id === order.id;
                 const heroImage = resolveOrderImage(order.items);
@@ -1836,7 +1871,13 @@ function formatOrderDateTime(createdAt: string) { return new Date(createdAt).toL
 
 function Banner({ tone, text }: { tone: 'success' | 'error' | 'info'; text: string }) { return <div className={`glass rounded-[28px] px-5 py-4 text-sm ${tone === 'success' ? 'text-emerald-700' : tone === 'error' ? 'text-rose-700' : 'text-sky-700'}`}>{text}</div>; }
 function Surface({ text }: { text: string }) { return <div className="glass rounded-[32px] p-8 text-sm text-gray-500">{text}</div>; }
-function StatCard({ label, value }: { label: string; value: string }) { return <div className="glass rounded-[28px] px-5 py-5"><p className="text-[11px] font-black uppercase tracking-[0.18em] text-gray-500">{label}</p><p className="mt-2 text-3xl font-black text-gray-900">{value}</p></div>; }
+// Was px-5 py-5 with a text-3xl value - a comfortable size on a tall
+// desktop window, but on a short one (a small/half window, or a resized
+// browser with DevTools eating vertical space) these 4 cards alone could
+// push the actual order list below the fold before it even started.
+// Noticeably more compact now - still perfectly readable, just not eating
+// a third of a short viewport for 4 numbers.
+function StatCard({ label, value }: { label: string; value: string }) { return <div className="glass rounded-2xl px-4 py-3"><p className="text-[10px] font-black uppercase tracking-[0.15em] text-gray-500">{label}</p><p className="mt-0.5 text-xl font-black text-gray-900">{value}</p></div>; }
 function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="flex min-w-0 items-center gap-2.5 text-sm text-gray-600"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/60 text-gray-500 shadow-inner">{icon}</span><span className="truncate">{text}</span></div>; }
 
 // A dine-in table is either a Family Table or a plain/Simple table (see

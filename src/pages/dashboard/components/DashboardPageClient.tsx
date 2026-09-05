@@ -111,7 +111,14 @@ function DashboardPageClientInner() {
     async function loadSession() {
       try {
         const history = await fetchShopSessionHistory();
-        setShopSession(history && history.length > 0 ? history[0] : null);
+        // Only ever UPGRADE to a real session here - never downgrade to null
+        // just because this one poll's history array came back empty (a
+        // transient blip, replica lag, etc). getBusinessWindow treats "no
+        // session" as "match nothing", so a wrongful null here flashed every
+        // shift-scoped stat on this dashboard to 0 a few seconds after they
+        // first painted correctly from the cache, even though the shop was
+        // genuinely still open the whole time.
+        if (history && history.length > 0) setShopSession(history[0]);
       } catch (error) {
         console.error('Dashboard shop session fetch error', error);
       }

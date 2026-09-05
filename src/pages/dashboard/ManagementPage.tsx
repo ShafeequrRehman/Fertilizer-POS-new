@@ -86,42 +86,48 @@ function CustomerView() {
             <UserPlus size={18} /> New Customer
           </button>
         </div>
-        <table className="w-full text-left">
-          <thead className="bg-white/30 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-            <tr>
-              <th className="px-8 py-4">Customer</th>
-              <th className="px-8 py-4">Tier</th>
-              <th className="px-8 py-4">Spent</th>
-              <th className="px-8 py-4">Points</th>
-              <th className="px-8 py-4"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/40">
-            {CUSTOMERS.map((c) => (
-              <tr key={c.id} className="group hover:bg-teal-50/30 transition-colors">
-                <td className="px-8 py-6 flex items-center gap-3">
-                  <div className="w-10 h-10 bg-teal-100/80 text-teal-600 rounded-full flex items-center justify-center font-black shadow-inner">{c.name[0]}</div>
-                  <div>
-                    <div className="text-sm font-black text-slate-900">{c.name}</div>
-                    <div className="text-[10px] font-bold text-slate-400">{c.email}</div>
-                  </div>
-                </td>
-                <td className="px-8 py-6">
-                  <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase shadow-inner ${c.tier === 'Gold' ? 'bg-amber-100/80 text-amber-600' : 'bg-slate-100/80 text-slate-600'}`}>
-                    {c.tier}
-                  </span>
-                </td>
-                <td className="px-8 py-6 text-sm font-black text-slate-900">PKR {c.spent.toFixed(2)}</td>
-                <td className="px-8 py-6 text-teal-600 font-black text-sm flex items-center gap-1">
-                  <Star size={14} fill="currentColor"/> {c.points}
-                </td>
-                <td className="px-8 py-6 text-right">
-                  <button className="glass-pill rounded-full p-2 text-slate-300 hover:text-teal-600"><History size={18}/></button>
-                </td>
+        {/* overflow-x-auto: 5 columns of px-8 padding badly overflow a
+            phone-width viewport otherwise - this lets the table itself
+            scroll sideways within its own card instead of blowing out the
+            whole page's horizontal layout. */}
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[560px] text-left">
+            <thead className="bg-white/30 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              <tr>
+                <th className="px-8 py-4">Customer</th>
+                <th className="px-8 py-4">Tier</th>
+                <th className="px-8 py-4">Spent</th>
+                <th className="px-8 py-4">Points</th>
+                <th className="px-8 py-4"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-white/40">
+              {CUSTOMERS.map((c) => (
+                <tr key={c.id} className="group hover:bg-teal-50/30 transition-colors">
+                  <td className="px-8 py-6 flex items-center gap-3">
+                    <div className="w-10 h-10 bg-teal-100/80 text-teal-600 rounded-full flex items-center justify-center font-black shadow-inner">{c.name[0]}</div>
+                    <div>
+                      <div className="text-sm font-black text-slate-900">{c.name}</div>
+                      <div className="text-[10px] font-bold text-slate-400">{c.email}</div>
+                    </div>
+                  </td>
+                  <td className="px-8 py-6">
+                    <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase shadow-inner ${c.tier === 'Gold' ? 'bg-amber-100/80 text-amber-600' : 'bg-slate-100/80 text-slate-600'}`}>
+                      {c.tier}
+                    </span>
+                  </td>
+                  <td className="px-8 py-6 text-sm font-black text-slate-900">PKR {c.spent.toFixed(2)}</td>
+                  <td className="px-8 py-6 text-teal-600 font-black text-sm flex items-center gap-1">
+                    <Star size={14} fill="currentColor"/> {c.points}
+                  </td>
+                  <td className="px-8 py-6 text-right">
+                    <button className="glass-pill rounded-full p-2 text-slate-300 hover:text-teal-600"><History size={18}/></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

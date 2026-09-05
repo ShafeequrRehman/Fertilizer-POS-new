@@ -95,6 +95,15 @@ export default function POSPage() {
   // real-time table-timer alert popup (TableTimerAlertWatcher.tsx, mounted
   // in DashboardShell) which fires when one of these crosses its deadline.
   const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
+  // How many units of each product are sitting in a currently-pending order
+  // right now (across every order type, not just DineIn) - keyed by the
+  // product's own name, lowercased/trimmed, since order line items only
+  // ever carry a plain name/variation (no productId - see OrderPayload's
+  // own comment on items). Drives the green "N Pending" badge on each POS
+  // product card below. Refreshed on the same poll as activeTableOrders
+  // (see loadPendingItemQuantities/TABLE_STATUS_POLL_MS) plus right after
+  // this till saves a new order, so it feels real-time without a websocket.
+  const [pendingItemQuantities, setPendingItemQuantities] = useState<Record<string, number>>({});
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -484,9 +493,53 @@ export default function POSPage() {
     }
   }
 
+  // Sums item quantities across every currently-pending order (any order
+  // type - a "3 Pending" burger badge should count a Dine-In, Takeaway, or
+  // Delivery order for it the same way) into pendingItemQuantities. Also
+  // folds in this till's own still-queued (not yet synced) local orders,
+  // same reasoning as mergeLocalPendingIntoActiveTables above - an offline
+  // order should bump the badge instantly on this till, not just once it's
+  // synced and shows up in the next cloud fetch.
+  async function loadPendingItemQuantities() {
+    try {
+      const orders = await fetchOrders({ status: 'pending' });
+      const next: Record<string, number> = {};
+      (orders ?? []).forEach((order) => {
+        if (order.status !== 'pending') return;
+        order.items?.forEach((item) => {
+          const key = item.name.trim().toLowerCase();
+          next[key] = (next[key] || 0) + item.quantity;
+        });
+      });
+      if (isDesktopApp()) {
+        try {
+          const pendingLocal = await getPendingLocalOrders();
+          pendingLocal.forEach((record) => {
+            const payload = record.payload as { status?: string; items?: Array<{ name: string; quantity: number }> };
+            if (payload.status && payload.status !== 'pending') return;
+            (payload.items ?? []).forEach((item) => {
+              const key = item.name.trim().toLowerCase();
+              next[key] = (next[key] || 0) + item.quantity;
+            });
+          });
+        } catch {
+          // Local Hub unreachable - server-known pending quantities above still apply.
+        }
+      }
+      setPendingItemQuantities(next);
+    } catch (error) {
+      console.error('Failed to refresh pending item quantities:', error);
+      // Leave the last-known quantities in place rather than blanking every badge out.
+    }
+  }
+
   useEffect(() => {
     void loadActiveTableOrders();
-    const interval = setInterval(() => void loadActiveTableOrders(), TABLE_STATUS_POLL_MS);
+    void loadPendingItemQuantities();
+    const interval = setInterval(() => {
+      void loadActiveTableOrders();
+      void loadPendingItemQuantities();
+    }, TABLE_STATUS_POLL_MS);
     return () => clearInterval(interval);
   }, []);
 
@@ -1338,6 +1391,10 @@ export default function POSPage() {
       // Lock the table this order just used right away, instead of
       // waiting up to TABLE_STATUS_POLL_MS for the next poll to notice it.
       if (savedOrder.orderType === 'DineIn' && savedOrder.table) void loadActiveTableOrders();
+      // Same instant-feedback reasoning, for the pending-quantity badges -
+      // don't wait up to TABLE_STATUS_POLL_MS for this order's own items to
+      // show up on the product cards that were just used to build it.
+      void loadPendingItemQuantities();
       orderFinalized = true;
       // "content based on activity context" (Technical Requirements #1): a
       // dine-in order mentions its table, and a customer-sync failure gets
@@ -1510,7 +1567,7 @@ export default function POSPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3 sm:space-y-6">
       {statusMessage ? <StatusBanner tone={statusMessage.tone} text={statusMessage.text} /> : null}
       {/* Checkout sits to the right of the products from tablet width (sm,
           640px) up - never stacking there, even if that means the product
@@ -1522,12 +1579,20 @@ export default function POSPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_280px] sm:gap-4 lg:grid-cols-[minmax(0,1.85fr)_340px] 2xl:grid-cols-[minmax(0,1.85fr)_360px] items-start">
         <section className="space-y-5">
           <div className="glass rounded-[32px] p-4">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="relative w-full lg:max-w-md">
+            {/* Was `flex-col` on mobile with `self-end` on the view toggle -
+                that put the toggle on its own separate line, right-aligned
+                with a big empty gap above/left of it (self-end only pushes
+                a flex-col child to the end of ITS OWN row, and the search
+                bar above was already a full row by itself). A search input
+                plus two small icon buttons comfortably fits on one line at
+                any real phone width, so this is just one row always now -
+                tighter, and no more orphaned toggle row. */}
+            <div className="flex items-center gap-2 sm:gap-4">
+              <div className="relative min-w-0 flex-1 lg:max-w-md">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input ref={productSearchInputRef} type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none transition focus:border-[#D6E332]" />
+                <input ref={productSearchInputRef} type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
               </div>
-              <div className="glass-pill flex items-center gap-2 self-end rounded-full p-1.5">
+              <div className="glass-pill flex shrink-0 items-center gap-2 rounded-full p-1.5">
                 <IconToggleButton active={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid size={18} /></IconToggleButton>
                 <IconToggleButton active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={18} /></IconToggleButton>
               </div>
@@ -1572,16 +1637,23 @@ export default function POSPage() {
               extra sub-item lines scroll inside their own capped-height box
               (see max-h-[64px] overflow-y-auto below) instead of stretching
               the card taller than its neighbours or spilling past its edges.
-              Grid: fixed at exactly 4 cards per row on every desktop width
-              (grid-cols-4, no xl/2xl step-up) - never 3/2 at a narrower
-              breakpoint, never 5/6 at a wider one. */}
-          <div className={viewMode === 'grid' ? 'grid grid-cols-4 gap-2' : 'space-y-2'}>
+              Grid: fixed at exactly 4 cards per row on every DESKTOP width
+              (sm/640px and up - grid-cols-4, no xl/2xl step-up, never 5/6 on
+              a wider screen). Below that, on an actual phone, 4 columns of
+              a 266px-tall card has no room to breathe - drops to 2 columns
+              instead, the narrowest that still keeps each card legible and
+              tappable, rather than reusing the desktop-only fixed count. */}
+          <div className={viewMode === 'grid' ? 'grid grid-cols-2 gap-2 sm:grid-cols-4' : 'space-y-2'}>
             {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
             {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
             {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group, groupIndex) => {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
+              // How many units of THIS product are sitting in a pending order
+              // right now (see pendingItemQuantities' own comment) - 0 when
+              // nothing's pending, which hides the badge below entirely.
+              const pendingQty = pendingItemQuantities[group.name.trim().toLowerCase()] || 0;
               // Keyboard Shortcuts - grid navigation: a visible ring around
               // whichever card the Arrow keys currently point to (see the
               // POS-local keydown effect above) - Space adds this exact
@@ -1592,6 +1664,65 @@ export default function POSPage() {
                   <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 h-[110px] w-full'}`}>
                     <img src={resolveProductImage(group)} alt={group.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-110" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent" />
+                    {/* Pending-order notification badge - opposite corner
+                        from the Product Code badge below, same small-pill
+                        treatment as the Family Table "F" badge. Shown only
+                        while this product has at least one unit sitting in a
+                        currently-pending order (any order type); shows the
+                        live count (e.g. "3 Pending") and disappears the
+                        instant that count reaches 0 - see
+                        pendingItemQuantities/loadPendingItemQuantities. */}
+                    {pendingQty > 0 ? (
+                      <span className="absolute left-1 top-1 rounded-full bg-emerald-500/90 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={`${pendingQty} unit${pendingQty === 1 ? '' : 's'} of ${group.name} in pending orders right now`}>
+                        {pendingQty} Pending
+                      </span>
+                    ) : null}
+                    {/* Product Code badge - same small-pill-in-the-corner
+                        treatment as the Family Table "F" badge on the
+                        Dine-In table grid. Only shown for a single-variation
+                        card (one real SKU) - a size/variant group has no
+                        single code to represent. Pink when a real code is
+                        assigned (scannable), muted gray "null" when the
+                        cashier hasn't set one yet, so it's obvious at a
+                        glance which products still need a code/barcode
+                        assigned. Positioned inside the image bounds
+                        (top-1/right-1, not a negative offset) since both
+                        this container and the card button have
+                        overflow-hidden. */}
+                    {!hasVariations ? (
+                      group.variations[0].productCode ? (
+                        <span className="absolute right-1 top-1 rounded-full bg-pink-500/90 px-1.5 py-0.5 text-[8px] font-black leading-none text-white shadow-sm">
+                          {group.variations[0].productCode}
+                        </span>
+                      ) : (
+                        <span className="absolute right-1 top-1 rounded-full bg-slate-500/80 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title="No product code assigned yet">
+                          null
+                        </span>
+                      )
+                    ) : (
+                      // Multi-size/variant card (e.g. Small/Large/XL) has no
+                      // single code to show - so list every variation's own
+                      // code, in variation order, comma-separated (e.g.
+                      // "1,2,3,4"), instead of just a count. A variation with
+                      // no code yet shows as "null" in its slot so it's
+                      // obvious which specific size still needs one. Pink =
+                      // every size is coded, gray = none are, amber = a mix.
+                      (() => {
+                        const codedCount = group.variations.filter((v) => v.productCode).length;
+                        const totalCount = group.variations.length;
+                        const codeList = group.variations.map((v) => v.productCode || 'null').join(',');
+                        const colorClass =
+                          codedCount === totalCount ? 'bg-pink-500/90' : codedCount === 0 ? 'bg-slate-500/80' : 'bg-amber-500/90';
+                        return (
+                          <span
+                            className={`absolute right-1 top-1 max-w-[80%] truncate rounded-full ${colorClass} px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm`}
+                            title={group.variations.map((v) => `${v.variation}: ${v.productCode || 'no code assigned'}`).join(' · ')}
+                          >
+                            {codeList}
+                          </span>
+                        );
+                      })()
+                    )}
                   </div>
                   <div className={`flex flex-col justify-between overflow-hidden ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
                     <div className="min-h-0 overflow-hidden">

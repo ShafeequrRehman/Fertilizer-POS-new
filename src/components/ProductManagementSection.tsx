@@ -862,11 +862,21 @@ export function ProductManagementSection({
 
             return (
               <div key={group.key} className="rounded-[24px] border border-slate-100 bg-white shadow-sm hover:border-indigo-100 hover:shadow-md transition-all group overflow-hidden">
-                <div className="flex items-center justify-between p-4 gap-4">
+                {/* Was one `flex items-center justify-between` row with the
+                    price/stock/action block `shrink-0` on the right - on a
+                    phone, that fixed-width block (plus the 56px image) left
+                    the name/badges nowhere to go, and since the outer card
+                    has `overflow-hidden`, the overflow got clipped instead
+                    of wrapping - reading as text and icons crammed/
+                    overlapping right on top of the image. Stacks into two
+                    full-width rows below sm instead: image+name on top,
+                    price/stock/actions underneath, wrapping freely.
+                    Unchanged from sm (640px) up. */}
+                <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
                   <button
                     type="button"
                     onClick={() => hasMultiple && toggleGroup(group.key)}
-                    className={`flex items-center gap-4 flex-1 min-w-0 text-left ${hasMultiple ? "cursor-pointer" : "cursor-default"}`}
+                    className={`flex items-center gap-4 min-w-0 text-left sm:flex-1 ${hasMultiple ? "cursor-pointer" : "cursor-default"}`}
                   >
                     {hasMultiple ? (
                       <span className="text-slate-400 shrink-0">
@@ -912,7 +922,7 @@ export function ProductManagementSection({
                       ) : null}
                     </div>
                   </button>
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex flex-wrap items-center justify-end gap-4 sm:shrink-0">
                     <div className="flex flex-col items-end">
                       <div className="text-[15px] font-black text-slate-900">
                         {hasMultiple ? (minPrice === maxPrice ? `PKR ${minPrice}` : `PKR ${minPrice} - ${maxPrice}`) : `PKR ${single.price}`}

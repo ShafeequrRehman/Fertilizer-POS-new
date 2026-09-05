@@ -18,7 +18,16 @@ exports.getProducts = async (req, res) => {
   // and every Add Items panel open; same double-hydration overhead already
   // found and fixed on Order's own list endpoints (see orderController.js).
   const products = await Product.find(query).sort({ createdAt: -1 }).lean();
-  const categories = ["All", ...new Set(products.map((product) => product.category))];
+  // "All" is the reserved meta-option meaning "every category" - it is
+  // NOT itself a real category. If any product's own category field
+  // happens to literally be "All" (a stray/legacy value), including it
+  // here produced a duplicate "All" pill in the POS/Sales category filter
+  // (case-insensitive, since the filter buttons treat it as the same
+  // option either way).
+  const realCategories = new Set(
+    products.map((product) => product.category).filter((category) => category && category.trim().toLowerCase() !== "all"),
+  );
+  const categories = ["All", ...realCategories];
   res.json({ categories, products });
 };
 

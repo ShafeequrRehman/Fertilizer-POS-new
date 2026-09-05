@@ -383,7 +383,12 @@ export default function PurchasePage() {
     return groupedOrders.filter((group) => {
       if (statusTab !== 'all' && group.status !== statusTab) return false;
       if (activeSupplierId && group.supplierId !== activeSupplierId) return false;
-      if (query && !group.purchaseOrderNumber.toLowerCase().includes(query) && !group.companyName.toLowerCase().includes(query)) return false;
+      // purchaseOrderNumber/companyName can be missing on a purchase order
+      // created before those fields existed (see the PO-number and
+      // companyName features) - calling .toLowerCase() straight on either
+      // was crashing the whole app the instant a search query matched (or
+      // even just existed alongside) one of those legacy records.
+      if (query && !(group.purchaseOrderNumber || '').toLowerCase().includes(query) && !(group.companyName || '').toLowerCase().includes(query)) return false;
       return true;
     });
   }, [groupedOrders, statusTab, activeSupplierId, search]);
@@ -597,15 +602,21 @@ export default function PurchasePage() {
           <p className="text-slate-500 font-bold">Manage supply chain and stock replenishment.</p>
         </div>
 
-        <div className="flex gap-3">
-          <div className="relative hidden xl:block">
+        <div className="flex flex-wrap gap-3">
+          {/* Was `hidden xl:block` - only appeared once the window hit
+              1280px wide, which invisibly hid the search box on any normal
+              (non-maximized-ultrawide) desktop window size. Always visible
+              now, full width on a narrow window and a fixed 256px once
+              there's room (sm, 640px) - same breathing-room breakpoint used
+              elsewhere in the app, not the near-unreachable xl one. */}
+          <div className="relative w-full sm:w-64">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Track PO number or supplier..."
-              className="pl-12 pr-4 py-3 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-indigo-500 w-64 text-sm outline-none"
+              className="w-full pl-12 pr-4 py-3 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-indigo-500 text-sm outline-none"
             />
           </div>
           <button
@@ -1525,7 +1536,7 @@ function SupplierDashboard({
       </div>
 
       {stream === 'completed' ? (
-        <div className="grid grid-cols-3 gap-4 px-8 py-5">
+        <div className="grid grid-cols-1 gap-4 px-4 py-5 sm:grid-cols-3 sm:px-8">
           <div className="rounded-2xl bg-slate-50 p-4">
             <p className="text-[10px] font-black uppercase text-slate-400">Total Purchased</p>
             <p className="text-lg font-black text-slate-900">{formatMoney(completedTotals.purchased)}</p>

@@ -176,7 +176,19 @@ export default function DashboardShell() {
           in as a full-height glass panel on mobile (see sidebarOpen below). */}
       <KitchenPrintWatcher categoryLookupRef={categoryLookupRef} />
       <KitchenUpdateWatcher categoryLookupRef={categoryLookupRef} />
-      <div className="glass-app-bg flex min-h-screen font-sans text-[#2D2E2E] print:block print:min-h-0 print:bg-white">
+      {/* h-screen + overflow-hidden (was min-h-screen, no overflow control)
+          - min-h-screen only sets a FLOOR, so once the page's content grew
+          taller than the viewport the whole document scrolled as one unit,
+          sidebar included, instead of just the <main> content underneath
+          it - the sidebar wasn't actually "sticky", it just happened to
+          start near the top and then scroll away with everything else.
+          Capping this wrapper to exactly the viewport height forces all
+          scrolling to happen inside <main>'s own overflow-auto below,
+          leaving the sidebar genuinely fixed on screen regardless of how
+          long the page content gets. print: overrides keep printing
+          (which needs its natural full-content height, not a clipped one)
+          working exactly as before. */}
+      <div className="glass-app-bg flex h-screen overflow-hidden font-sans text-[#2D2E2E] print:block print:h-auto print:overflow-visible print:bg-white">
         {sidebarOpen ? (
           <div
             className="fixed inset-0 z-40 bg-black/40 lg:hidden"
@@ -230,8 +242,25 @@ export default function DashboardShell() {
         </aside>
 
         <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6 lg:p-8 print:overflow-visible print:p-0">
-          <div className="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-3">
+          {/* Below sm (a real phone), this used to be one flat flex-wrap
+              list - the hamburger, the shop-status pill+button, and every
+              connectivity badge all competing for the same wrapping rows in
+              whatever order they happened to overflow, which is what
+              produced the messy/random-looking stack (icon-action group
+              landing on its own oddly-spaced line with a big gap above it).
+              Restructured into two deliberate blocks on mobile instead: the
+              hamburger + status/connectivity pills (each its own tidy row,
+              via flex-col on the inner group), then the icon-action group
+              as a clean row of its own underneath, right-aligned within
+              itself. `items-start` stops each pill/badge button from
+              stretching into an ugly full-width bar (flex-col's default).
+              Every component here is still mounted exactly once - only the
+              CSS layout differs by breakpoint - so this adds no extra
+              polling/state. From sm up this collapses back to the exact
+              single flex-wrap row it always was - nothing changes on
+              tablet/desktop. */}
+          <div className="print:hidden mb-3 flex flex-col items-start gap-1.5 sm:mb-6 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2">
+            <div className="flex flex-col items-start gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2">
               <button
                 type="button"
                 onClick={() => setSidebarOpen(true)}
@@ -245,18 +274,21 @@ export default function DashboardShell() {
               <OfflineModeToggle />
               <UpdateStatusBadge />
             </div>
-            {/* ml-auto keeps this group hugging the right edge even when it
-                wraps onto its own row below the left group - plain
-                `justify-between` on the parent has no effect on a line
-                that only contains one flex item, which is what let this
-                whole group (and the bell button inside it) drift toward
-                the left on a narrower window instead of staying at the
-                right. */}
-            <div className="ml-auto flex flex-wrap items-center gap-3">
+            {/* ml-auto keeps this group hugging the right edge from sm up,
+                even when it wraps onto its own row below the left group -
+                plain `justify-between` on the parent has no effect on a
+                line that only contains one flex item, which is what let
+                this whole group (and the bell button inside it) drift
+                toward the left on a narrower window instead of staying at
+                the right. `justify-end` does the same job on mobile, where
+                the outer container is flex-col (so this block is already
+                its own full-width row - it just needs its own contents
+                pushed to that row's right edge). */}
+            <div className="flex w-full flex-wrap items-center justify-end gap-1.5 sm:ml-auto sm:w-auto sm:gap-2">
               <InstallAppButton />
-              <TopAction icon={<Search size={18} />} className="hidden sm:flex" />
-              <TopAction icon={<Cloud size={18} />} className="hidden sm:flex" />
-              <TopAction icon={<MessageCircle size={18} />} />
+              <TopAction icon={<Search size={15} />} className="hidden sm:flex" />
+              <TopAction icon={<Cloud size={15} />} className="hidden sm:flex" />
+              <TopAction icon={<MessageCircle size={15} />} />
               <NotificationBellButton />
               <button
                 type="button"
@@ -265,9 +297,9 @@ export default function DashboardShell() {
                   clearAuthSession();
                   navigate('/login', { replace: true });
                 }}
-                className="glass-pill flex items-center gap-2 rounded-full px-3 py-2.5 text-sm font-semibold text-gray-700 transition-colors hover:bg-white/70 sm:px-4"
+                className="glass-pill flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-white/70 sm:px-3"
               >
-                <LogOut size={16} />
+                <LogOut size={13} />
                 <span className="hidden sm:inline">Logout</span>
               </button>
             </div>
@@ -670,7 +702,7 @@ function ShopStatusControl() {
   }
 
   if (loading) {
-    return <div className="glass-pill h-10 w-36 animate-pulse rounded-full" />;
+    return <div className="glass-pill h-7 w-28 animate-pulse rounded-full" />;
   }
 
   if (!isOpen) {
@@ -680,9 +712,9 @@ function ShopStatusControl() {
         onClick={handleOpen}
         disabled={busy || !canManage}
         title={canManage ? 'Open the restaurant to start taking orders' : 'Only a Manager or Restaurant Owner can open the restaurant'}
-        className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex items-center gap-1.5 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        <Store size={16} />
+        <Store size={13} />
         {busy ? 'Opening...' : 'Open Restaurant'}
       </button>
     );
@@ -692,12 +724,12 @@ function ShopStatusControl() {
   const liveCount = session?.liveSummary?.orderCount ?? 0;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
       <div
-        className="glass-pill flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-bold text-emerald-700"
+        className="glass-pill flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-bold text-emerald-700"
         title={`Opened at ${openedTime}${session?.openedByName ? ` by ${session.openedByName}` : ''}`}
       >
-        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
         Open since {openedTime} · {liveCount} order{liveCount === 1 ? '' : 's'}
       </div>
       {canManage && (
@@ -705,9 +737,9 @@ function ShopStatusControl() {
           type="button"
           onClick={() => setShowClosingSummary(true)}
           disabled={busy}
-          className="flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-4 py-2.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex items-center gap-1.5 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-2.5 py-1.5 text-xs font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <Lock size={16} />
+          <Lock size={13} />
           {busy ? 'Closing...' : 'Close Restaurant'}
         </button>
       )}
@@ -735,11 +767,11 @@ function NetworkStatusBadge() {
       type="button"
       onClick={() => void checkNow()}
       title={isOnline ? 'Connected to the server' : 'Cannot reach the server - check your internet connection'}
-      className={`glass-pill flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-bold transition-colors ${
+      className={`glass-pill flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-bold transition-colors ${
         isOnline ? 'text-emerald-700' : 'text-rose-700'
       }`}
     >
-      {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
+      {isOnline ? <Wifi size={13} /> : <WifiOff size={13} />}
       <span className={checking ? 'opacity-60' : ''}>{isOnline ? 'Online' : 'Offline'}</span>
     </button>
   );
@@ -772,13 +804,13 @@ function OfflineModeToggle() {
           ? 'Offline Mode is ON - this till is treating itself as offline on purpose, even though WiFi/internet may still be connected. Click to go back online.'
           : "Manually put this till into offline mode without turning off WiFi - keeps phone pairing/the Local Hub working over your LAN while every page behaves as if there's no internet."
       }
-      className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-bold transition-colors ${
+      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-bold transition-colors ${
         forcedOffline
           ? 'border-amber-300 bg-amber-100 text-amber-800'
           : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50'
       }`}
     >
-      <WifiOff size={16} />
+      <WifiOff size={13} />
       {forcedOffline ? 'Offline Mode: ON' : 'Offline Mode'}
     </button>
   );
@@ -903,7 +935,7 @@ function NavItem({
 
 function TopAction({ icon, className = '' }: { icon: React.ReactNode; className?: string }) {
   return (
-    <div className={`clickable glass-pill rounded-full p-2.5 text-gray-500 transition-colors hover:bg-white/70 ${className}`}>
+    <div className={`clickable glass-pill rounded-full p-1.5 text-gray-500 transition-colors hover:bg-white/70 ${className}`}>
       {icon}
     </div>
   );
@@ -965,9 +997,9 @@ function NotificationBellButton() {
         type="button"
         onClick={toggleOpen}
         aria-label="Notifications"
-        className="clickable glass-pill rounded-full p-2.5 text-gray-500 transition-colors hover:bg-white/70"
+        className="clickable glass-pill rounded-full p-1.5 text-gray-500 transition-colors hover:bg-white/70"
       >
-        <Bell size={18} />
+        <Bell size={15} />
       </button>
       {unreadCount > 0 ? (
         <span className="pointer-events-none absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-sm">

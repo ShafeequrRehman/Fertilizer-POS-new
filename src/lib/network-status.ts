@@ -45,46 +45,99 @@ export function setForcedOffline(value: boolean): void {
   window.dispatchEvent(new Event(FORCE_OFFLINE_EVENT));
 }
 
+// --- Shared singleton ping loop -----------------------------------------
+// Before this, every one of the ~13 call sites of useNetworkStatus() below
+// (DashboardShell alone calls it 3 times, plus DashboardPageClient, plus
+// whichever page is active - POSPage/SalesPage/RecordPage/etc. - plus
+// offline-sync.ts's own internal use of it) ran its OWN independent 5s
+// setInterval and its own /api/health request. On a single open POS
+// screen that was 4-6 identical, simultaneous network round-trips every 5
+// seconds for the exact same yes/no answer - pure redundant chatter, and
+// 4-6x the re-renders whenever the result flipped. This module-level
+// singleton runs exactly ONE ping loop no matter how many components call
+// the hook at once; every hook instance just subscribes to its result.
+// Reference-counted so the loop starts on first mount and stops the
+// instant the last consumer unmounts, rather than running forever from
+// module load (e.g. on the Login screen, before anything needs it).
+type NetworkListener = (online: boolean, checking: boolean) => void;
+const listeners = new Set<NetworkListener>();
+let sharedRealOnline = true;
+let sharedChecking = false;
+let sharedIntervalId: number | null = null;
+let sharedOnlineHandler: (() => void) | null = null;
+let sharedOfflineHandler: (() => void) | null = null;
+
+function notifyListeners() {
+  listeners.forEach((listener) => listener(sharedRealOnline, sharedChecking));
+}
+
+async function sharedCheckNow(): Promise<void> {
+  sharedChecking = true;
+  notifyListeners();
+  try {
+    await api.get('/health', { timeout: PING_TIMEOUT_MS });
+    sharedRealOnline = true;
+  } catch {
+    sharedRealOnline = false;
+  } finally {
+    sharedChecking = false;
+    notifyListeners();
+  }
+}
+
+function subscribeToNetworkStatus(listener: NetworkListener): () => void {
+  listeners.add(listener);
+  if (listeners.size === 1) {
+    void sharedCheckNow();
+    sharedIntervalId = window.setInterval(() => void sharedCheckNow(), PING_INTERVAL_MS);
+    // Same reasoning as before: the browser's "online"/"offline" events are
+    // a useful trigger to re-check sooner than the next interval tick, but
+    // never trusted on their own - sharedCheckNow() always does the real
+    // backend round-trip before flipping the indicator.
+    sharedOnlineHandler = () => void sharedCheckNow();
+    sharedOfflineHandler = () => void sharedCheckNow();
+    window.addEventListener('online', sharedOnlineHandler);
+    window.addEventListener('offline', sharedOfflineHandler);
+  } else {
+    // A late subscriber (e.g. a modal mounted well after the app loaded)
+    // gets the current known state immediately instead of defaulting to
+    // `true` until the next shared tick happens to land.
+    listener(sharedRealOnline, sharedChecking);
+  }
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && sharedIntervalId !== null) {
+      window.clearInterval(sharedIntervalId);
+      sharedIntervalId = null;
+      if (sharedOnlineHandler) window.removeEventListener('online', sharedOnlineHandler);
+      if (sharedOfflineHandler) window.removeEventListener('offline', sharedOfflineHandler);
+      sharedOnlineHandler = null;
+      sharedOfflineHandler = null;
+    }
+  };
+}
+
 export function useNetworkStatus() {
   // The REAL, ping-based reachability - kept separate from the forced
   // override below so toggling "Offline Mode" off always correctly
   // reflects whatever the genuine connection state actually is again,
   // rather than getting stuck wherever it last was.
-  const [realOnline, setRealOnline] = useState(true);
-  const [checking, setChecking] = useState(false);
+  const [realOnline, setRealOnline] = useState(sharedRealOnline);
+  const [checking, setChecking] = useState(sharedChecking);
   const [forcedOffline, setForcedOfflineState] = useState(isForcedOffline);
 
-  const checkNow = useCallback(async () => {
-    setChecking(true);
-    try {
-      await api.get('/health', { timeout: PING_TIMEOUT_MS });
-      setRealOnline(true);
-    } catch {
-      setRealOnline(false);
-    } finally {
-      setChecking(false);
-    }
-  }, []);
+  // Delegates to the single shared loop above instead of running its own -
+  // this also means a manual retry from ANY one instance (e.g. a "Retry"
+  // button in the topbar badge) now correctly updates every other mounted
+  // instance too, not just the one that was clicked.
+  const checkNow = useCallback(() => sharedCheckNow(), []);
 
   useEffect(() => {
-    void checkNow();
-    const intervalId = window.setInterval(() => void checkNow(), PING_INTERVAL_MS);
-
-    // The browser's own "online"/"offline" events are a useful trigger to
-    // re-check sooner than the next interval tick, but never trusted on
-    // their own - checkNow() always does the real backend round-trip
-    // before flipping the indicator.
-    const handleOnline = () => void checkNow();
-    const handleOffline = () => void checkNow();
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [checkNow]);
+    return subscribeToNetworkStatus((online, isChecking) => {
+      setRealOnline(online);
+      setChecking(isChecking);
+    });
+  }, []);
 
   useEffect(() => {
     const syncForcedOffline = () => setForcedOfflineState(isForcedOffline());

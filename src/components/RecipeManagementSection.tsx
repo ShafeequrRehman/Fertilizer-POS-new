@@ -279,8 +279,14 @@ export function RecipeManagementSection({
                     const sizeLabel = variation.variation && variation.variation !== "Standard" ? variation.variation : "Standard";
                     return (
                       <div key={productId} className="p-4">
-                        <div className="flex items-center justify-between gap-4">
-                          <div>
+                        {/* flex-col below sm: the recipe description can run
+                            long (a comma-joined ingredient list), and with
+                            no width limit on the left side plus a shrink-0
+                            action-button group on the right, a phone-width
+                            row had nowhere for either to fit cleanly.
+                            Unchanged from sm up. */}
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                          <div className="min-w-0">
                             <div className="text-sm font-black text-slate-800">{sizeLabel}</div>
                             {recipe && recipe.ingredients.length > 0 ? (
                               <p className="text-xs font-bold text-slate-500 mt-1">
@@ -290,7 +296,7 @@ export function RecipeManagementSection({
                               <p className="text-xs font-bold text-slate-400 mt-1">No recipe set - this size won't deduct any stock when sold.</p>
                             )}
                           </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex flex-wrap items-center gap-1.5 sm:shrink-0">
                             {recipe && !offlineSnapshotAt ? (
                               <button onClick={() => void handleDeleteRecipe(variation)} className="p-2.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors" title="Remove recipe">
                                 <Trash2 size={15} />

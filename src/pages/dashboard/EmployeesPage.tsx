@@ -174,7 +174,11 @@ export default function EmployeesPage() {
 
       {tab === "employees" ? (
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
-          <table className="w-full text-left text-sm">
+          {/* overflow-x-auto: 7 columns is too wide for a phone screen -
+              lets the table scroll sideways within its own card instead of
+              breaking the page's layout. */}
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] text-left text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-4 py-3">Name</th>
@@ -238,6 +242,7 @@ export default function EmployeesPage() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

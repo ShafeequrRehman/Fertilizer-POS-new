@@ -1323,7 +1323,19 @@ export function IngredientStockSection({
             const ingredientHistory = purchasesByIngredientId.get(ingredient.id) || [];
             return (
               <div key={ingredient.id} className="rounded-[24px] border border-slate-100 bg-white shadow-sm hover:border-emerald-100 hover:shadow-md transition-all p-4">
-                <div className="flex items-center justify-between gap-4">
+                {/* Was a single `flex items-center justify-between` row with
+                    the right side `shrink-0` (stock qty + 5 action
+                    buttons) - on a phone that fixed-width block plus the
+                    name/category text simply didn't fit side by side, and
+                    since it couldn't wrap (no flex-wrap) or shrink (shrink-0),
+                    the row overflowed the card and the action icons got
+                    clipped/cut off at the edge, with the squeezed name/
+                    category text wrapping into a jumbled mess right next to
+                    it. Stacks into two clean full-width rows below sm
+                    instead: name/category on top, stock qty + actions
+                    (wrapping onto a second line if needed) underneath.
+                    Unchanged from sm (640px) up - still one row. */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="text-[15px] font-black text-slate-900 flex items-center gap-2 flex-wrap">
                       {ingredient.name}
@@ -1338,11 +1350,11 @@ export function IngredientStockSection({
                       {ingredient.averageCost > 0 ? ` · Avg cost ${formatMoney(ingredient.averageCost)}/${ingredient.unit}` : ""}
                     </p>
                   </div>
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex flex-wrap items-center gap-3 sm:shrink-0">
                     <div className={`text-[15px] font-black ${isLow ? "text-rose-600" : "text-slate-900"}`}>
                       {formatStockQty(ingredient.currentStock)}{ingredient.unit}
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => { if (isPurchasing) resetPurchaseForm(); else setPurchasingId(ingredient.id); }}

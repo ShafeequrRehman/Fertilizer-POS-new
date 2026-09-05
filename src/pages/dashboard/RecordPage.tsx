@@ -214,8 +214,18 @@ export default function RecordPage() {
           void pushOrdersCache(orderData).catch(() => {});
         }
       }
-      setSessionHistory(history ?? []);
-      setShopSession(history && history.length > 0 ? history[0] : null);
+      // Only ever UPGRADE sessionHistory/shopSession here - never downgrade
+      // to empty/null just because this one poll's history fetch came back
+      // empty (a transient blip, replica lag, etc). getBusinessWindow treats
+      // "no session" as "match nothing", so a wrongful null flashed every
+      // shift-scoped stat on this page to 0 a few seconds after they first
+      // painted correctly from the cache, even though the shop was
+      // genuinely still open (and its shift history still real) the whole
+      // time - same reasoning as the orderData/isStale guard just above.
+      if (history && history.length > 0) {
+        setSessionHistory(history);
+        setShopSession(history[0]);
+      }
       setLoadError('');
     } catch (error) {
       console.error('Record page load error', error);
