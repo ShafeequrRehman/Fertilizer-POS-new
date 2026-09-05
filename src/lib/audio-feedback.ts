@@ -60,11 +60,20 @@ function playTone(frequency: number, duration: number, options?: { type?: Oscill
   }
 }
 
-// Click Sound: a single crisp, very short tick - deliberately high-pitched
-// and brief (40ms) so it never feels laggy or draws attention to itself on
-// a rapid sequence of clicks (e.g. tapping through a product grid).
+// Click Sound: a smooth, soft "tock" rather than a buzzy digital blip - the
+// previous version used a square wave, which is harsh/gritty by nature
+// (square waves are full of odd harmonics), so even a short one still read
+// as a cheap chirp. Swapping to a triangle wave (rounder, fewer harmonics)
+// with a quick downward pitch slide gives the same snappy, instant feel
+// without the edge, and layering in a faint, slightly-delayed low sine
+// underneath gives it a bit of "body" - the same trick a satisfying
+// mechanical-keyboard or haptic click uses, a soft thump under the tick.
+// Still brief (well under 60ms total) so it never feels laggy or draws
+// attention to itself on a rapid sequence of clicks (e.g. tapping through a
+// product grid).
 export function playClickSound() {
-  playTone(1500, 0.045, { type: "square", peakGain: 0.05, endFrequency: 900 });
+  playTone(1100, 0.05, { type: "triangle", peakGain: 0.07, endFrequency: 650 });
+  playTone(300, 0.045, { type: "sine", peakGain: 0.04, startAt: 0.006 });
 }
 
 // Toast/Notification Sound: a pleasant two-note rising "ding" - a soft
