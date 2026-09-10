@@ -78,45 +78,94 @@ export default function App() {
 
         <Route element={<ProtectedRoute allowedRoles={['shopowner', 'employee']} />}>
           <Route path="/dashboard" element={<DashboardShell />}>
-            <Route index element={<DashboardPageClient />} />
-            <Route path="pos" element={<POSPage />} />
-            <Route path="sales" element={<SalesPage />} />
-            <Route path="sales/:id/edit" element={<EditOrderPage />} />
-            <Route path="sales/print/:id" element={<PrintOrderPage />} />
-            <Route path="accounting" element={<AccountingPage />} />
-            <Route path="purchase" element={<PurchasePage />} />
-            <Route path="ingredient-stock" element={<IngredientStockPage />} />
-            <Route path="recipe-management" element={<RecipeManagementPage />} />
-            {/* Sidebar/Route Bypass Bug Fix: this route (and Connect Devices
-                below) used to be reachable by typing the URL directly even
-                when the sidebar link was hidden - dashboard-pages.ts's
-                `permission` field only ever controlled DashboardShell.tsx's
-                nav-item filter, not the route itself, and no route guard
-                existed here at all. RequirePermission (see
-                routes/RequirePermission.tsx) closes that gap by bouncing an
-                employee lacking 'manage.tables'/'manage.devices' back to
-                '/dashboard'. */}
+            {/* Broken Access Control fix: every route below now carries the
+                SAME permission dashboard-pages.ts already assigns it for the
+                sidebar link (DASHBOARD_PAGES), via RequirePermission (see
+                routes/RequirePermission.tsx). Before this, only
+                dining-tables/offline had a route guard at all - hiding a
+                sidebar link never stopped the route itself (or the API
+                calls its page makes) from being reachable by typing the URL
+                directly. This is the client-side half of the fix; the
+                backend routes behind these pages (orderRoutes.js,
+                productController.js, etc.) independently enforce the same
+                permissions server-side too - see those files' own comments
+                - so this is a UX/redirect convenience, never the only gate. */}
+            <Route element={<RequirePermission permission="view.dashboard" />}>
+              <Route index element={<DashboardPageClient />} />
+            </Route>
+            <Route element={<RequirePermission permission="sales.create" />}>
+              <Route path="pos" element={<POSPage />} />
+              <Route path="sales" element={<SalesPage />} />
+            </Route>
+            <Route element={<RequirePermission permission={['sales.create', 'sales.edit']} />}>
+              <Route path="sales/:id/edit" element={<EditOrderPage />} />
+            </Route>
+            <Route element={<RequirePermission permission={['sales.create', 'sales.print', 'orders.record.view']} />}>
+              <Route path="sales/print/:id" element={<PrintOrderPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="expenses.manage" />}>
+              <Route path="accounting" element={<AccountingPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="purchases.manage" />}>
+              <Route path="purchase" element={<PurchasePage />} />
+            </Route>
+            <Route element={<RequirePermission permission={['inventory.manage', 'stock.manage']} />}>
+              <Route path="ingredient-stock" element={<IngredientStockPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="inventory.manage" />}>
+              <Route path="recipe-management" element={<RecipeManagementPage />} />
+            </Route>
             <Route element={<RequirePermission permission="manage.tables" />}>
               <Route path="dining-tables" element={<DiningTablesPage />} />
             </Route>
-            <Route path="management" element={<ManagementPage />} />
-            <Route path="dues" element={<DuesPage />} />
-            <Route path="ledger" element={<LedgerPage />} />
-            <Route path="record" element={<RecordPage />} />
-            <Route path="shifts" element={<ShiftsPage />} />
+            <Route element={<RequirePermission permission="customers.manage" />}>
+              <Route path="management" element={<ManagementPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="dues.manage" />}>
+              <Route path="dues" element={<DuesPage />} />
+              <Route path="ledger" element={<LedgerPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="orders.record.view" />}>
+              <Route path="record" element={<RecordPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="shop.session.manage" />}>
+              <Route path="shifts" element={<ShiftsPage />} />
+            </Route>
             <Route element={<RequirePermission permission="manage.devices" />}>
               <Route path="offline" element={<OfflineSyncPage />} />
             </Route>
-            <Route path="payroll" element={<PayrollPage />} />
-            <Route path="reports" element={<ReportsPage />} />
-            <Route path="admin" element={<AdminPage />} />
+            {/* Payroll is role-gated (Shop Owner only), same as Employees
+                below, per dashboard-pages.ts's own comment on this entry -
+                not permission-gated, since no employee role should ever see
+                payroll figures regardless of what permissions they hold. */}
             <Route element={<ProtectedRoute allowedRoles={['shopowner']} />}>
+              <Route path="payroll" element={<PayrollPage />} />
               <Route path="employees" element={<EmployeesPage />} />
             </Route>
-            <Route path="settings" element={<SettingsPage />} />
-            <Route path="whatsapp" element={<WhatsappPage />} />
+            <Route element={<RequirePermission permission={['reports.view', 'reports.view.own_sales', 'reports.view.inventory']} />}>
+              <Route path="reports" element={<ReportsPage />} />
+            </Route>
+            {/* Not in DASHBOARD_PAGES/the sidebar at all, and self-checks for
+                a "superadmin" role internally - but that check can never
+                pass here anyway, since the outer ProtectedRoute above only
+                admits 'shopowner'/'employee' into this whole /dashboard
+                tree in the first place (a superadmin is redirected to
+                /superadmin before ever reaching this route). Left as-is:
+                already unreachable-with-data, not a live gap. */}
+            <Route path="admin" element={<AdminPage />} />
+            <Route element={<RequirePermission permission="settings.manage" />}>
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
+            <Route element={<RequirePermission permission="whatsapp.manage" />}>
+              <Route path="whatsapp" element={<WhatsappPage />} />
+            </Route>
             <Route path="help" element={<HelpPage />} />
-            <Route path="kitchen" element={<KitchenPage />} />
+            {/* Not in DASHBOARD_PAGES/the sidebar either, but freely read
+                every order via fetchOrders() with zero gating before this -
+                same tier as POS/Sales/Record, whichever the account holds. */}
+            <Route element={<RequirePermission permission={['sales.create', 'orders.record.view']} />}>
+              <Route path="kitchen" element={<KitchenPage />} />
+            </Route>
           </Route>
         </Route>
 

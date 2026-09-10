@@ -22,7 +22,7 @@ export default function OverviewPage() {
         { label: "Employees", value: stats.totalEmployees, icon: <Users size={20} />, tone: "text-cyan-300" },
         { label: "Licenses Expiring Soon", value: stats.licensesExpiringSoon, icon: <AlertTriangle size={20} />, tone: "text-amber-300" },
         { label: "Expired / Suspended Licenses", value: stats.expiredOrSuspendedLicenses, icon: <AlertTriangle size={20} />, tone: "text-red-300" },
-        { label: "Total Recorded Revenue", value: `PKR ${stats.totalRevenue.toLocaleString()}`, icon: <Banknote size={20} />, tone: "text-[#E2F33C]" },
+        { label: "Total Recorded Revenue", value: `PKR ${(stats.totalRevenue ?? 0).toLocaleString()}`, icon: <Banknote size={20} />, tone: "text-[#E2F33C]" },
       ]
     : [];
 

@@ -120,7 +120,14 @@ async function backfillIngredientPurchaseStatus() {
   try {
     const result = await IngredientPurchase.updateMany(
       { status: { $exists: false } },
-      [{ $set: { status: "received", receivedAt: "$purchaseDate" } }]
+      [{ $set: { status: "received", receivedAt: "$purchaseDate" } }],
+      // Mongoose 7.3+ (we're on ^9.6.1) requires this explicit opt-in
+      // before it will accept an aggregation-pipeline array as the update
+      // argument - without it, updateMany() throws "Cannot pass an array
+      // to query updates unless the `updatePipeline` option is set"
+      // instead of running the pipeline, which is exactly the error this
+      // backfill was hitting on every startup.
+      { updatePipeline: true }
     );
     if (result.modifiedCount > 0) {
       console.log(`[Seed] Backfilled status="received" on ${result.modifiedCount} pre-existing ingredient purchase(s).`);
@@ -145,7 +152,10 @@ async function backfillIngredientStockPrecision() {
   try {
     const result = await Ingredient.updateMany(
       {},
-      [{ $set: { currentStock: { $round: ["$currentStock", 3] }, averageCost: { $round: ["$averageCost", 3] } } }]
+      [{ $set: { currentStock: { $round: ["$currentStock", 3] }, averageCost: { $round: ["$averageCost", 3] } } }],
+      // Same Mongoose 9.x requirement as backfillIngredientPurchaseStatus
+      // above - see that comment.
+      { updatePipeline: true }
     );
     if (result.modifiedCount > 0) {
       console.log(`[Seed] Rounded floating-point drift out of currentStock/averageCost on ${result.modifiedCount} ingredient(s).`);
