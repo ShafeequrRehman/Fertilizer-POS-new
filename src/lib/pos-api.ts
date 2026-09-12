@@ -594,19 +594,33 @@ function normalizeExpense(expense: Expense & { _id?: string }) {
   return { ...expense, id: expense.id ?? expense._id ?? '' };
 }
 
-export async function fetchExpenses() {
+export async function fetchExpenses(params?: { employeeId?: string }) {
   try {
-    const response = await api.get<Array<Expense & { _id?: string }>>('/expenses');
+    const response = await api.get<Array<Expense & { _id?: string }>>('/expenses', { params });
     return response.data.map(normalizeExpense);
   } catch (error) {
     handleApiError(error);
   }
 }
 
-export async function createExpense(payload: { category: string; amount: number; date?: string; note?: string }) {
+export async function createExpense(payload: { category: string; amount: number; date?: string; note?: string; employeeId?: string | null }) {
   try {
     const response = await api.post<Expense & { _id?: string }>('/expenses', payload);
     return normalizeExpense(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Minimal (name/username only) staff list for the expense-logging form's
+// "Employee" picker and the Reports page's employee filter - see
+// expenseController.getEmployeesLite's own comment on why this is separate
+// from shopApi.listEmployees (that one's Shop-Owner-only, returns the full
+// HR record).
+export async function fetchEmployeesLite() {
+  try {
+    const response = await api.get<Array<{ _id: string; name: string; username: string }>>('/expenses/employees');
+    return response.data;
   } catch (error) {
     handleApiError(error);
   }

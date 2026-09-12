@@ -1386,7 +1386,18 @@ export default function SalesPage() {
                       : `${STATUS_BORDER[order.status] ?? 'border-gray-200'} ${STATUS_CARD_BG[order.status] ?? 'from-white/60 to-white/25'} shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(15,23,42,0.14)] hover:-translate-y-1.5 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-5px_12px_rgba(15,23,42,0.2)]`
                   }`}
                 >
-                  <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-100">
+                  {/* Fixed pixel height (not aspect-ratio) and shrink-0 -
+                      this card is a CSS grid item, stretched by the grid's
+                      default align-items:stretch to match the tallest card
+                      in its row (see the grid wrapper below). An
+                      aspect-ratio box can still get squeezed shorter than
+                      its own ratio once the row's height is being driven by
+                      a taller sibling's extra text content (more Line rows,
+                      table/rating badges, etc. below) - a hard height never
+                      shrinks with it, so every card's image stays the same
+                      size no matter how much detail the card underneath it
+                      has. */}
+                  <div className="relative h-40 w-full shrink-0 overflow-hidden bg-slate-100">
                     <img src={heroImage} alt={order.items[0]?.name ?? 'Order'} loading="lazy" className="h-full w-full object-cover" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-black/0 to-transparent" />
                     <span className={`absolute right-2 top-2 rounded-full px-3 py-1 text-[11px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-1px_3px_rgba(0,0,0,0.12)] ${STATUS_BADGE[order.status] ?? 'bg-gray-100 text-gray-600'}`}>{order.status}</span>

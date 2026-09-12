@@ -39,9 +39,25 @@ function normalizePhone(phone) {
 // behind an nginx prefix sends the customer's browser to the bare domain
 // root (a 404, or a completely different site) instead of back into this
 // app.
+//
+// Dev-mode fallback fix: `req.protocol://req.get("host")` used to be the
+// fallback here whenever VITE_API_URL is unset - correct in production
+// (backend/index.js's express.static(dist) serves the built frontend +
+// icons from that exact same origin/port), but WRONG in local `npm run
+// dev`, where the frontend/icons live on Vite's dev server (port 5173,
+// see vite.config.ts) while this controller's own `req` is always the
+// *backend's* port (5000, see package.json's dev:backend). That mismatch
+// silently 404'd this manifest's icons in dev - Chrome then refuses to
+// fire beforeinstallprompt for an "invalid" manifest, which is exactly the
+// "Install button used to show, now it doesn't" report this fixes. Only
+// applies when NODE_ENV isn't "production" (dev:backend never sets it) -
+// production/staging always have VITE_API_URL configured, so they never
+// reach this fallback at all.
 function publicOrigin(req) {
   const configured = process.env.VITE_API_URL ? process.env.VITE_API_URL.replace(/\/api\/?$/, "") : "";
-  return configured || `${req.protocol}://${req.get("host")}`;
+  if (configured) return configured;
+  if (process.env.NODE_ENV !== "production") return "http://localhost:5173";
+  return `${req.protocol}://${req.get("host")}`;
 }
 
 function publicOrderShape(order) {

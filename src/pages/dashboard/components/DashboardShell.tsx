@@ -198,7 +198,7 @@ export default function DashboardShell() {
         ) : null}
 
         <aside
-          className={`glass print:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col gap-6 overflow-y-auto p-4 transition-transform duration-200 ease-out lg:static lg:z-auto lg:top-4 lg:m-4 lg:h-[calc(100vh-2rem)] lg:w-56 lg:translate-x-0 lg:rounded-[28px] ${
+          className={`glass dashboard-sidebar print:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col gap-6 overflow-y-auto p-4 transition-transform duration-200 ease-out lg:static lg:z-auto lg:top-4 lg:m-4 lg:h-[calc(100vh-2rem)] lg:w-56 lg:translate-x-0 lg:rounded-[28px] ${
             sidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}
         >

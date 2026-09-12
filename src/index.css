@@ -105,6 +105,21 @@ button:disabled,
   box-shadow: 0 8px 32px -12px rgba(15, 23, 42, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
+/* Below lg, DashboardShell's sidebar stops being a panel floating over a
+   shared .glass-app-bg background and becomes a full-height off-canvas
+   drawer sitting directly on top of the page's own content (see
+   `sidebarOpen` in DashboardShell.tsx) - .glass's translucency then lets
+   whatever's underneath (product cards, page text, etc.) bleed through the
+   open drawer instead of reading as a solid nav panel. Force it fully
+   opaque only at that width; lg+ keeps the normal floating glass look. */
+@media (max-width: 1023.98px) {
+  .dashboard-sidebar.glass {
+    background: #ffffff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
 /* More opaque + more blur than .glass - for modals/popups, where body
    text needs to stay fully legible over whatever is behind the dialog
    (which, unlike a page card, can be busy product/order content). */

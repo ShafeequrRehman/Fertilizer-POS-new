@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   BarChart3, TrendingUp, TrendingDown, Receipt, Wallet, ShoppingBag,
-  Plus, Trash2, AlertCircle, UserRound, Boxes, Truck, ClipboardList,
+  Plus, Trash2, AlertCircle, UserRound, Boxes, Truck, ClipboardList, ChevronDown,
 } from 'lucide-react';
-import { fetchDayEndReport, fetchExpenses, createExpense, deleteExpense, fetchMySalesReport, fetchInventoryReport } from '@/lib/pos-api';
+import { fetchDayEndReport, fetchExpenses, createExpense, deleteExpense, fetchMySalesReport, fetchInventoryReport, fetchEmployeesLite } from '@/lib/pos-api';
 import { DayEndReport, Expense, InventoryReport, MySalesReport } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
 import { hasPermission } from '@/lib/auth';
@@ -36,7 +36,138 @@ function computePresetRange(preset: Preset): { from: string; to: string } {
   return { from: toDateKey(now), to: toDateKey(now) };
 }
 
-const EXPENSE_CATEGORIES = ['Gas', 'Electricity', 'Water', 'Wages', 'Damage / Waste', 'Rent', 'Maintenance', 'Other'];
+const EXPENSE_CATEGORIES = [
+  'Gas', 'Electricity', 'Water', 'Wages', 'Damage / Waste', 'Rent', 'Maintenance',
+  // Employee Expenses - see Expense.employeeId's own comment. These two are
+  // just entries in the same free-text category field every other expense
+  // uses (no separate model/table) - what actually links one to a specific
+  // person is the optional employeeId picked alongside it below.
+  'Employee Meal', 'Other Employee Expense',
+  'Other',
+];
+
+// Must match backend/controllers/reportController.js's SALARY_PAYMENT_CATEGORY
+// exactly - that's the expenseBreakdown row this page reads the aggregate
+// Salary Payment/Advance total from (see salaryPaymentsTotal below).
+const SALARY_EXPENSE_CATEGORY = 'Salary Payment / Advance';
+
+// Reported bug: in the packaged Electron desktop app (nodeIntegration:true,
+// contextIsolation:false, and no custom Menu set - see main.js - so
+// Electron's DEFAULT application menu, with its Reload/Ctrl+R accelerator,
+// stays live even though autoHideMenuBar just hides the visible bar),
+// opening a native <select>/<datalist> popup on this page and clicking an
+// option was reloading the whole renderer back to the dashboard. Native
+// OS-drawn popups are exactly the kind of window-focus-stealing UI most
+// prone to tripping that class of Electron quirk. Rather than chase the
+// exact internal mechanism, every dropdown on this page is rendered fully
+// in-DOM instead (a plain absolutely-positioned panel of <button
+// type="button">s, closed via the same click-outside pattern
+// DashboardShell's NotificationBellButton already uses) - there is no
+// native popup left here at all, so this entire class of bug can't recur
+// regardless of which exact Electron/Chromium behavior was causing it.
+function InlineDropdown({ value, onChange, options, placeholder, className }: {
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ value: string; label: string }>;
+  placeholder: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.value === value);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className={`relative ${className || ''}`} ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between gap-2 rounded-xl border-none ring-1 ring-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold outline-none"
+      >
+        <span className={selected ? 'text-slate-800' : 'text-slate-400'}>{selected ? selected.label : placeholder}</span>
+        <ChevronDown size={14} className="shrink-0 text-slate-400" />
+      </button>
+      {open ? (
+        <div className="absolute z-20 mt-1 max-h-56 w-full min-w-[10rem] overflow-y-auto rounded-xl bg-white py-1 shadow-lg ring-1 ring-slate-200">
+          {options.map((option) => (
+            <button
+              key={option.value || '__all__'}
+              type="button"
+              onClick={() => { onChange(option.value); setOpen(false); }}
+              className={`block w-full whitespace-nowrap px-3 py-2 text-left text-xs font-bold hover:bg-slate-50 ${option.value === value ? 'bg-indigo-50 text-indigo-600' : 'text-slate-700'}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Same reasoning as InlineDropdown above, for the one field that also
+// needs free-text entry (a category not already in EXPENSE_CATEGORIES) -
+// this replaces the old <input list="..."> + <datalist> pair, which is
+// itself a native OS popup under the hood.
+function CategoryComboBox({ value, onChange, options, placeholder }: {
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const filtered = value.trim()
+    ? options.filter((option) => option.toLowerCase().includes(value.trim().toLowerCase()))
+    : options;
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder={placeholder}
+        className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+      />
+      {open && filtered.length > 0 ? (
+        <div className="absolute z-20 mt-1 max-h-48 w-full overflow-y-auto rounded-2xl bg-white py-1 shadow-lg ring-1 ring-slate-200">
+          {filtered.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => { onChange(option); setOpen(false); }}
+              className="block w-full px-4 py-2 text-left text-sm font-bold text-slate-700 hover:bg-slate-50"
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 // Role-Based Security: which report a logged-in account actually sees.
 // Full 'reports.view' (Owner/Manager/Accountant) keeps the existing
@@ -84,7 +215,20 @@ function DayEndReportView() {
   const [expenseCategory, setExpenseCategory] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expenseNote, setExpenseNote] = useState('');
+  const [expenseEmployeeId, setExpenseEmployeeId] = useState('');
   const [isSavingExpense, setIsSavingExpense] = useState(false);
+
+  // Employee Expenses filters - "which employee" and "which category" to
+  // narrow the entries list below to. Both default to "All" (empty string)
+  // so this page's existing behavior (every expense, no filtering) is
+  // unchanged until someone actually picks one.
+  const [employees, setEmployees] = useState<Array<{ _id: string; name: string; username: string }>>([]);
+  const [employeeFilter, setEmployeeFilter] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+
+  useEffect(() => {
+    void fetchEmployeesLite().then((list) => setEmployees(list || []));
+  }, []);
 
   function applyPreset(next: Preset) {
     setPreset(next);
@@ -117,16 +261,46 @@ function DayEndReportView() {
   // typically small enough per shop that it isn't worth one yet) - filtered
   // client-side against whatever range is currently picked instead.
   const expensesInRange = useMemo(() => {
-    if (!rangeFrom || !rangeTo) return expenses;
-    const start = new Date(`${rangeFrom}T00:00:00.000Z`).getTime();
-    const end = new Date(`${rangeTo}T23:59:59.999Z`).getTime();
-    return expenses
-      .filter((e) => {
+    let list = expenses;
+    if (rangeFrom && rangeTo) {
+      const start = new Date(`${rangeFrom}T00:00:00.000Z`).getTime();
+      const end = new Date(`${rangeTo}T23:59:59.999Z`).getTime();
+      list = list.filter((e) => {
         const t = new Date(e.date).getTime();
         return t >= start && t <= end;
-      })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [expenses, rangeFrom, rangeTo]);
+      });
+    }
+    if (employeeFilter) {
+      list = list.filter((e) => {
+        const id = typeof e.employeeId === 'object' && e.employeeId ? e.employeeId._id : e.employeeId;
+        return id === employeeFilter;
+      });
+    }
+    if (categoryFilter) {
+      list = list.filter((e) => e.category === categoryFilter);
+    }
+    return [...list].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [expenses, rangeFrom, rangeTo, employeeFilter, categoryFilter]);
+
+  // Employee Expenses summary (point 9's "Total employee meals / Total
+  // employee expenses"): derived from the SAME filtered list above, so
+  // these totals always match whatever's actually visible in "Entries in
+  // this period" - not a second, possibly-inconsistent query. Total Salary
+  // Advances/Payments comes from the Day-End report's own aggregate
+  // instead (see reportController.getDayEndReport's StaffPayment query) -
+  // those rows live in a separate collection, never in this Expense list.
+  const employeeExpenseTotals = useMemo(() => {
+    let meals = 0;
+    let otherEmployee = 0;
+    for (const expense of expensesInRange) {
+      if (!expense.employeeId) continue;
+      if (expense.category === 'Employee Meal') meals += expense.amount;
+      else otherEmployee += expense.amount;
+    }
+    return { meals, otherEmployee, total: meals + otherEmployee };
+  }, [expensesInRange]);
+
+  const salaryPaymentsTotal = report?.expenseBreakdown.find((row) => row.category === SALARY_EXPENSE_CATEGORY)?.total ?? 0;
 
   async function handleLogExpense() {
     if (!expenseCategory.trim()) {
@@ -145,12 +319,14 @@ function DayEndReportView() {
         amount,
         date: rangeTo ? new Date(`${rangeTo}T12:00:00.000Z`).toISOString() : undefined,
         note: expenseNote.trim(),
+        employeeId: expenseEmployeeId || null,
       });
       if (created) {
         setExpenses((prev) => [created, ...prev]);
         setExpenseCategory('');
         setExpenseAmount('');
         setExpenseNote('');
+        setExpenseEmployeeId('');
         void loadReport();
       }
     } catch (error) {
@@ -329,15 +505,63 @@ function DayEndReportView() {
             </div>
           )}
 
-          <h4 className="font-black text-sm uppercase tracking-widest text-slate-400 mt-8 mb-3">Entries in this period</h4>
+          {/* Employee Expenses summary - see employeeExpenseTotals/
+              salaryPaymentsTotal's own comments above. Only shown once
+              there's actually something to summarize, so a shop that's
+              never used this feature sees the page exactly as before. */}
+          {employeeExpenseTotals.total > 0 || salaryPaymentsTotal > 0 ? (
+            <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Employee Meals</p>
+                <p className="text-sm font-black text-slate-900">{formatMoney(employeeExpenseTotals.meals)}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Salary Payments/Advances</p>
+                <p className="text-sm font-black text-slate-900">{formatMoney(salaryPaymentsTotal)}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Total Employee Expenses</p>
+                <p className="text-sm font-black text-slate-900">{formatMoney(employeeExpenseTotals.total)}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Overall Expenses</p>
+                <p className="text-sm font-black text-slate-900">{formatMoney(report?.otherExpenses ?? 0)}</p>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mt-8 mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h4 className="font-black text-sm uppercase tracking-widest text-slate-400">Entries in this period</h4>
+            <div className="flex flex-wrap gap-2">
+              <InlineDropdown
+                className="w-40"
+                value={employeeFilter}
+                onChange={setEmployeeFilter}
+                placeholder="All employees"
+                options={[{ value: '', label: 'All employees' }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
+              />
+              <InlineDropdown
+                className="w-40"
+                value={categoryFilter}
+                onChange={setCategoryFilter}
+                placeholder="All categories"
+                options={[{ value: '', label: 'All categories' }, ...EXPENSE_CATEGORIES.map((c) => ({ value: c, label: c }))]}
+              />
+            </div>
+          </div>
           <div className="space-y-2 max-h-[280px] overflow-y-auto">
             {expensesInRange.length === 0 ? (
               <p className="text-sm font-bold text-slate-400">Nothing logged yet.</p>
             ) : (
-              expensesInRange.map((expense) => (
+              expensesInRange.map((expense) => {
+                const emp = typeof expense.employeeId === 'object' ? expense.employeeId : null;
+                return (
                 <div key={expense.id} className="flex items-center justify-between gap-4 rounded-xl border border-slate-100 px-4 py-3">
                   <div className="min-w-0">
-                    <p className="text-sm font-bold text-slate-800">{expense.category}</p>
+                    <p className="text-sm font-bold text-slate-800">
+                      {expense.category}
+                      {emp ? <span className="ml-2 rounded-full bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase text-indigo-600">{emp.name}</span> : null}
+                    </p>
                     <p className="text-[10px] font-bold text-slate-400">{new Date(expense.date).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}{expense.note ? ` · ${expense.note}` : ''}</p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
@@ -347,7 +571,8 @@ function DayEndReportView() {
                     </button>
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -358,19 +583,27 @@ function DayEndReportView() {
             <h3 className="font-black text-lg text-slate-900 mb-1 flex items-center gap-2">
               <Plus className="text-indigo-600" size={20} /> Log an Expense
             </h3>
-            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">Gas, electricity, wages, damage/waste...</p>
+            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">Gas, electricity, wages, damage/waste, employee meals...</p>
 
             <div className="space-y-3">
-              <input
-                list="expense-categories"
+              <CategoryComboBox
                 value={expenseCategory}
-                onChange={(e) => setExpenseCategory(e.target.value)}
+                onChange={setExpenseCategory}
+                options={EXPENSE_CATEGORIES}
                 placeholder="Category"
-                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
-              <datalist id="expense-categories">
-                {EXPENSE_CATEGORIES.map((c) => <option key={c} value={c} />)}
-              </datalist>
+              {/* Employee Expenses - optional. Left on "No specific
+                  employee" for every ordinary shop-wide expense; only
+                  matters for something like "Employee Meal" that should
+                  show up on one person's own Payroll history view too (see
+                  Expense.employeeId's own comment - purely informational
+                  there, never subtracted from their salary). */}
+              <InlineDropdown
+                value={expenseEmployeeId}
+                onChange={setExpenseEmployeeId}
+                placeholder="No specific employee"
+                options={[{ value: '', label: 'No specific employee' }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
+              />
               <input
                 type="number"
                 value={expenseAmount}

@@ -2,12 +2,18 @@ const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Expense = require("../models/Expense");
 const IngredientPurchase = require("../models/IngredientPurchase");
+const StaffPayment = require("../models/StaffPayment");
 const { shopScope } = require("../middleware/attachShopScope");
 
 // The fixed category heading every ingredient-purchase batch is grouped
 // under in the expense breakdown - see getDayEndReport's own comment on why
 // this is shown but never added into otherExpenses/netProfit.
 const KITCHEN_STOCK_CATEGORY = "Kitchen Stock";
+
+// Same idea as KITCHEN_STOCK_CATEGORY, but the OPPOSITE accounting
+// treatment - see getDayEndReport's StaffPayment aggregate below for why
+// this one DOES get added into otherExpenses/netProfit.
+const SALARY_PAYMENT_CATEGORY = "Salary Payment / Advance";
 
 // Same plain YYYY-MM-DD `startDate`/`endDate` convention as
 // customerController.getCustomerLedger and ingredientPurchaseController -
@@ -93,7 +99,7 @@ exports.getDayEndReport = async (req, res) => {
     const shopObjectId = new mongoose.Types.ObjectId(shopId);
     const { start, end } = resolveRange(req.query);
 
-    const [orderTotals, orderTypeTotals, expenseTotals, expenseByCategory, kitchenStockPurchaseDocs] = await Promise.all([
+    const [orderTotals, orderTypeTotals, expenseTotals, expenseByCategory, kitchenStockPurchaseDocs, staffPaymentTotals] = await Promise.all([
       Order.aggregate([
         { $match: { shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } } },
         {
@@ -149,6 +155,25 @@ exports.getDayEndReport = async (req, res) => {
         .select("companyName ingredientName productDetails quantity unit rate totalAmount paidAmount remainingAmount purchaseDate receivedAt")
         .sort({ receivedAt: -1 })
         .lean(),
+      // Employee Salary/Advance in the Daily Expense Report: unlike
+      // Kitchen Stock above, a StaffPayment IS a genuine, otherwise-
+      // uncounted cash expense - nothing else in this report (COGS,
+      // otherExpenses) ever reflects labor cost, so this has to be added
+      // in, not excluded. Grouped by `type` so bonus/deduction net out
+      // correctly (see the totals math below) rather than assuming every
+      // row reduces cash the same way a plain salary/advance payout does.
+      // Deliberately no employee names/per-person amounts here - this
+      // report is reachable by "reports.view" alone (Manager, Accountant),
+      // while the Payroll page's own per-employee ledger
+      // (shopOwnerController.listPayments) stays Shop-Owner-only; folding
+      // named payment details into this shared report would leak exactly
+      // the per-employee wage data that access boundary exists to protect.
+      // A single same-day total carries no more than "Other Expenses"
+      // already does for every other category.
+      StaffPayment.aggregate([
+        { $match: { shopId: shopObjectId, date: { $gte: start, $lte: end } } },
+        { $group: { _id: "$type", total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      ]),
     ]);
 
     const revenue = orderTotals[0]?.revenue || 0;
@@ -166,10 +191,37 @@ exports.getDayEndReport = async (req, res) => {
         orderTypeBreakdown[row._id] = row.count;
       }
     }
-    const otherExpenses = expenseTotals[0]?.total || 0;
-    const expenseCount = expenseTotals[0]?.count || 0;
     const kitchenStockPurchases = kitchenStockPurchaseDocs.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
     const kitchenStockPurchaseCount = kitchenStockPurchaseDocs.length;
+
+    // Employee Salary/Advance total for the period - salary and advance
+    // and bonus are all real cash paid out to staff; deduction claws money
+    // back (e.g. correcting an earlier overpayment), so it nets AGAINST
+    // the other three rather than adding to them. Exact same net-effect
+    // formula shopOwnerController.listPayroll already uses for one
+    // employee's "paid this month" (bucket.paid - bucket.deduction, with
+    // bonus tracked separately there too) - just summed across every
+    // employee and every type here instead of scoped to one person.
+    const staffPaymentByType = { salary: 0, advance: 0, bonus: 0, deduction: 0 };
+    let staffPaymentRowCount = 0;
+    for (const row of staffPaymentTotals) {
+      if (row._id && Object.prototype.hasOwnProperty.call(staffPaymentByType, row._id)) {
+        staffPaymentByType[row._id] = row.total;
+      }
+      staffPaymentRowCount += row.count;
+    }
+    const staffPaymentNet = Math.round(
+      (staffPaymentByType.salary + staffPaymentByType.advance + staffPaymentByType.bonus - staffPaymentByType.deduction) * 100
+    ) / 100;
+
+    // otherExpenses/expenseCount now cover BOTH the Expense collection
+    // (gas, electricity, employee meals, ...) AND staff salary/advance
+    // payments - unlike kitchenStockPurchases below, salary is a genuine
+    // cost this report never counted anywhere else (COGS only ever
+    // reflects ingredient cost, never labor), so leaving it out would
+    // understate real spend and overstate netProfit.
+    const otherExpenses = Math.round(((expenseTotals[0]?.total || 0) + staffPaymentNet) * 100) / 100;
+    const expenseCount = (expenseTotals[0]?.count || 0) + staffPaymentRowCount;
     // Recomputed here (revenue - costOfGoods - otherExpenses) rather than
     // trusting a sum of the per-order grossProfit snapshots - grossProfit
     // only ever nets out COGS against revenue, it has no idea Other
@@ -185,6 +237,13 @@ exports.getDayEndReport = async (req, res) => {
         total: kitchenStockPurchases,
         count: kitchenStockPurchaseCount,
         excludedFromNetProfit: true,
+      });
+    }
+    if (staffPaymentRowCount > 0) {
+      expenseBreakdown.push({
+        category: SALARY_PAYMENT_CATEGORY,
+        total: staffPaymentNet,
+        count: staffPaymentRowCount,
       });
     }
 

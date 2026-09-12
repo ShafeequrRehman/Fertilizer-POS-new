@@ -10,6 +10,9 @@ const router = express.Router();
 router.use(authenticate, requireShopMember, requireLicenseValid);
 
 router.get("/", ctrl.getExpenses);
+// Must come before "/:id" below, or Express would treat "employees" as an
+// expense id.
+router.get("/employees", ctrl.getEmployeesLite);
 router.get("/:id", ctrl.getExpense);
 router.post("/", requirePermission("expenses.manage"), ctrl.createExpense);
 router.patch("/:id", requirePermission("expenses.manage"), ctrl.updateExpense);

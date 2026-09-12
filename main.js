@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -242,6 +242,39 @@ if (!gotTheLock) {
 
   process.env.ELECTRON_IS_PACKAGED = String(app.isPackaged);
   process.env.NODE_ENV = dev ? "development" : "production";
+
+  // Electron's DEFAULT application menu (the one that exists automatically
+  // whenever nothing calls Menu.setApplicationMenu) binds "Reload" to
+  // Ctrl+R/F5 and "Force Reload" to Ctrl+Shift+R - and those accelerators
+  // stay live even with autoHideMenuBar:true, which only hides the visible
+  // bar, not the shortcuts themselves. On a POS till where staff are
+  // constantly clicking in and out of native form popups (selects,
+  // datalists) mid-order, that's a standing footgun: any accidental
+  // Ctrl+R/F5 wipes the whole renderer back to a blank boot and lands on
+  // the dashboard, discarding whatever wasn't already saved. Replacing the
+  // default menu with this trimmed one removes only Reload/Force Reload -
+  // Toggle Developer Tools (still Ctrl+Shift+I) and zoom/fullscreen are
+  // kept exactly as before, since support staff rely on DevTools access to
+  // diagnose issues like this one.
+  function buildAppMenu() {
+    const isMac = process.platform === "darwin";
+    const template = [
+      ...(isMac ? [{ role: "appMenu" }] : []),
+      {
+        label: "View",
+        submenu: [
+          { role: "toggleDevTools" },
+          { type: "separator" },
+          { role: "resetZoom" },
+          { role: "zoomIn" },
+          { role: "zoomOut" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
+        ],
+      },
+    ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
 
   function createWindow() {
     mainWindow = new BrowserWindow({
@@ -1675,6 +1708,7 @@ if (!gotTheLock) {
   });
   app.whenReady().then(async () => {
     try {
+      buildAppMenu();
       createWindow();
 
       if (devServerUrl) {

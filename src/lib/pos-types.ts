@@ -331,6 +331,15 @@ export interface Expense {
   amount: number;
   date: string;
   note: string;
+  // Employee Expenses (e.g. "Employee Meal") - null/undefined for every
+  // ordinary shop-wide expense (rent, utilities, waste...). Populated to
+  // {_id, name, username} when the backend has it and an employee is
+  // actually attached; a plain id string only ever appears if some future
+  // caller creates one without requesting population. Never affects that
+  // employee's Payroll "remaining salary" math - see backend/models/
+  // Expense.js's own comment on why this stays a separate, informational
+  // link rather than an implicit salary deduction.
+  employeeId?: { _id: string; name: string; username: string } | string | null;
 }
 
 export interface DayEndExpenseBreakdown {

@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import {
   Banknote, Landmark, Calendar,
   AlertCircle, CheckCircle2, ChevronLeft, ChevronRight,
-  Calculator, History, X, RefreshCcw,
+  Calculator, History, X, RefreshCcw, UtensilsCrossed,
 } from 'lucide-react';
 import { shopApi, type PayrollResponse, type PayrollRow, type StaffPayment } from '@/lib/shop-api';
+import { fetchExpenses, createExpense } from '@/lib/pos-api';
+import type { Expense } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
 
 // Real payroll, built on top of Manage Staff's monthlySalary field plus a
@@ -35,6 +37,7 @@ export default function PayrollPage() {
   const [data, setData] = useState<PayrollResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [payTarget, setPayTarget] = useState<PayrollRow | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<PayrollRow | null>(null);
   const [history, setHistory] = useState<StaffPayment[]>([]);
   const [visibleHistoryCount, setVisibleHistoryCount] = useState(10);
   const [visibleRowCount, setVisibleRowCount] = useState(10);
@@ -163,13 +166,22 @@ export default function PayrollPage() {
                       </span>
                     </td>
                     <td className="px-8 py-6 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setPayTarget(row)}
-                        className="flex items-center gap-2 rounded-full bg-purple-600 px-4 py-2 text-xs font-black text-white hover:bg-purple-700"
-                      >
-                        <Calculator size={14} /> Record Payment
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setHistoryTarget(row)}
+                          className="flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-xs font-black text-slate-700 hover:bg-slate-200"
+                        >
+                          <History size={14} /> History
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPayTarget(row)}
+                          className="flex items-center gap-2 rounded-full bg-purple-600 px-4 py-2 text-xs font-black text-white hover:bg-purple-700"
+                        >
+                          <Calculator size={14} /> Record Payment
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -233,6 +245,15 @@ export default function PayrollPage() {
           </div>
         ) : null}
       </div>
+
+      {historyTarget ? (
+        <EmployeeHistoryModal
+          row={historyTarget}
+          month={month}
+          onClose={() => setHistoryTarget(null)}
+          onLoggedMeal={() => toast.success('Meal expense logged.')}
+        />
+      ) : null}
 
       {payTarget ? (
         <RecordPaymentModal
@@ -336,6 +357,187 @@ function RecordPaymentModal({ row, onClose, onSaved }: { row: PayrollRow; onClos
         >
           {submitting ? 'Saving...' : 'Save Payment'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// Employee Salary History: one employee's full picture for the selected
+// month - monthly salary, what's actually been paid (salary+advance,
+// bonus tracked separately, exactly as the Staff Pay Summary table already
+// computes it - see PayrollRow), remaining, the full StaffPayment ledger
+// for just this person, AND their Employee Meal expenses for the same
+// month shown as a CLEARLY SEPARATE section that is never added into
+// "Paid"/"Remaining" - see backend/models/Expense.js's own comment on why
+// meals never implicitly deduct from salary. Reuses row.monthlySalary/
+// paidThisMonth/bonusThisMonth/remaining computed by shopOwnerController.
+// listPayroll rather than re-deriving them here, so this can never drift
+// from the same numbers the table it was opened from is showing.
+function isDateInMonth(dateStr: string, monthKey: string) {
+  const [year, month] = monthKey.split('-').map(Number);
+  const d = new Date(dateStr);
+  return d.getFullYear() === year && d.getMonth() === month - 1;
+}
+
+function EmployeeHistoryModal({
+  row,
+  month,
+  onClose,
+  onLoggedMeal,
+}: {
+  row: PayrollRow;
+  month: string;
+  onClose: () => void;
+  onLoggedMeal: () => void;
+}) {
+  const [payments, setPayments] = useState<StaffPayment[]>([]);
+  const [meals, setMeals] = useState<Expense[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [mealAmount, setMealAmount] = useState('');
+  const [mealNote, setMealNote] = useState('');
+  const [savingMeal, setSavingMeal] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    Promise.all([
+      shopApi.listPayments({ employeeId: row.employeeId, month }),
+      fetchExpenses({ employeeId: row.employeeId }),
+    ])
+      .then(([paymentList, expenseList]) => {
+        setPayments(paymentList);
+        setMeals((expenseList || []).filter((e) => e.category === 'Employee Meal' && isDateInMonth(e.date, month)));
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, [row.employeeId, month]);
+
+  const mealsTotal = useMemo(() => meals.reduce((sum, m) => sum + m.amount, 0), [meals]);
+
+  useBackspaceToClose(onClose);
+
+  async function logMeal() {
+    const amount = Number(mealAmount);
+    if (!amount || amount <= 0) return;
+    setSavingMeal(true);
+    try {
+      const created = await createExpense({
+        category: 'Employee Meal',
+        amount,
+        note: mealNote.trim(),
+        employeeId: row.employeeId,
+      });
+      if (created) {
+        setMeals((prev) => [created, ...prev]);
+        setMealAmount('');
+        setMealNote('');
+        onLoggedMeal();
+      }
+    } finally {
+      setSavingMeal(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-[28px] bg-white p-6 shadow-2xl">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-black text-slate-900">{row.name}'s Salary History</h2>
+            <p className="text-xs font-bold text-slate-400">{monthLabel(month)} · @{row.username}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full p-2 text-slate-400 hover:bg-slate-100"><X size={18} /></button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Monthly Salary</p>
+            <p className="text-sm font-black text-slate-900">Rs {row.monthlySalary.toLocaleString()}</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Paid This Month</p>
+            <p className="text-sm font-black text-slate-900">Rs {row.paidThisMonth.toLocaleString()}</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Bonus</p>
+            <p className="text-sm font-black text-slate-900">Rs {row.bonusThisMonth.toLocaleString()}</p>
+          </div>
+          <div className="rounded-2xl bg-purple-900 px-4 py-3">
+            <p className="text-[9px] font-black uppercase tracking-widest text-purple-300">Remaining</p>
+            <p className="text-sm font-black text-white">Rs {Math.abs(row.remaining).toLocaleString()}{row.remaining < 0 ? ' (overpaid)' : ''}</p>
+          </div>
+        </div>
+
+        <h3 className="mt-6 mb-2 text-xs font-black uppercase tracking-widest text-slate-400">Payment History</h3>
+        <div className="max-h-40 overflow-y-auto rounded-2xl border border-slate-100">
+          {loading ? (
+            <p className="p-4 text-sm font-bold text-slate-400">Loading...</p>
+          ) : payments.length === 0 ? (
+            <p className="p-4 text-sm font-bold text-slate-400">No payments recorded this month.</p>
+          ) : (
+            <table className="w-full text-left text-xs">
+              <tbody className="divide-y divide-slate-50">
+                {payments.map((p) => (
+                  <tr key={p._id}>
+                    <td className="px-4 py-2.5 font-bold text-slate-500">{new Date(p.date).toLocaleDateString()}</td>
+                    <td className="px-4 py-2.5"><span className="rounded-full bg-slate-100 px-2 py-1 font-black uppercase text-slate-600">{p.type}</span></td>
+                    <td className="px-4 py-2.5 font-black text-slate-900">Rs {p.amount.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-slate-500">{p.note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Employee Meal expenses - a CLEARLY SEPARATE section, on purpose:
+            this total is informational only and is never subtracted from
+            "Remaining" above (see Expense.employeeId's own comment). */}
+        <div className="mt-6 rounded-2xl border border-amber-100 bg-amber-50/60 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-amber-700">
+              <UtensilsCrossed size={14} /> Employee Meals This Month
+            </h3>
+            <span className="text-sm font-black text-amber-800">Rs {mealsTotal.toLocaleString()}</span>
+          </div>
+          <p className="mt-1 text-[10px] font-bold text-amber-700/70">Shown for reference only - not deducted from this employee's salary.</p>
+
+          {meals.length > 0 ? (
+            <div className="mt-3 max-h-28 overflow-y-auto space-y-1.5">
+              {meals.map((m) => (
+                <div key={m.id} className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-amber-900">{new Date(m.date).toLocaleDateString()}{m.note ? ` · ${m.note}` : ''}</span>
+                  <span className="font-black text-amber-900">Rs {m.amount.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="mt-3 flex gap-2">
+            <input
+              type="number"
+              value={mealAmount}
+              onChange={(e) => setMealAmount(e.target.value)}
+              placeholder="Amount"
+              className="w-28 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-bold outline-none"
+            />
+            <input
+              type="text"
+              value={mealNote}
+              onChange={(e) => setMealNote(e.target.value)}
+              placeholder="Note (e.g. lunch)"
+              className="flex-1 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-bold outline-none"
+            />
+            <button
+              type="button"
+              disabled={savingMeal}
+              onClick={() => void logMeal()}
+              className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-black text-white transition hover:bg-amber-600 disabled:opacity-60"
+            >
+              {savingMeal ? 'Saving...' : 'Log Meal'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
