@@ -22,7 +22,12 @@ import CancelOrderModal from '@/components/CancelOrderModal';
 import { resolveProductImage, resolveOrderImage } from '@/lib/food-images';
 import { useLanguage } from '@/i18n';
 
-const BASE_FILTERS = ['All', 'Dine In', 'Take Away', 'Delivery'];
+// "Dine In" tab intentionally removed from this shop's filter row per
+// owner request - this shop doesn't do dine-in orders. Any legacy DineIn
+// order (or one placed before this was removed) still shows fine under
+// "All"; the byFilter checks below simply have no dedicated pill for it
+// anymore.
+const BASE_FILTERS = ['All', 'Take Away', 'Delivery'];
 
 // Order card styling, keyed by status - a thin all-around border + a
 // matching soft background tint + badge tone, so the card's state reads at
