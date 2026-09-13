@@ -42,7 +42,7 @@ export const sales = {
   orderDetailLabel: "آرڈر کی تفصیل",
   loadingFullOrderDetails: "مکمل آرڈر کی تفصیل لوڈ ہو رہی ہے...",
   sendingEllipsis: "بھیجا جا رہا ہے...",
-  sendToKitchen: "کچن بھیجیں",
+  sendToKitchen: "گودام بھیجیں",
   printReceipt: "رسید پرنٹ کریں",
   editLocked: "ترمیم بند ہے",
 

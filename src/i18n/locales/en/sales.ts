@@ -45,7 +45,7 @@ export const sales = {
   orderDetailLabel: "Order Detail",
   loadingFullOrderDetails: "Loading full order details...",
   sendingEllipsis: "Sending...",
-  sendToKitchen: "Send to Kitchen",
+  sendToKitchen: "Send to Godam",
   printReceipt: "Print Receipt",
   editLocked: "Edit Locked",
 
