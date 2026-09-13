@@ -23,6 +23,31 @@ async function buildRecipeLookup(shopId) {
   return map;
 }
 
+// No-setup-required stock deduction: a shop that just resells its own raw
+// stock directly under a Product with the SAME name it's tracked under in
+// Ingredient Stock (e.g. a "Urea" product and a "Urea" ingredient) gets
+// automatic 1:1 deduction with nothing to configure - no Recipe Management
+// page, no per-product "set this up" step. Keyed on the ingredient's name
+// alone (case-insensitive, trimmed - not name+variation like recipeKey,
+// since an ingredient has no notion of "variation") so "Urea" / "Standard"
+// and "Urea" / "50kg Bag" both match the one "Urea" ingredient. An explicit
+// Recipe (still supported, just no UI to create one anymore - see
+// recipeController.js's own comment) always wins over this fallback when
+// both exist for the same product, since it's a deliberate, more detailed
+// configuration.
+function ingredientNameKey(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+async function buildIngredientNameLookup(shopId) {
+  const ingredients = await Ingredient.find({ shopId }).select("name unit").lean();
+  const map = new Map();
+  for (const ingredient of ingredients) {
+    map.set(ingredientNameKey(ingredient.name), ingredient);
+  }
+  return map;
+}
+
 // Deal/Combo bug fix: a Deal is just a regular Product document with
 // isDeal:true and a `dealItems` array of its component Products' own _ids
 // (see Product.js/ProductManagementSection.tsx's checkbox picker) - there is
@@ -72,7 +97,11 @@ async function deductStockForItems(items, shopId) {
     if (orderItems.length === 0) return result;
 
     const recipeMap = await buildRecipeLookup(shopId);
-    if (recipeMap.size === 0) return result;
+    // Deliberately no early-return when recipeMap is empty (unlike before) -
+    // the name-matched fallback below (ingredientNameMap) can still produce
+    // real deductions with zero Recipes configured at all, which is now the
+    // normal/expected case for a shop that never sets any up.
+    const ingredientNameMap = await buildIngredientNameLookup(shopId);
 
     // Deal/Combo bug fix: split this order's lines into ones that are
     // themselves a Deal product (matched against buildDealProductLookup
@@ -134,11 +163,23 @@ async function deductStockForItems(items, shopId) {
     }
 
     for (const item of directOrderItems) {
-      const recipe = recipeMap.get(recipeKey(item.name, item.variation));
-      if (!recipe) continue;
       const quantity = Number(item.quantity) || 0;
       if (quantity <= 0) continue;
-      addRecipeToTotals(recipe, quantity);
+      const recipe = recipeMap.get(recipeKey(item.name, item.variation));
+      if (recipe) {
+        addRecipeToTotals(recipe, quantity);
+        continue;
+      }
+      // No recipe for this product - fall back to the same-name Ingredient
+      // auto-match (see buildIngredientNameLookup's own comment). Taken 1:1
+      // in the ingredient's own base unit: the piece count leaving the
+      // shelf really is the same count just sold, no conversion to reason
+      // about the way a recipe's per-unit quantity/unit pair needs.
+      const autoIngredient = ingredientNameMap.get(ingredientNameKey(item.name));
+      if (!autoIngredient) continue;
+      const id = String(autoIngredient._id);
+      if (!totals.has(id)) totals.set(id, []);
+      totals.get(id).push({ quantity, unit: autoIngredient.unit });
     }
 
     // Deal/Combo expansion: for each ordered deal line, count how many
@@ -162,9 +203,19 @@ async function deductStockForItems(items, shopId) {
       for (const [subProductId, countPerDeal] of subProductCounts) {
         const subProduct = subProductById.get(subProductId);
         if (!subProduct) continue; // component product deleted since the deal was built
+        const multiplier = dealQuantity * countPerDeal;
         const recipe = recipeMap.get(recipeKey(subProduct.name, subProduct.variation));
-        if (!recipe) continue; // no recipe configured for this component - nothing to deduct for it
-        addRecipeToTotals(recipe, dealQuantity * countPerDeal);
+        if (recipe) {
+          addRecipeToTotals(recipe, multiplier);
+          continue;
+        }
+        // Same same-name Ingredient auto-match fallback as directOrderItems
+        // above, applied to the deal's own component product.
+        const autoIngredient = ingredientNameMap.get(ingredientNameKey(subProduct.name));
+        if (!autoIngredient) continue;
+        const id = String(autoIngredient._id);
+        if (!totals.has(id)) totals.set(id, []);
+        totals.get(id).push({ quantity: multiplier, unit: autoIngredient.unit });
       }
     }
 
@@ -264,7 +315,7 @@ async function deductStockForItems(items, shopId) {
       warnings.push(`This order used more of some ingredients than were in stock: ${shortages.join("; ")}. Please restock soon.`);
     }
     if (driftedIngredientNames.length > 0) {
-      warnings.push(`These ingredients' recipe lines are out of date (unit changed since the recipe was saved) and may have deducted the wrong amount: ${driftedIngredientNames.join(", ")}. Re-open and re-save the affected recipe(s) in Recipe Management.`);
+      warnings.push(`These ingredients' recipe lines are out of date (unit changed since the recipe was saved) and may have deducted the wrong amount: ${driftedIngredientNames.join(", ")}. Ask your admin to check the backend logs.`);
     }
     if (warnings.length > 0) result.warning = warnings.join(" ");
     result.costPrice = Math.round(result.costPrice * 100) / 100;
