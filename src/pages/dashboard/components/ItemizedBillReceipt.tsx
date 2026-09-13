@@ -247,8 +247,8 @@ export default function ItemizedBillReceipt({
       {/* Footer */}
       <div className="text-center mt-4 mb-2">
         {settings.receiptFooterMessage && <p className="font-bold">{settings.receiptFooterMessage}</p>}
-        <p>Haider&apos;s Creation</p>
-        <p>0315-0707167</p>
+        <p>Shafeeq Developer&apos;s Creation</p>
+        <p>03400-586000</p>
       </div>
     </div>
   );
