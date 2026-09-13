@@ -1039,8 +1039,8 @@ if (!gotTheLock) {
         ) : null,
         h(View, { style: receiptStyles.footer },
           settings?.receiptFooterMessage ? h(Text, { style: receiptStyles.bold }, settings.receiptFooterMessage) : null,
-          h(Text, null, "Haider's Creation"),
-          h(Text, null, "0315-0707167")
+          h(Text, null, "Shafeeq Developer's Creation"),
+          h(Text, null, "03400-586000")
         )
       )
     );
@@ -1261,8 +1261,8 @@ if (!gotTheLock) {
         ),
         h(View, { style: receiptStyles.footer },
           settings?.receiptFooterMessage ? h(Text, { style: receiptStyles.bold }, settings.receiptFooterMessage) : null,
-          h(Text, null, "Haider's Creation"),
-          h(Text, null, "0315-0707167")
+          h(Text, null, "Shafeeq Developer's Creation"),
+          h(Text, null, "03400-586000")
         )
       )
     );
@@ -1370,7 +1370,7 @@ if (!gotTheLock) {
     if (Math.max(total - (amountTendered ?? total), 0) > 0) h += 14;
     if (Number(orderData?.previousDues) > 0) h += 56; // Arrears/Arrears+Inv Balance/Invoice Balance/Account Balance rows
     h += 40; // In Words block
-    h += 50; // footer (optional footer message + fixed "Haider's Creation" / phone lines)
+    h += 50; // footer (optional footer message + fixed "Shafeeq Developer's Creation" / phone lines)
     return h;
   }
 
