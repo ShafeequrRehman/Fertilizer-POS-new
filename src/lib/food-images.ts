@@ -15,6 +15,14 @@
 // deprecated "random by keyword" redirector) using specific, verified photo
 // IDs, with Unsplash's own resize/format query params - no local asset or
 // download step needed, and no attribution UI required for hotlinked use.
+//
+// This particular shop sells fertilizer/agriculture products (Urea, DAP,
+// NPK, sprays, etc.), not food, so the *fallbacks* used when nothing more
+// specific matches are two original, hand-drawn flat SVG icons (a
+// fertilizer bag, and a "many products" shop-front scene) instead of a
+// plated-food photo - see PHOTOS.fertilizerBag / PHOTOS.multiProduct below.
+// The food photos above are kept for shops/products that really are food
+// (name/category keyword matches still resolve to them as before).
 
 import { getProductImageUrl } from "./asset-path";
 
@@ -53,6 +61,17 @@ const PHOTOS = {
   apple: photo("1568702846914-96b305d2aaeb"),
   platter: photo("1550547660-d9450f859349"),
   defaultFood: photo("1504674900247-0877df9cc836"),
+  // This shop sells fertilizer/agriculture goods (Urea, DAP, NPK, sprays,
+  // etc.), not food - a plated-food photo makes no sense as the fallback for
+  // those. These two are original, hand-drawn flat SVG icons (same house
+  // style as public/products/*.svg), embedded inline as data URIs so no
+  // extra asset request/attribution is needed. Neither depicts any real
+  // company's actual logo/mark - the "shop" icon's medallion is a plain,
+  // generic leaf drawn for this app only.
+  fertilizerBag:
+    "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDMyMCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjMyMCIgaGVpZ2h0PSIyNDAiIHJ4PSIyOCIgZmlsbD0iI0VBRjNFNCIvPgogIDxwYXRoIGQ9Ik0xMjAgOTZIMjAwTDIxMiAyMDBDMjEyIDIwOCAyMDYgMjE0IDE5OCAyMTRIMTIyQzExNCAyMTQgMTA4IDIwOCAxMDggMjAwTDEyMCA5NloiIGZpbGw9IiNEOEI4NzkiIHN0cm9rZT0iI0E5ODM0QSIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPHJlY3QgeD0iMTI4IiB5PSI3NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjI2IiByeD0iOCIgZmlsbD0iI0M5QTY2QiIgc3Ryb2tlPSIjQTk4MzRBIiBzdHJva2Utd2lkdGg9IjYiLz4KICA8cGF0aCBkPSJNMTUwIDc0TDE0NiA1Nk0xNzAgNzRMMTc0IDU2IiBzdHJva2U9IiNBOTgzNEEiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iMTYwIiBjeT0iMTUwIiByPSIzMCIgZmlsbD0iI0ZGRkZGRiIgc3Ryb2tlPSIjN0NBRTVBIiBzdHJva2Utd2lkdGg9IjYiLz4KICA8cGF0aCBkPSJNMTYwIDEzMkMxNzIgMTM4IDE3OCAxNTAgMTcyIDE2MkMxNjAgMTY4IDE0OCAxNjIgMTQ4IDE1MEMxNDggMTQwIDE1MiAxMzQgMTYwIDEzMloiIGZpbGw9IiM3Q0FFNUEiLz4KPC9zdmc+Cg==",
+  multiProduct:
+    "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDMyMCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjMyMCIgaGVpZ2h0PSIyNDAiIHJ4PSIyOCIgZmlsbD0iI0Y0RjVGMCIvPgogIDxyZWN0IHg9IjQwIiB5PSI2MCIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxMzAiIHJ4PSIxMiIgZmlsbD0iI0ZGRkZGRiIgc3Ryb2tlPSIjRDhEQUQwIiBzdHJva2Utd2lkdGg9IjYiLz4KICA8cGF0aCBkPSJNNDAgODhWNzJDNDAgNjUgNDYgNjAgNTIgNjBIMjY4QzI3NCA2MCAyODAgNjUgMjgwIDcyVjg4SDQwWiIgZmlsbD0iIzdDQUU1QSIvPgogIDxjaXJjbGUgY3g9IjE2MCIgY3k9Ijc0IiByPSIxNiIgZmlsbD0iI0ZGRkZGRiIgc3Ryb2tlPSIjNUM4QTNFIiBzdHJva2Utd2lkdGg9IjQiLz4KICA8cGF0aCBkPSJNMTYwIDY0QzE2NyA2OCAxNzAgNzYgMTY1IDgzQzE1NyA4NiAxNTAgODEgMTUxIDc0QzE1MiA2OCAxNTYgNjUgMTYwIDY0WiIgZmlsbD0iIzVDOEEzRSIvPgogIDxyZWN0IHg9IjY2IiB5PSIxNDAiIHdpZHRoPSI0NiIgaGVpZ2h0PSI1NiIgcng9IjgiIGZpbGw9IiNEOEI4NzkiIHN0cm9rZT0iI0E5ODM0QSIgc3Ryb2tlLXdpZHRoPSI1Ii8+CiAgPHJlY3QgeD0iMTI2IiB5PSIxMzAiIHdpZHRoPSI0NiIgaGVpZ2h0PSI2NiIgcng9IjgiIGZpbGw9IiNDOUE2NkIiIHN0cm9rZT0iI0E5ODM0QSIgc3Ryb2tlLXdpZHRoPSI1Ii8+CiAgPHJlY3QgeD0iMTk2IiB5PSIxMTgiIHdpZHRoPSIzMCIgaGVpZ2h0PSI3OCIgcng9IjEwIiBmaWxsPSIjOEZDNEUzIiBzdHJva2U9IiM0Qzg2QTgiIHN0cm9rZS13aWR0aD0iNSIvPgogIDxyZWN0IHg9IjIwNCIgeT0iMTA0IiB3aWR0aD0iMTQiIGhlaWdodD0iMTgiIHJ4PSI0IiBmaWxsPSIjNEM4NkE4Ii8+CiAgPHBhdGggZD0iTTIxOCAxMThMMjM2IDEwOCIgc3Ryb2tlPSIjNEM4NkE4IiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K",
 } as const;
 
 // Direct 1:1 map for every filename the old "Display Icon" preset picker
@@ -132,6 +151,37 @@ const KEYWORD_GROUPS: Array<{ keywords: string[]; photo: string }> = [
   { keywords: ["apple"], photo: PHOTOS.apple },
   { keywords: ["haleem", "chicken", "boti", "tikka", "shami"], photo: PHOTOS.wrap },
   { keywords: ["deal", "combo", "meal", "platter", "feast", "family"], photo: PHOTOS.platter },
+  // Fertilizer/agriculture shop products - checked ahead of the generic
+  // fallback so a known product name (Urea, DAP, NPK, a spray/pesticide,
+  // seed, etc.) gets the fertilizer-bag icon instead of falling all the way
+  // through to a plated-food photo.
+  {
+    keywords: [
+      "urea",
+      "dap",
+      "npk",
+      "khad",
+      "fertilizer",
+      "fertiliser",
+      "manure",
+      "compost",
+      "antracool",
+      "poma",
+      "spray",
+      "pesticide",
+      "insecticide",
+      "fungicide",
+      "herbicide",
+      "weedicide",
+      "seed",
+      "zinc",
+      "sona",
+      "nitrogen",
+      "potash",
+      "gypsum",
+    ],
+    photo: PHOTOS.fertilizerBag,
+  },
 ];
 
 /**
@@ -165,20 +215,23 @@ export function resolveProductImage(input: { image?: string | null; name?: strin
     if (group.keywords.some((keyword) => haystack.includes(keyword))) return group.photo;
   }
 
-  return PHOTOS.defaultFood;
+  // Terminal fallback: this app is a fertilizer/agriculture shop, not a
+  // restaurant, so an unmatched product shows a generic fertilizer-bag icon
+  // instead of a random plated-food photo.
+  return PHOTOS.fertilizerBag;
 }
 
 /**
  * Picks the photo for an order's card/hero image specifically. A single
  * distinct line item (any quantity) gets its own exact matching photo - a
- * Chai order looks like tea, a Burger order looks like a burger, same as
- * everywhere else in the app. An order with more than one distinct item is
- * a mixed/combo plate, so it deliberately shows the generic multi-food
- * spread instead of just whichever item happened to be added first (which
- * would otherwise misrepresent the rest of the order).
+ * Urea order looks like a fertilizer bag, same as everywhere else in the
+ * app. An order with more than one distinct item is a mixed order, so it
+ * deliberately shows a dedicated "many products" shop-front icon (bags +
+ * a spray bottle) instead of just whichever item happened to be added
+ * first (which would otherwise misrepresent the rest of the order).
  */
 export function resolveOrderImage(items: Array<{ image?: string | null; name?: string; category?: string }> | undefined): string {
-  if (!items || items.length === 0) return PHOTOS.defaultFood;
-  if (items.length > 1) return PHOTOS.defaultFood;
+  if (!items || items.length === 0) return PHOTOS.fertilizerBag;
+  if (items.length > 1) return PHOTOS.multiProduct;
   return resolveProductImage(items[0]);
 }
