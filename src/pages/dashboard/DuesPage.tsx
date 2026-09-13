@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect } from 'react';
-import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, fetchWhatsappStatus } from '@/lib/pos-api';
+import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, sendWhatsappDocument, fetchWhatsappStatus } from '@/lib/pos-api';
 import { LedgerCustomer } from '@/lib/pos-types';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search } from 'lucide-react';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 
 // This page used to source its list from fetchAllCustomers(), which only
@@ -325,6 +325,7 @@ export default function CustomerDuesPage() {
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
+                  whatsappConnected={whatsappConnected}
                 />
               ))}
               {customersWithDues.length === 0 && (
@@ -358,6 +359,7 @@ export default function CustomerDuesPage() {
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
+                  whatsappConnected={whatsappConnected}
                 />
               ))}
             </div>
@@ -379,11 +381,20 @@ export default function CustomerDuesPage() {
   );
 }
 
-function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void }) {
-  const { confirm } = useToast();
+function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsappConnected }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void, whatsappConnected: boolean }) {
+  const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Dues Statement PDF (Download/Send): a full, printable record of
+  // everything that makes up this customer's balance - same historyEntries
+  // trail already shown in the on-screen History dropdown below, just as a
+  // PDF a shop owner can hand over or forward on WhatsApp instead of
+  // reading off the screen. isSendingPdf mirrors IngredientStockSection's
+  // own isSendingWhatsapp - disables the Send button and swaps its label
+  // while the request is in flight, since a WhatsApp send is a real network
+  // round trip (unlike the instant client-side PDF download).
+  const [isSendingPdf, setIsSendingPdf] = useState(false);
   // Collapsed by default - the History list can get long on a
   // long-standing customer, no point rendering/scrolling past it on every
   // card just to see the current balance.
@@ -421,6 +432,76 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
       })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
+  // Shared by both the Download and Send buttons below - one
+  // <ReportPdfDocument> (same building block Ledger/Record's own PDF
+  // exports use) listing this one customer's current balance and full
+  // historyEntries trail. Built fresh on every click (never cached) so it
+  // always reflects whatever's on screen right now, and dynamically
+  // imported the same way LedgerPage.tsx's own downloadLedgerPdf does -
+  // react-pdf is a sizeable chunk of code no card needs to pull in until
+  // one of these buttons is actually pressed.
+  async function buildDuesStatementDoc() {
+    const { ReportPdfDocument } = await import('@/lib/pdf-export');
+    return (
+      <ReportPdfDocument
+        title="Customer Dues Statement"
+        subtitle={`${customer.name} · ${customer.phone}`}
+        stats={[
+          { label: 'Current Dues', value: `Rs ${totalDue}` },
+          { label: 'From Unpaid Orders', value: `Rs ${fromOrders}` },
+          { label: 'Manual Adjustments', value: `Rs ${fromLumpSum}` },
+        ]}
+        tables={[
+          {
+            title: 'Dues History',
+            columns: [
+              { label: 'Date', width: 1 },
+              { label: 'Entry', width: 2 },
+              { label: 'Detail', width: 2.5 },
+              { label: 'By', width: 1 },
+            ],
+            rows: historyEntries.map((entry) => [
+              new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+              entry.label,
+              entry.detail,
+              entry.by || '—',
+            ]),
+            emptyMessage: 'No dues activity recorded for this customer yet.',
+          },
+        ]}
+      />
+    );
+  }
+
+  async function handleDownloadDuesPdf() {
+    const { downloadPdfDocument } = await import('@/lib/pdf-export');
+    const doc = await buildDuesStatementDoc();
+    await downloadPdfDocument(doc, `${customer.name.replace(/\s+/g, '_')}_dues_statement.pdf`);
+  }
+
+  async function handleSendDuesPdf() {
+    if (!whatsappConnected) {
+      toast.error('WhatsApp is not connected. Please connect it in the WhatsApp settings first.');
+      return;
+    }
+    try {
+      setIsSendingPdf(true);
+      const { pdfDocumentToBase64 } = await import('@/lib/pdf-export');
+      const doc = await buildDuesStatementDoc();
+      const base64 = await pdfDocumentToBase64(doc);
+      const response = await sendWhatsappDocument(customer.phone, base64, `${customer.name.replace(/\s+/g, '_')}_dues_statement.pdf`);
+      if (response?.success) {
+        toast.success(`Dues statement sent to ${customer.name} on WhatsApp.`);
+      } else {
+        toast.error('Failed to send dues statement.');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to send dues statement.');
+    } finally {
+      setIsSendingPdf(false);
+    }
+  }
+
   return (
     <div className={`p-6 rounded-[28px] border ${isPending ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 bg-white'} shadow-sm flex flex-col gap-4`}>
       <div>
@@ -441,12 +522,33 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind }: { cu
           ) : null}
         </div>
         {isPending && (
-          <button 
-            onClick={onRemind}
-            className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-xl font-bold text-xs transition-colors shadow-sm"
-          >
-            <MessageCircle size={14} /> Remind
-          </button>
+          <div className="flex flex-col items-end gap-1.5">
+            <button
+              onClick={onRemind}
+              className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-xl font-bold text-xs transition-colors shadow-sm"
+            >
+              <MessageCircle size={14} /> Remind
+            </button>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => void handleDownloadDuesPdf()}
+                title="Download this customer's complete dues record as a PDF"
+                className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
+              >
+                <Download size={13} /> PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSendDuesPdf()}
+                disabled={isSendingPdf}
+                title="Send this customer's complete dues record as a PDF on WhatsApp"
+                className="flex items-center gap-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
+              >
+                <FileText size={13} /> {isSendingPdf ? 'Sending...' : 'Send PDF'}
+              </button>
+            </div>
+          </div>
         )}
       </div>
 
