@@ -325,7 +325,19 @@ exports.createOrder = async (req, res) => {
       if (!product) {
         return res.status(400).json({ message: `"${name}" is no longer on the menu - please refresh and try again.`, reason: "item_not_found" });
       }
-      items.push({ name: product.name, price: product.price, quantity, variation: product.variation || "" });
+      items.push({
+        name: product.name,
+        price: product.price,
+        quantity,
+        variation: product.variation || "",
+        // Carry the real product photo forward the same way a POS-placed
+        // order already does (see orderItemSchema.image in models/Order.js)
+        // - without this, a customer-placed order's item has no image at
+        // all and Sales/staff views silently fall back to a generic
+        // keyword-matched icon instead of the exact photo the customer saw
+        // on the ordering page for the same product.
+        image: product.image || "",
+      });
     }
 
     // One-active-order-per-phone restriction - applies across ALL order
@@ -504,7 +516,11 @@ exports.requestOrderChange = async (req, res) => {
         if (!product) {
           return res.status(400).json({ message: `"${name}" is no longer on the menu - please refresh and try again.`, reason: "item_not_found" });
         }
-        addItems.push({ name: product.name, price: product.price, quantity, variation: product.variation || "" });
+        // Same image carry-forward as createOrder above - these lines get
+        // folded straight into the real order.items on approval (see
+        // respondToChangeRequest in orderController.js), so without this
+        // they'd hit the same missing-photo bug for a mid-order addition.
+        addItems.push({ name: product.name, price: product.price, quantity, variation: product.variation || "", image: product.image || "" });
       }
     }
 
