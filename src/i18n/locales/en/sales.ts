@@ -61,6 +61,9 @@ export const sales = {
     previousDues: "Previous Dues",
     remaining: "Remaining",
     note: "Note",
+    billTid: "TID",
+    billName: "Bill Name",
+    cashRecipientName: "Cash Given To",
   },
 
   notApplicable: "N/A",

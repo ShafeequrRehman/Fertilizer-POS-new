@@ -125,6 +125,12 @@ export default function ItemizedBillReceipt({
             what the delivery needs - it must still print even then. */}
         {order.customer?.name && order.customer.name !== 'Walk-in Customer' && order.customer.phone && order.customer.phone !== '03000000000' && <p>Phone: {order.customer.phone}</p>}
         {order.customer?.address && <p>Address: {order.customer.address}</p>}
+        {/* Electricity Bill / Cash special-product details - only ever set
+            on an order whose cart had the matching special item in it (see
+            POSPage.tsx's hasElectricityBillItem/hasCashItem). */}
+        {order.billTid && <p>TID: {order.billTid}</p>}
+        {order.billName && <p>Bill Name: {order.billName}</p>}
+        {order.cashRecipientName && <p>Cash Given To: {order.cashRecipientName}</p>}
       </div>
 
       <div className="border-t border-dashed border-black my-1.5" />

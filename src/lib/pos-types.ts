@@ -71,6 +71,12 @@ export interface LedgerOrder {
   total: number;
   paidAmount: number;
   remainingAmount: number;
+  // Electricity Bill / Cash special-product details - see
+  // backend/models/Order.js's own comment. DuesPage.tsx's History dropdown
+  // shows these on the matching order entry.
+  billTid?: string;
+  billName?: string;
+  cashRecipientName?: string;
 }
 
 // One manual "+ Add Dues" / "- Pay Dues" / "Clear" entry from the Customer

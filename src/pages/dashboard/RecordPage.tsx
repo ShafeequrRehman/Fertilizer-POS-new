@@ -1334,6 +1334,12 @@ function OrderDetailModal({
           </div>
 
           {order.note ? <DetailBox label={t('record.orderDetail.note')} value={order.note} /> : null}
+          {/* Electricity Bill / Cash special-product details - only ever
+              set on an order whose cart had the matching special item in
+              it (see POSPage.tsx's hasElectricityBillItem/hasCashItem). */}
+          {order.billTid ? <DetailBox label={t('record.orderDetail.billTid')} value={order.billTid} /> : null}
+          {order.billName ? <DetailBox label={t('record.orderDetail.billName')} value={order.billName} /> : null}
+          {order.cashRecipientName ? <DetailBox label={t('record.orderDetail.cashRecipientName')} value={order.cashRecipientName} /> : null}
         </div>
 
         {order.status === 'pending' ? (

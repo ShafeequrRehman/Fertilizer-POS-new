@@ -422,14 +422,27 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsa
     })),
     ...customer.orders
       .filter((order) => order.status !== 'cancelled')
-      .map((order) => ({
-        key: `order-${order.id}`,
-        date: order.createdAt,
-        label: `Order #${order.dailyOrderNumber ?? order.id.slice(-4)} - Rs ${order.total}`,
-        detail: order.remainingAmount > 0 ? `Rs ${order.remainingAmount} still due (paid Rs ${order.paidAmount})` : 'Fully paid',
-        tone: order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
-        by: '',
-      })),
+      .map((order) => {
+        const paidStatus = order.remainingAmount > 0 ? `Rs ${order.remainingAmount} still due (paid Rs ${order.paidAmount})` : 'Fully paid';
+        // Electricity Bill / Cash special-product details - only ever set
+        // on an order whose cart had the matching special item in it (see
+        // POSPage.tsx's hasElectricityBillItem/hasCashItem). Appended onto
+        // the same detail line so a due tied to one of these is
+        // immediately traceable from this page, not just Sales/Record.
+        const specialDetails = [
+          order.billTid ? `TID: ${order.billTid}` : '',
+          order.billName ? `Bill Name: ${order.billName}` : '',
+          order.cashRecipientName ? `Cash Given To: ${order.cashRecipientName}` : '',
+        ].filter(Boolean).join(' · ');
+        return {
+          key: `order-${order.id}`,
+          date: order.createdAt,
+          label: `Order #${order.dailyOrderNumber ?? order.id.slice(-4)} - Rs ${order.total}`,
+          detail: specialDetails ? `${paidStatus} · ${specialDetails}` : paidStatus,
+          tone: order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
+          by: '',
+        };
+      }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   // Shared by both the Download and Send buttons below - one

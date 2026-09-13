@@ -149,7 +149,7 @@ exports.getCustomerLedger = async (req, res) => {
       // to hit the frontend's request timeout.
       Order.find(
         { ...scope, "customer.phone": { $exists: true, $ne: "" } },
-        "customer.phone dailyOrderNumber createdAt orderType status paymentMethod total paidAmount remainingAmount"
+        "customer.phone dailyOrderNumber createdAt orderType status paymentMethod total paidAmount remainingAmount billTid billName cashRecipientName"
       )
         .sort({ createdAt: -1 })
         .lean(),
@@ -236,6 +236,12 @@ exports.getCustomerLedger = async (req, res) => {
           remainingAmount: typeof order.remainingAmount === "number"
             ? order.remainingAmount
             : Math.max((order.total || 0) - (order.paidAmount || 0), 0),
+          // Electricity Bill / Cash special-product details - see
+          // backend/models/Order.js's own comment. DuesPage.tsx's History
+          // dropdown shows these on the matching order entry.
+          billTid: order.billTid || "",
+          billName: order.billName || "",
+          cashRecipientName: order.cashRecipientName || "",
         })),
       };
     });

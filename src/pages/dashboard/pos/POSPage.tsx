@@ -978,16 +978,13 @@ export default function POSPage() {
       const now = new Date().toISOString();
       const clientSyncId = crypto.randomUUID();
 
-      // Electricity Bill / Cash: the whole reason a shop rings these up at
-      // all is to record money that's already changed hands at the counter
-      // right then - unlike a normal order, there's no "pending, pay
-      // later" phase for either one, so the order is saved already fully
-      // settled (paidAmount = total, remainingAmount = 0, status
-      // 'completed') instead of the usual 'pending' + a separate Complete
-      // Payment step on the Sales page. This also means it never shows up
-      // as a customer due.
-      const isSpecialProductOrder = hasElectricityBillItem || hasCashItem;
-
+      // Electricity Bill / Cash still go through the exact same
+      // pending -> Complete Payment flow as every other order (a shop
+      // owner explicitly asked for this after an earlier version of this
+      // feature auto-completed the order at Save time) - only the TID/
+      // Bill Name/Recipient Name details are special-cased here. See
+      // SalesPage.tsx's Complete Payment modal for where the payable
+      // amount now gets pre-filled automatically for these two.
       const orderPayload: OrderPayload = {
         orderId: clientSyncId,
         clientSyncId,
@@ -1004,9 +1001,8 @@ export default function POSPage() {
         billTid: hasElectricityBillItem ? orderFormData.billTid?.trim() : '',
         billName: hasElectricityBillItem ? orderFormData.billName?.trim() : '',
         cashRecipientName: hasCashItem ? orderFormData.cashRecipientName?.trim() : '',
-        status: isSpecialProductOrder ? 'completed' : 'pending',
+        status: 'pending',
         paymentMethod: selectedPaymentMethod,
-        ...(isSpecialProductOrder ? { paidAmount: total, remainingAmount: 0, cashReceived: selectedPaymentMethod === 'Cash' ? total : 0 } : {}),
         createdAt: now,
         updatedAt: now,
         version: 1,

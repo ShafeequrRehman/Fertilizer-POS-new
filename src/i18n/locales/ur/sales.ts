@@ -58,6 +58,9 @@ export const sales = {
     previousDues: "پچھلے واجبات",
     remaining: "باقی رقم",
     note: "نوٹ",
+    billTid: "TID",
+    billName: "بل کا نام",
+    cashRecipientName: "نقدی کس کو دی گئی",
   },
 
   notApplicable: "لاگو نہیں",

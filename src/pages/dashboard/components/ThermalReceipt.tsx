@@ -149,6 +149,13 @@ export default function ThermalReceipt({
         {type === 'cashier' && order.customer?.address && (
           <p>ADDRESS: {order.customer.address}</p>
         )}
+        {/* Electricity Bill / Cash special-product details - customer's copy
+            only, same reasoning as PHONE/ADDRESS above. Only ever set on an
+            order whose cart had the matching special item in it (see
+            POSPage.tsx's hasElectricityBillItem/hasCashItem). */}
+        {type === 'cashier' && order.billTid && <p>TID: {order.billTid}</p>}
+        {type === 'cashier' && order.billName && <p>BILL NAME: {order.billName}</p>}
+        {type === 'cashier' && order.cashRecipientName && <p>CASH GIVEN TO: {order.cashRecipientName}</p>}
       </div>
 
       {/* Dashed Separator */}

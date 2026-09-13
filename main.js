@@ -739,6 +739,11 @@ if (!gotTheLock) {
     if (type === "cashier" && orderData?.customer?.address) h += 15;
     if (orderData?.table) h += 15;
     if (orderData?.waiter) h += 15;
+    // Electricity Bill / Cash special-product details - customer's copy
+    // only, same reasoning as PHONE/ADDRESS above.
+    if (type === "cashier" && orderData?.billTid) h += 15;
+    if (type === "cashier" && orderData?.billName) h += 15;
+    if (type === "cashier" && orderData?.cashRecipientName) h += 15;
     h += 25; // Dashed rule + "Items:" label
 
     const items = orderData?.items || [];
@@ -972,7 +977,14 @@ if (!gotTheLock) {
           type === "cashier" && orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" && orderData.customer.phone && orderData.customer.phone !== "03000000000" ? h(Text, null, `PHONE: ${orderData.customer.phone}`) : null,
           type === "cashier" && orderData?.customer?.address ? h(Text, null, `ADDRESS: ${orderData.customer.address}`) : null,
           orderData?.table ? h(Text, null, `TABLE: ${orderData.table}`) : null,
-          orderData?.waiter ? h(Text, null, `WAITER: ${String(orderData.waiter).toUpperCase()}`) : null
+          orderData?.waiter ? h(Text, null, `WAITER: ${String(orderData.waiter).toUpperCase()}`) : null,
+          // Electricity Bill / Cash special-product details - customer's
+          // copy only, same reasoning as PHONE/ADDRESS above. Only ever set
+          // on an order whose cart had the matching special item in it (see
+          // POSPage.tsx's hasElectricityBillItem/hasCashItem).
+          type === "cashier" && orderData?.billTid ? h(Text, null, `TID: ${orderData.billTid}`) : null,
+          type === "cashier" && orderData?.billName ? h(Text, null, `BILL NAME: ${orderData.billName}`) : null,
+          type === "cashier" && orderData?.cashRecipientName ? h(Text, null, `CASH GIVEN TO: ${orderData.cashRecipientName}`) : null
         ),
         h(View, { style: receiptStyles.dashedRule }),
         h(Text, null, "Items:"),
@@ -1186,7 +1198,13 @@ if (!gotTheLock) {
           // with an address but no typed name, and the address is exactly
           // what the delivery needs, so it still has to print even then.
           orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer" && orderData.customer.phone && orderData.customer.phone !== "03000000000" ? h(Text, { style: altReceiptStyles.metaRow }, `Phone: ${orderData.customer.phone}`) : null,
-          orderData?.customer?.address ? h(Text, { style: altReceiptStyles.metaRow }, `Address: ${orderData.customer.address}`) : null
+          orderData?.customer?.address ? h(Text, { style: altReceiptStyles.metaRow }, `Address: ${orderData.customer.address}`) : null,
+          // Electricity Bill / Cash special-product details - only ever set
+          // on an order whose cart had the matching special item in it (see
+          // POSPage.tsx's hasElectricityBillItem/hasCashItem).
+          orderData?.billTid ? h(Text, { style: altReceiptStyles.metaRow }, `TID: ${orderData.billTid}`) : null,
+          orderData?.billName ? h(Text, { style: altReceiptStyles.metaRow }, `Bill Name: ${orderData.billName}`) : null,
+          orderData?.cashRecipientName ? h(Text, { style: altReceiptStyles.metaRow }, `Cash Given To: ${orderData.cashRecipientName}`) : null
         ),
         h(View, { style: receiptStyles.dashedRule }),
         h(View, { style: altReceiptStyles.tableHeaderRow },
@@ -1355,6 +1373,10 @@ if (!gotTheLock) {
     const billCustomerShown = orderData?.customer?.name && orderData.customer.name !== "Walk-in Customer";
     if (billCustomerShown && orderData?.customer?.phone && orderData.customer.phone !== "03000000000") h += 14;
     if (orderData?.customer?.address) h += 14;
+    // Electricity Bill / Cash special-product details.
+    if (orderData?.billTid) h += 14;
+    if (orderData?.billName) h += 14;
+    if (orderData?.cashRecipientName) h += 14;
     h += 20; // dashed rule + table header
     const items = orderData?.items || [];
     items.forEach((item) => {

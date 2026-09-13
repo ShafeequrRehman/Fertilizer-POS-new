@@ -505,6 +505,24 @@ export default function SalesPage() {
   const enteredPaymentAmount = paymentAmount === '' ? 0 : Number(paymentAmount);
   const changeReturn = Math.max(enteredPaymentAmount - payable, 0);
 
+  // Electricity Bill / Cash orders (see POSPage.tsx's hasElectricityBillItem/
+  // hasCashItem) are always paid in full, on the spot, at the counter -
+  // there's no realistic "partial payment" case for either one. Pre-filling
+  // Amount Paid with the full payable amount the moment the Complete
+  // Payment modal opens for one saves the cashier from having to type/
+  // calculate it themselves, while still requiring their own Confirm/Pay
+  // Full click - this never completes an order on its own.
+  const hasSpecialOrderItem = Boolean(selectedOrder?.items?.some((item) => item.specialType));
+  useEffect(() => {
+    if (showPayment && hasSpecialOrderItem && paymentAmount === '') {
+      setPaymentAmount(String(payable));
+    }
+    // Only ever fires off the modal opening/the order changing - never
+    // re-fires just because the cashier edits the field afterward (that
+    // would fight their own typing).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPayment, selectedOrder?.id]);
+
   async function refresh(lean: boolean) {
     try {
       // Two fetches, merged: the last-14-days window (a generous margin
@@ -1576,6 +1594,13 @@ export default function SalesPage() {
                   <Box label={t('sales.boxLabels.previousDues')} value={`Rs ${customerDue}`} />
                   <Box label={t('sales.boxLabels.remaining')} value={`Rs ${selectedOrder.remainingAmount ?? 0}`} />
                   {selectedOrder.note ? <Box label={t('sales.boxLabels.note')} value={selectedOrder.note} /> : null}
+                  {/* Electricity Bill / Cash special-product details - only
+                      ever set on an order whose cart had the matching
+                      special item in it (see POSPage.tsx's
+                      hasElectricityBillItem/hasCashItem). */}
+                  {selectedOrder.billTid ? <Box label={t('sales.boxLabels.billTid')} value={selectedOrder.billTid} /> : null}
+                  {selectedOrder.billName ? <Box label={t('sales.boxLabels.billName')} value={selectedOrder.billName} /> : null}
+                  {selectedOrder.cashRecipientName ? <Box label={t('sales.boxLabels.cashRecipientName')} value={selectedOrder.cashRecipientName} /> : null}
                 </div>
 
                 {selectedOrder.source === 'customer-qr' ? (
