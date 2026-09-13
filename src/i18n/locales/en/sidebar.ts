@@ -10,7 +10,7 @@ export const sidebar = {
   sales: "Sales",
   accounting: "Accounting",
   purchase: "Purchase",
-  "ingredient-stock": "Ingredient Stock",
+  "ingredient-stock": "Stock",
   management: "Customers & HR",
   dues: "Customer Dues",
   ledger: "Ledger",

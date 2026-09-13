@@ -4,7 +4,7 @@ export const sidebar = {
   sales: "فروخت",
   accounting: "اکاؤنٹنگ",
   purchase: "خریداری",
-  "ingredient-stock": "خام مال اسٹاک",
+  "ingredient-stock": "اسٹاک",
   management: "کسٹمرز اور عملہ",
   dues: "کسٹمر واجبات",
   ledger: "لیجر",

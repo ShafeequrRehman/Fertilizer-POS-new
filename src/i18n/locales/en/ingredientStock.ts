@@ -2,7 +2,7 @@
 // tracking (picked from the Manage Products catalog), suppliers/companies,
 // and incoming purchase logging.
 export const ingredientStock = {
-  title: "Ingredient Stock",
+  title: "Stock",
   description: "Pick products from your catalog to track as raw stock, and log incoming purchases.",
   noProductsForCompany: "No products on file for this company yet.",
 
