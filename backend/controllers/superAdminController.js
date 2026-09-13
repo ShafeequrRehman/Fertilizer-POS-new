@@ -6,8 +6,54 @@ const License = require("../models/License");
 const Plan = require("../models/Plan");
 const Payment = require("../models/Payment");
 const Role = require("../models/Role");
+const Product = require("../models/Product");
 const SystemSettings = require("../models/SystemSettings");
 const { DEFAULT_ROLE_PRESETS } = require("../config/permissions");
+
+// Seeded into every new shop's product catalog alongside its default Roles
+// below (see createShop) - "Electricity Bill" and "Cash" are system-
+// recognized service products (Product.specialType) that POSPage.tsx gives
+// special checkout behavior (TID/Bill Name/Recipient Name fields, and an
+// auto-settled payment - see that page's hasElectricityBillItem/
+// hasCashItem). price 0 - both are "open amount" products: the cashier
+// types the real bill/cash figure on the cart row itself every time (see
+// POSPage.tsx's handleItemPriceChange), not a fixed catalog price. Existing
+// shops (created before this existed) are backfilled separately by
+// scripts/seedSpecialProducts.js - it is NOT run automatically here.
+//
+// image is an inline data: URI (source SVGs kept for reference at
+// public/products/electricity-bill.svg / cash-1000.svg), not a
+// "/products/<file>.svg" path - src/lib/food-images.ts's
+// resolveProductImage aggressively re-maps every non-hosted/non-data image
+// path to a real food photo (this app's product grid is built around real
+// food photography), which would otherwise silently replace either icon
+// with a random food photo since neither product name matches any food
+// keyword. A data: URI is one of the two cases that function passes through
+// unchanged.
+const DEFAULT_SPECIAL_PRODUCTS = [
+  {
+    name: "Electricity Bill",
+    category: "Services",
+    variation: "Standard",
+    price: 0,
+    stock: 999999,
+    color: "bg-amber-50",
+    image: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDMyMCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjMyMCIgaGVpZ2h0PSIyNDAiIHJ4PSIyOCIgZmlsbD0iI0ZGRjdFMCIvPgogIDxyZWN0IHg9Ijk2IiB5PSI1MiIgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxNTAiIHJ4PSIxMCIgZmlsbD0iI0ZGRkZGRiIgc3Ryb2tlPSIjRThDNDY4IiBzdHJva2Utd2lkdGg9IjYiLz4KICA8cmVjdCB4PSIxMTIiIHk9Ijc0IiB3aWR0aD0iOTYiIGhlaWdodD0iMTAiIHJ4PSI1IiBmaWxsPSIjRThDNDY4Ii8+CiAgPHJlY3QgeD0iMTEyIiB5PSI5NCIgd2lkdGg9IjcyIiBoZWlnaHQ9IjgiIHJ4PSI0IiBmaWxsPSIjRjBEQTlBIi8+CiAgPHJlY3QgeD0iMTEyIiB5PSIxMTAiIHdpZHRoPSI4MCIgaGVpZ2h0PSI4IiByeD0iNCIgZmlsbD0iI0YwREE5QSIvPgogIDxyZWN0IHg9IjExMiIgeT0iMTY4IiB3aWR0aD0iNjAiIGhlaWdodD0iMTAiIHJ4PSI1IiBmaWxsPSIjRThDNDY4Ii8+CiAgPHBhdGggZD0iTTE3MiAxMjhMMTQ2IDE1OEgxNjJMMTUwIDE4NkwxODggMTQ4SDE3MEwxNzIgMTI4WiIgZmlsbD0iI0Y1QTYyMyIgc3Ryb2tlPSIjQzk3RjBGIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K",
+    description: "FESCO / electricity bill payment - enter the bill's TID and Bill Name at checkout.",
+    specialType: "electricity_bill",
+  },
+  {
+    name: "Cash",
+    category: "Services",
+    variation: "Standard",
+    price: 0,
+    stock: 999999,
+    color: "bg-emerald-50",
+    image: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDMyMCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjMyMCIgaGVpZ2h0PSIyNDAiIHJ4PSIyOCIgZmlsbD0iI0U4RjZFQyIvPgogIDxyZWN0IHg9IjcwIiB5PSI5NiIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI4OCIgcng9IjEwIiBmaWxsPSIjREZGM0UzIiBzdHJva2U9IiM0QzlBNjMiIHN0cm9rZS13aWR0aD0iNSIvPgogIDxyZWN0IHg9IjEwMCIgeT0iNjQiIHdpZHRoPSIxNTAiIGhlaWdodD0iODgiIHJ4PSIxMCIgZmlsbD0iI0VBRjlFRSIgc3Ryb2tlPSIjM0U4QTU1IiBzdHJva2Utd2lkdGg9IjYiLz4KICA8Y2lyY2xlIGN4PSIxNzUiIGN5PSIxMDgiIHI9IjI2IiBmaWxsPSJub25lIiBzdHJva2U9IiMzRThBNTUiIHN0cm9rZS13aWR0aD0iNCIvPgogIDx0ZXh0IHg9IjE3NSIgeT0iMTE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTYiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiMyRjZFNDMiPlJzPC90ZXh0PgogIDx0ZXh0IHg9IjIyMCIgeT0iMTUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI4MDAiIGZpbGw9IiMyRjZFNDMiPjEwMDA8L3RleHQ+CiAgPHJlY3QgeD0iMTA4IiB5PSI3MiIgd2lkdGg9IjIwIiBoZWlnaHQ9IjcyIiByeD0iNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjM0U4QTU1IiBzdHJva2Utd2lkdGg9IjMiLz4KPC9zdmc+Cg==",
+    description: "Cash handed over to a customer - enter who it's being given to at checkout.",
+    specialType: "cash",
+  },
+];
 // requireLicenseValid caches its shop/license verdict for 30s per shop (see
 // that file's own comment) to keep it from adding two extra DB round trips
 // to nearly every request - every place below that changes a shop's status
@@ -176,6 +222,13 @@ exports.createShop = async (req, res) => {
         isSystem: true,
       }));
       await Role.create(roleDocs, { session, ordered: true });
+
+      // See DEFAULT_SPECIAL_PRODUCTS' own comment above.
+      const specialProductDocs = DEFAULT_SPECIAL_PRODUCTS.map((product) => ({
+        ...product,
+        shopId: createdShop._id,
+      }));
+      await Product.create(specialProductDocs, { session, ordered: true });
     });
 
     res.status(201).json({

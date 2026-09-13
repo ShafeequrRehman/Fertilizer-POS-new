@@ -29,6 +29,16 @@ const productSchema = new mongoose.Schema(
     // who makes a product, separately from the product's own name. Purely
     // informational - not used in any grouping/uniqueness logic.
     company: { type: String, default: "", trim: true },
+    // System-recognized "service" products, seeded automatically into every
+    // shop (see superAdminController.createShop / scripts/seedSpecialProducts.js)
+    // rather than typed in by a shop owner - lets POSPage.tsx trigger special
+    // checkout behavior (extra TID/Bill Name/Recipient Name fields, and
+    // auto-settling the order's payment in full - see POSPage.tsx's
+    // hasElectricityBillItem/hasCashItem) purely off this flag, instead of
+    // fragile matching on the product's plain-text name (which would break
+    // the moment a shop owner renamed or translated it). "" for every
+    // ordinary product - the vast majority.
+    specialType: { type: String, enum: ["", "electricity_bill", "cash"], default: "" },
   },
   { timestamps: true }
 );

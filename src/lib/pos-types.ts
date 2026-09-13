@@ -31,6 +31,10 @@ export interface Product {
   // ProductManagementSection.tsx's "Company" field). Purely informational -
   // not used for grouping/search key logic, which still keys off name+category.
   company?: string;
+  // System-seeded "service" product marker - "" for every ordinary product.
+  // See backend/models/Product.js's own comment; drives POSPage.tsx's
+  // special Bill/Cash checkout fields and auto-settled payment.
+  specialType?: '' | 'electricity_bill' | 'cash';
 }
 
 export interface ProductInput {
@@ -46,6 +50,7 @@ export interface ProductInput {
   dealItems?: string[];
   productCode?: string;
   company?: string;
+  specialType?: '' | 'electricity_bill' | 'cash';
 }
 
 export interface Customer {
@@ -536,6 +541,9 @@ export interface CartItem {
   quantity: number;
   variation: string;
   image: string;
+  // Carried straight off the Product this cart row was added from - see
+  // Product.specialType's own comment. "" / undefined for every ordinary item.
+  specialType?: '' | 'electricity_bill' | 'cash';
 }
 
 export interface OrderFormData {
@@ -549,6 +557,12 @@ export interface OrderFormData {
   // Quick Delivery Charges preset (Free/30/50/Custom row) - only ever
   // meaningful for orderType 'Delivery'. Undefined/0 for every other order.
   deliveryFee?: number;
+  // Electricity Bill / Cash special-product fields - only ever shown/typed
+  // when the cart has the matching special item in it (see POSPage.tsx's
+  // hasElectricityBillItem/hasCashItem). Empty otherwise.
+  billTid?: string;
+  billName?: string;
+  cashRecipientName?: string;
 }
 
 export interface OrderPayload {
@@ -579,6 +593,8 @@ export interface OrderPayload {
     // cards can show the exact same photo the POS grid used, instead of
     // re-guessing one from the item's plain-text name after the fact.
     image?: string;
+    // See CartItem.specialType / backend/models/Order.js's orderItemSchema.
+    specialType?: '' | 'electricity_bill' | 'cash';
   }>;
   total: number;
   subtotal: number;
@@ -601,6 +617,11 @@ export interface OrderPayload {
   // the POS order flow) - stays optional for backward compatibility with
   // historical Dine-In orders that already have one saved.
   table?: string;
+  // Electricity Bill / Cash special-product order details - see
+  // backend/models/Order.js's own comment on these three fields.
+  billTid?: string;
+  billName?: string;
+  cashRecipientName?: string;
   status: 'pending' | 'completed' | 'cancelled' | 'paid';
   paymentMethod: 'Cash' | 'Card' | 'E-Wallet';
   createdAt: string;

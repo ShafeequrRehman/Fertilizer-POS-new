@@ -87,7 +87,7 @@ export default function POSPage() {
   // simultaneously, sometimes duplicate order numbers too). A ref is
   // checked/set synchronously, closing that gap.
   const isSavingOrderRef = useRef(false);
-  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
+  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', billTid: '', billName: '', cashRecipientName: '' });
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -465,13 +465,23 @@ export default function POSPage() {
   const effectiveDeliveryFee = orderFormData.orderType === 'Delivery' ? deliveryFee : 0;
   const total = subtotal + tax + effectiveDeliveryFee;
 
+  // Electricity Bill / Cash special products (system-seeded into every
+  // shop - see backend/controllers/superAdminController.js's createShop and
+  // Product.specialType's own comment): their presence in the cart is what
+  // triggers the extra TID/Bill Name/Recipient Name fields below and the
+  // auto-settled payment in handleSaveOrder, keyed off the cart item's own
+  // specialType (carried over from the Product in addToCart) rather than
+  // matching on a name/translation that could change.
+  const hasElectricityBillItem = cart.some((item) => item.specialType === 'electricity_bill');
+  const hasCashItem = cart.some((item) => item.specialType === 'cash');
+
   function addToCart(product: Product) {
     // Same product and same variation merge into one cart row, matching your older POS logic.
     setCart((previousCart) => {
       const existingIndex = previousCart.findIndex((item) => item.id === product.id && item.variation === product.variation);
       if (existingIndex === -1) {
         setActiveCartItemIndex(previousCart.length);
-        return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image }];
+        return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image, specialType: product.specialType }];
       }
       setActiveCartItemIndex(existingIndex);
       return previousCart.map((item, index) => (index === existingIndex ? { ...item, quantity: item.quantity + 1 } : item));
@@ -673,7 +683,7 @@ export default function POSPage() {
   }, [variationPickerGroup, viewMode, visibleGroups, focusedProductIndex, activeCartItemIndex, cart]);
 
   function resetOrderForm() {
-    setOrderFormData({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
+    setOrderFormData({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', billTid: '', billName: '', cashRecipientName: '' });
     setSuggestions([]);
     setShowNewCustomerPrompt(false);
     setSearchQuery('');
@@ -691,6 +701,16 @@ export default function POSPage() {
   function handleDecreaseQty(index: number) {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: Math.max(1, item.quantity - 1) } : item)));
     setActiveCartItemIndex(index);
+  }
+
+  // Electricity Bill / Cash are "open amount" products - the real bill/cash
+  // figure is different every single time, so unlike every other product
+  // (whose price only ever comes from Manage Products), these two need
+  // their price typed in fresh on the cart row itself. See the cart row's
+  // own conditional input below (gated on item.specialType).
+  function handleItemPriceChange(index: number, value: string) {
+    const nextPrice = Math.max(0, Number(value) || 0);
+    setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, price: nextPrice } : item)));
   }
 
   function handleRemoveItem(index: number) {
@@ -872,6 +892,23 @@ export default function POSPage() {
     // phone-but-no-name order can't reliably be found again later.
     if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError(t('pos.invalidPhoneFormat'));
     if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError(t('pos.nameRequiredWithPhone'));
+
+    // Electricity Bill / Cash: these are "open amount" products (see
+    // handleItemPriceChange) - a cashier who forgets to type the real
+    // figure would otherwise save a PKR 0 bill/cash order.
+    if (cart.some((item) => item.specialType && item.price <= 0)) {
+      return showValidationError(t('pos.specialItemAmountRequired'));
+    }
+    // Electricity Bill / Cash: the whole point of these two fields is to
+    // leave a traceable record of the transaction, so (unlike note/waiter)
+    // they're required rather than optional whenever the matching special
+    // item is actually in the cart.
+    if (hasElectricityBillItem && (!orderFormData.billTid?.trim() || !orderFormData.billName?.trim())) {
+      return showValidationError(t('pos.billTidAndNameRequired'));
+    }
+    if (hasCashItem && !orderFormData.cashRecipientName?.trim()) {
+      return showValidationError(t('pos.cashRecipientNameRequired'));
+    }
     return true;
   }
 
@@ -941,10 +978,20 @@ export default function POSPage() {
       const now = new Date().toISOString();
       const clientSyncId = crypto.randomUUID();
 
+      // Electricity Bill / Cash: the whole reason a shop rings these up at
+      // all is to record money that's already changed hands at the counter
+      // right then - unlike a normal order, there's no "pending, pay
+      // later" phase for either one, so the order is saved already fully
+      // settled (paidAmount = total, remainingAmount = 0, status
+      // 'completed') instead of the usual 'pending' + a separate Complete
+      // Payment step on the Sales page. This also means it never shows up
+      // as a customer due.
+      const isSpecialProductOrder = hasElectricityBillItem || hasCashItem;
+
       const orderPayload: OrderPayload = {
         orderId: clientSyncId,
         clientSyncId,
-        items: cart.map((item) => ({ name: item.name, price: item.price, quantity: item.quantity, variation: item.variation, image: item.image })),
+        items: cart.map((item) => ({ name: item.name, price: item.price, quantity: item.quantity, variation: item.variation, image: item.image, specialType: item.specialType })),
         total,
         subtotal,
         tax: tax,
@@ -954,8 +1001,12 @@ export default function POSPage() {
         address: orderFormData.address,
         note: orderFormData.note,
         waiter: orderFormData.waiter,
-        status: 'pending',
+        billTid: hasElectricityBillItem ? orderFormData.billTid?.trim() : '',
+        billName: hasElectricityBillItem ? orderFormData.billName?.trim() : '',
+        cashRecipientName: hasCashItem ? orderFormData.cashRecipientName?.trim() : '',
+        status: isSpecialProductOrder ? 'completed' : 'pending',
         paymentMethod: selectedPaymentMethod,
+        ...(isSpecialProductOrder ? { paidAmount: total, remainingAmount: 0, cashReceived: selectedPaymentMethod === 'Cash' ? total : 0 } : {}),
         createdAt: now,
         updatedAt: now,
         version: 1,
@@ -1613,6 +1664,24 @@ export default function POSPage() {
             <FormField label={t('pos.orderNoteLabel')}>
               <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder={t('pos.orderNotePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
+
+            {hasElectricityBillItem ? (
+              <>
+                <FormField label={t('pos.billTidLabel')}>
+                  <input name="billTid" value={orderFormData.billTid || ''} onChange={handleFormChange} placeholder={t('pos.billTidPlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+                </FormField>
+                <FormField label={t('pos.billNameLabel')}>
+                  <input name="billName" value={orderFormData.billName || ''} onChange={handleFormChange} placeholder={t('pos.billNamePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+                </FormField>
+              </>
+            ) : null}
+
+            {hasCashItem ? (
+              <FormField label={t('pos.cashRecipientNameLabel')}>
+                <input name="cashRecipientName" value={orderFormData.cashRecipientName || ''} onChange={handleFormChange} placeholder={t('pos.cashRecipientNamePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+              </FormField>
+            ) : null}
+
             {selectedCustomerId ? (
               <div className="rounded-xl border border-sky-200/70 bg-sky-50/60 p-2.5 text-[11px] text-sky-700 shadow-inner">
                 <div className="flex items-start gap-1.5">
@@ -1640,7 +1709,26 @@ export default function POSPage() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
                   <p className="truncate text-[10px] text-gray-400">{item.variation}</p>
-                  <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
+                  {item.specialType ? (
+                    // Open-amount entry - the real bill/cash figure, typed
+                    // fresh every time (see handleItemPriceChange's own
+                    // comment) instead of the fixed catalog price every
+                    // other product shows below.
+                    <div className="mt-1 flex items-center gap-1">
+                      <span className="text-[10px] font-semibold text-gray-500">PKR</span>
+                      <input
+                        type="number"
+                        min={0}
+                        autoFocus
+                        value={item.price === 0 ? '' : item.price}
+                        onChange={(event) => handleItemPriceChange(index, event.target.value)}
+                        placeholder={t('pos.enterAmountPlaceholder')}
+                        className="w-24 rounded-lg border border-white/60 bg-white/70 px-2 py-1 text-xs font-bold text-gray-900 shadow-inner outline-none"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
+                  )}
                 </div>
                 <div className="glass-pill flex items-center gap-1 rounded-full p-1">
                   <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Minus size={10} /></button>

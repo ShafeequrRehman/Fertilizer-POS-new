@@ -13,6 +13,13 @@ const orderItemSchema = new mongoose.Schema(
     // name doesn't happen to contain an obvious food keyword. See
     // resolveProductImage() in src/lib/food-images.ts.
     image: { type: String, default: "" },
+    // Carries the product's own Product.specialType forward onto the order
+    // line itself, same reasoning as `image` above - "electricity_bill" /
+    // "cash" for the two system-seeded service products, "" for everything
+    // else. POSPage.tsx reads this off the CART item (not a fresh product
+    // lookup) to decide whether to show the Bill/Cash-specific fields and
+    // auto-settle the order below.
+    specialType: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -131,6 +138,16 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: "" },
     waiter: { type: String, default: "" },
     table: { type: String, default: "" },
+    // Electricity Bill / Cash special-product order details (see
+    // orderItemSchema's own `specialType` above and POSPage.tsx's
+    // hasElectricityBillItem/hasCashItem) - typed by the cashier at
+    // checkout, right alongside note/waiter. billTid/billName only ever get
+    // filled in for an order whose cart included the "Electricity Bill"
+    // product; cashRecipientName only for one that included "Cash". All
+    // three stay "" for every ordinary order.
+    billTid: { type: String, default: "" },
+    billName: { type: String, default: "" },
+    cashRecipientName: { type: String, default: "" },
     status: { type: String, enum: ["pending", "completed", "cancelled", "paid"], default: "pending" },
     paymentMethod: { type: String, enum: ["Cash", "Card", "E-Wallet"], default: "Cash" },
     paidAmount: { type: Number, default: 0 },
