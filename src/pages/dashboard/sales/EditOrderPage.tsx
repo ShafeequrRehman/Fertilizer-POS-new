@@ -16,6 +16,14 @@ import { useNotifications } from '@/lib/notifications';
 
 type DraftItem = { name: string; price: number; quantity: number; variation: string };
 
+// Same real order number shown everywhere else in the app (Sales page
+// cards/detail via orderNumber() in SalesPage.tsx, the saved-order toast,
+// the customer's own tracking page) - never the raw Mongo _id, which is
+// meaningless to a cashier looking for "the order I just opened".
+function orderNumberLabel(order: SavedOrder): string {
+  return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, '0');
+}
+
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
     ipcRenderer: {
@@ -326,7 +334,7 @@ export default function EditOrderPage() {
         // instead of to POS - previously this used notify's
         // navigateToPos, which always sent staff to /dashboard/pos even
         // though they'd started from Sales.
-        notify('info', `Order ${updated.id} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
+        notify('info', `Order #${orderNumberLabel(updated)} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
         setOrder(updated);
         navigate('/dashboard/sales');
       } catch (err) {
@@ -362,7 +370,7 @@ export default function EditOrderPage() {
 
     // Same reasoning as the desktop/offline branch above - no pop-up,
     // notify + return to the Sales page this editor was opened from.
-    notify('info', `Order ${updated.id} saved successfully.`);
+    notify('info', `Order #${orderNumberLabel(updated)} saved successfully.`);
     setOrder(updated);
     navigate('/dashboard/sales');
   }
@@ -386,6 +394,28 @@ export default function EditOrderPage() {
     );
   }
 
+  // A pending order stays editable indefinitely, any number of times - see
+  // this file's orderNumberLabel comment and DashboardShell.tsx's
+  // NotificationBellButton, which now always jumps here regardless of how
+  // long ago the order was saved. Once it's actually completed (or
+  // cancelled/paid), editing locks for real, here, no matter which
+  // shortcut got someone to this URL - same rule the Sales page's own Edit
+  // button already followed (selectedOrder.status === 'pending'), just now
+  // enforced on the live order itself instead of only hiding a button.
+  if (order.status !== 'pending') {
+    return (
+      <div className="space-y-4">
+        <Link to="/dashboard/sales" className="text-sm font-bold text-gray-500">
+          <ArrowLeft size={16} className="mr-2 inline" />
+          Back to Sales
+        </Link>
+        <div className="rounded-[32px] bg-white p-8 text-sm text-gray-500 shadow-sm">
+          Order #{orderNumberLabel(order)} is already {order.status} and can no longer be edited.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {status ? <div className="rounded-[28px] border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-700 shadow-sm">{status}</div> : null}
@@ -396,7 +426,7 @@ export default function EditOrderPage() {
             <ArrowLeft size={16} className="mr-2 inline" />
             Back to Sales
           </Link>
-          <h1 className="mt-2 text-3xl font-black text-gray-900">Edit Order #{order.id.slice(-4)}</h1>
+          <h1 className="mt-2 text-3xl font-black text-gray-900">Edit Order #{orderNumberLabel(order)}</h1>
         </div>
         <div className="flex gap-2">
           <Link to={`/dashboard/sales/print/${order.id}`} className="rounded-2xl bg-black px-4 py-3 text-sm font-black text-white">Print Center</Link>

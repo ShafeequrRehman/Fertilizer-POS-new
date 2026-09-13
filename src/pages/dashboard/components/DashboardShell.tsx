@@ -15,7 +15,7 @@ import { ApiError, claimKitchenPrint, claimKitchenUpdatePrint, closeShopSession,
 import { useNetworkStatus } from '@/lib/network-status';
 import { ShopSessionProvider, useShopSession } from '@/lib/shop-session';
 import { useToast } from '@/lib/toast';
-import { useNotifications, formatNotificationAge, NOTIFICATION_ICON, NOTIFICATION_ICON_BG, EDITABLE_WINDOW_MS, type AppNotification } from '@/lib/notifications';
+import { useNotifications, formatNotificationAge, NOTIFICATION_ICON, NOTIFICATION_ICON_BG, type AppNotification } from '@/lib/notifications';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { getIpcRenderer } from '@/lib/electron-bridge';
 import { reportPrintOutcome } from '@/lib/print-notify';
@@ -946,16 +946,20 @@ function TopAction({ icon, className = '' }: { icon: React.ReactNode; className?
 // Real notification bell - replaces the old hardcoded "Bell icon + red 2
 // badge" placeholder. Shows the live unread count, and a dropdown of every
 // notification fired this session (table timer expiries, order saves,
-// order completions - see lib/notifications.tsx). Only an order_saved row
-// is clickable: within EDITABLE_WINDOW_MS of being saved it jumps straight
-// to that order's Edit screen (Technical Requirement #3 - "before it
-// cooks"), past that window it instead fires a "Time Over" notification
-// and does NOT navigate, since the kitchen slip has already gone out.
+// order completions - see lib/notifications.tsx). Every order_saved row is
+// clickable and always jumps straight to that order's Edit screen, no
+// matter how long ago it was saved - a pending order stays editable as
+// many times as needed (owner requirement: "jab tak order pending hain,
+// jitni dafa marzi edit kr sky"); only once it's actually completed does
+// editing lock, and that's enforced for real, live, on the order itself
+// (see EditOrderPage.tsx's status guard) rather than guessed here from a
+// stale client-side timestamp - the old EDITABLE_WINDOW_MS 10-minute cutoff
+// used to lock this row even while the order was still genuinely pending.
 // Every other kind (table_timer_expired, order_completed) is view-only in
 // this history, per that same requirement.
 function NotificationBellButton() {
   const navigate = useNavigate();
-  const { notifications, unreadCount, markAllRead, notify } = useNotifications();
+  const { notifications, unreadCount, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -977,20 +981,18 @@ function NotificationBellButton() {
     });
   }
 
-  // Only order_saved rows are clickable, jumping to Edit within the
-  // 10-minute window (or firing "Time Over" past it). Table timers no
-  // longer need a staff decision at all - an expiry auto-clears the table
-  // by itself (see lib/notifications.tsx's poll), so table_timer_expired
-  // rows, like order_completed/info, are purely informational history.
+  // Only order_saved rows are clickable, and always jump straight to Edit -
+  // see this function's comment block above for why there's no more time
+  // window here. If the order has actually been completed by the time
+  // someone taps an old row, EditOrderPage.tsx itself shows the locked
+  // message; this button never has to guess. Table timers no longer need a
+  // staff decision at all - an expiry auto-clears the table by itself (see
+  // lib/notifications.tsx's poll), so table_timer_expired rows, like
+  // order_completed/info, are purely informational history.
   function handleRowClick(notification: AppNotification) {
     if (notification.kind !== 'order_saved' || !notification.orderId) return;
-    const withinWindow = Date.now() - notification.createdAt <= EDITABLE_WINDOW_MS;
-    if (withinWindow) {
-      setOpen(false);
-      navigate(`/dashboard/sales/${notification.orderId}/edit`);
-    } else {
-      notify('info', "Time Over - this order already went to the kitchen and can no longer be edited from here.");
-    }
+    setOpen(false);
+    navigate(`/dashboard/sales/${notification.orderId}/edit`);
   }
 
   return (
@@ -1033,7 +1035,6 @@ function NotificationBellButton() {
             <div className="space-y-1">
               {notifications.map((notification) => {
                 const isOrderSaved = notification.kind === 'order_saved';
-                const isEditable = isOrderSaved && Date.now() - notification.createdAt <= EDITABLE_WINDOW_MS;
                 return (
                   <button
                     key={notification.id}
@@ -1051,7 +1052,7 @@ function NotificationBellButton() {
                       <p className="text-sm font-bold leading-snug text-gray-900">{notification.message}</p>
                       <p className="mt-0.5 text-[11px] font-bold text-gray-400">
                         {formatNotificationAge(notification.createdAt)}
-                        {isOrderSaved ? (isEditable ? ' · Tap to edit' : ' · Edit window closed') : ''}
+                        {isOrderSaved ? ' · Tap to edit' : ''}
                       </p>
                     </div>
                   </button>

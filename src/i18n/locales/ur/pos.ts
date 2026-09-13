@@ -85,7 +85,7 @@ export const pos = {
   invalidPhoneFormat: "فون نمبر 03XXXXXXXXX فارمیٹ میں درج کریں، یا خالی چھوڑ دیں۔",
   nameRequiredWithPhone: "اگر فون نمبر درج کیا گیا ہے تو کسٹمر کا نام بھی ضروری ہے۔",
   pendingBillNote: "نوٹ: اس کسٹمر کا ایک پرانا بقایا بل موجود ہے۔ یہ ان کی اگلی ادائیگی میں شامل کر دیا جائے گا۔",
-  kitchenReceiptPrinting: "کچن رسید پرنٹ ہو رہی ہے۔",
+  kitchenReceiptPrinting: "گودام رسید پرنٹ ہو رہی ہے۔",
   offlineOrderQueued: "آف لائن آرڈر #{{number}} قطار میں شامل کر دیا گیا۔ آن لائن ہوتے ہی یہ خودکار طور پر کلاؤڈ سے سنک ہو جائے گا۔",
   orderSavedLabel: "آرڈر #{{number}}",
   orderSavedWithWarning: "{{label}} محفوظ ہو گیا، لیکن: {{warning}}",

@@ -24,15 +24,19 @@ export interface AppNotification {
   id: string;
   kind: NotificationKind;
   message: string;
-  /** Date.now() at the moment this fired - drives both "2m ago" display and, for order_saved, the 10-minute edit window below. */
+  /** Date.now() at the moment this fired - drives the "2m ago" display. */
   createdAt: number;
-  /** order_saved: the order to jump to Edit for, within EDITABLE_WINDOW_MS. Unused for every other kind. */
+  /** order_saved: the order to jump to Edit for - see DashboardShell.tsx's NotificationBellButton. Unused for every other kind. */
   orderId?: string;
 }
 
-// How long a saved order stays editable from the notification bell before
-// it's considered "already gone to the kitchen" and locks.
-export const EDITABLE_WINDOW_MS = 10 * 60 * 1000;
+// NOTE: there used to be an EDITABLE_WINDOW_MS constant here that locked a
+// saved order's "Tap to edit" bell shortcut 10 minutes after it was saved,
+// regardless of whether the order was still pending. Removed per owner
+// request - a pending order must stay editable indefinitely, any number of
+// times; only an actually-completed order locks, and that's now enforced
+// live on the order itself (EditOrderPage.tsx's status guard), not guessed
+// here from a stale timestamp.
 
 // How long a single toast stays on screen before auto-dismissing - the
 // decreasing progress bar on each toast animates over exactly this long.

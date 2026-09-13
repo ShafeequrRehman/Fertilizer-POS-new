@@ -89,7 +89,7 @@ export const pos = {
   invalidPhoneFormat: "Use phone format 03XXXXXXXXX, or leave it empty.",
   nameRequiredWithPhone: "Customer name is required when a phone number is entered.",
   pendingBillNote: "Note: this customer has an earlier pending bill. It will be added to their next payment.",
-  kitchenReceiptPrinting: "Kitchen receipt is printing now.",
+  kitchenReceiptPrinting: "Godam receipt is printing now.",
   offlineOrderQueued: "Offline order #{{number}} queued. It'll sync to the cloud automatically once you're back online.",
   orderSavedLabel: "Order #{{number}}",
   orderSavedWithWarning: "{{label}} saved, but: {{warning}}",
