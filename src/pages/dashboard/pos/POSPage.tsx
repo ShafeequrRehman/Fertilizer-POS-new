@@ -484,6 +484,13 @@ export default function POSPage() {
         return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image, specialType: product.specialType }];
       }
       setActiveCartItemIndex(existingIndex);
+      // Electricity Bill / Cash have no real "quantity" concept - each is
+      // one open-amount transaction, not N units of something - so the qty
+      // stepper is hidden for them below (cart row JSX) and re-tapping the
+      // product card here is a no-op instead of silently bumping quantity
+      // to 2 (which would double the typed amount with no visible sign of
+      // why).
+      if (previousCart[existingIndex].specialType) return previousCart;
       return previousCart.map((item, index) => (index === existingIndex ? { ...item, quantity: item.quantity + 1 } : item));
     });
   }
@@ -1726,11 +1733,18 @@ export default function POSPage() {
                     <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
                   )}
                 </div>
+                {/* Electricity Bill / Cash are one-off, open-amount
+                    transactions - there's no real "quantity" to bump (see
+                    addToCart's own comment on why re-tapping the card is a
+                    no-op for these), so the qty stepper is hidden entirely
+                    instead of sitting there pinned at 1. */}
+                {!item.specialType ? (
                 <div className="glass-pill flex items-center gap-1 rounded-full p-1">
                   <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Minus size={10} /></button>
                   <span className="min-w-5 text-center text-xs font-black">{item.quantity}</span>
                   <button type="button" onClick={() => handleIncreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Plus size={10} /></button>
                 </div>
+                ) : null}
                 <div className="min-w-[60px] text-right rtl:text-left">
                   <p className="text-sm font-black text-gray-900">PKR {item.price * item.quantity}</p>
                   <button type="button" onClick={() => handleRemoveItem(index)} className="mt-1 text-[10px] font-semibold text-rose-500 transition hover:text-rose-700">{t('pos.remove')}</button>
