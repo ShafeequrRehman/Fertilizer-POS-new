@@ -11,8 +11,6 @@ const {
   getOrders,
   updateOrder,
   cancelOrder,
-  extendTableTimer,
-  clearTableTimer,
   getUnprintedKitchenOrders,
   claimKitchenPrint,
   getUnprintedReceiptOrders,
@@ -22,7 +20,6 @@ const {
   importOfflineOrders,
   importOfflineOrderUpdates,
   importOfflineCancellations,
-  getOccupiedDineInTables,
   updateTrackingStatus,
   assignRider,
   respondToChangeRequest,
@@ -70,7 +67,6 @@ router.get("/pending/:phone", canReadOrders, checkPendingOrder);
 router.get("/kitchen/unprinted", getUnprintedKitchenOrders);
 router.get("/receipts/unprinted", getUnprintedReceiptOrders);
 router.get("/kitchen-updates/unprinted", getUnprintedKitchenUpdateOrders);
-router.get("/dinein/occupied-tables", canReadOrders, getOccupiedDineInTables);
 router.get("/:id", canReadOrders, getOrder);
 // Add items, change details, or complete/settle payment on a pending order
 // - anyone who can either create sales (checkout is part of that same POS
@@ -88,7 +84,5 @@ router.patch("/:id/change-request", requireAnyPermission("sales.create", "sales.
 // cancelOrderCore itself (see orderController.js) - defense in depth, not
 // a replacement for it.
 router.post("/:id/cancel", requirePermission("sales.delete"), cancelOrder);
-router.post("/:id/extend-timer", requireAnyPermission("sales.create", "sales.edit"), extendTableTimer);
-router.post("/:id/clear-table", requireAnyPermission("sales.create", "sales.edit"), clearTableTimer);
 
 module.exports = router;

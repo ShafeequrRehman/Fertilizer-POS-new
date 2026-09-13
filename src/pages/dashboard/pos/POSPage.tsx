@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { AlertCircle, Banknote, Barcode, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchShopProfile, fetchTables, fetchTableSettings, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
-import { CartItem, Customer, OrderFormData, OrderPayload, Product, Table, Waiter } from '@/lib/pos-types';
+import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
 import { resolveProductImage } from '@/lib/food-images';
-import { getTableTimerRemainingMs, isTableTimerExpired, formatTableCountdown, TABLE_STATUS_POLL_MS, type TableTimerOrder } from '@/lib/table-timer';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { SavedOrder } from '@/lib/pos-types';
 import { useShopSession } from '@/lib/shop-session';
@@ -12,7 +11,7 @@ import { useToast } from '@/lib/toast';
 import { useNotifications } from '@/lib/notifications';
 import { useNetworkStatus } from '@/lib/network-status';
 import { isDesktopApp } from '@/lib/api';
-import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOrdersCache, pushOrdersCache, getOccupiedTablesCache, getPendingLocalOrders, getTablesCache, pushTablesCache } from '@/lib/local-hub-api';
+import { createLocalOrder, getReferenceData, pushReferenceData, isLocalHubReachable, getLocalHubStartDiagnostics, getSyncStatus, syncOrderCounter, reserveLocalOrderNumber, reserveLifetimeOrderNumber, syncLifetimeCounter, getOrdersCache, pushOrdersCache, getPendingLocalOrders } from '@/lib/local-hub-api';
 import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
@@ -47,29 +46,10 @@ type ProductGroup = {
   variations: Product[];
 };
 
-// Numeric table names ("1".."20", the default seeded set) sort in natural
-// order instead of lexicographically; any custom non-numeric name (e.g.
-// "VIP-1") sorts after the numeric ones, then alphabetically.
-function sortTables(tables: Table[]) {
-  return [...tables].sort((left, right) => {
-    const leftNumber = Number(left.name);
-    const rightNumber = Number(right.name);
-    const leftIsNumeric = left.name.trim() !== '' && !Number.isNaN(leftNumber);
-    const rightIsNumeric = right.name.trim() !== '' && !Number.isNaN(rightNumber);
-
-    if (leftIsNumeric && rightIsNumeric) return leftNumber - rightNumber;
-    if (leftIsNumeric) return -1;
-    if (rightIsNumeric) return 1;
-    return left.name.localeCompare(right.name);
-  });
-}
-
-// TABLE_STATUS_POLL_MS/formatTableCountdown now live in @/lib/table-timer -
-// shared with SalesPage.tsx's Change Table modal so both screens poll and
-// format the exact same way. Navigating back to this screen also re-fetches
-// immediately (the effect below re-runs on mount), which is what makes
-// payment completion on the Sales page feel instant in the common
-// single-terminal workflow.
+// How often this screen refreshes pendingItemQuantities (the "N Pending"
+// product-card badge) - there's no push/websocket channel in this app, so a
+// short poll is how a second terminal's order shows up here.
+const PENDING_ITEMS_POLL_MS = 5000;
 
 export default function POSPage() {
   const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
@@ -80,29 +60,14 @@ export default function POSPage() {
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
   const [waiters, setWaiters] = useState<Waiter[]>([]);
-  const [tables, setTables] = useState<Table[]>([]);
-  // Estimated combined prep + dining duration (minutes) - a shop-wide
-  // setting from TableManagementSection.tsx, defaulting to 45. Drives both
-  // this screen's countdown display and (mirrored server-side in
-  // orderController.createOrder) whether a table can be selected at all.
-  const [tableTurnoverMinutes, setTableTurnoverMinutes] = useState(45);
-  // tableName -> the most recent still-pending, not-yet-cleared DineIn
-  // order occupying it (createdAt + any staff-granted extension). A table
-  // stays locked for as long as it has an entry here at all - see
-  // getTableRemainingMs/isTableLocked below. Refreshed on a timer
-  // (TABLE_STATUS_POLL_MS) rather than a push channel, since this app has
-  // no websocket/live channel to the backend; the same data also feeds the
-  // real-time table-timer alert popup (TableTimerAlertWatcher.tsx, mounted
-  // in DashboardShell) which fires when one of these crosses its deadline.
-  const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
   // How many units of each product are sitting in a currently-pending order
-  // right now (across every order type, not just DineIn) - keyed by the
-  // product's own name, lowercased/trimmed, since order line items only
-  // ever carry a plain name/variation (no productId - see OrderPayload's
-  // own comment on items). Drives the green "N Pending" badge on each POS
-  // product card below. Refreshed on the same poll as activeTableOrders
-  // (see loadPendingItemQuantities/TABLE_STATUS_POLL_MS) plus right after
-  // this till saves a new order, so it feels real-time without a websocket.
+  // right now (across every order type) - keyed by the product's own name,
+  // lowercased/trimmed, since order line items only ever carry a plain
+  // name/variation (no productId - see OrderPayload's own comment on
+  // items). Drives the green "N Pending" badge on each POS product card
+  // below. Refreshed on a poll (see loadPendingItemQuantities/
+  // PENDING_ITEMS_POLL_MS) plus right after this till saves a new order, so
+  // it feels real-time without a websocket.
   const [pendingItemQuantities, setPendingItemQuantities] = useState<Record<string, number>>({});
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
@@ -120,7 +85,7 @@ export default function POSPage() {
   // simultaneously, sometimes duplicate order numbers too). A ref is
   // checked/set synchronously, closing that gap.
   const isSavingOrderRef = useRef(false);
-  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'DineIn', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', table: '' });
+  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -234,11 +199,6 @@ export default function POSPage() {
     if (!reachable) {
       setCategories(['All']);
       setProducts([]);
-      // Local Hub itself is unreachable - there is truly no source (not
-      // even a cached one) for the real Table records either, so this
-      // must reset the same way products/categories do rather than leave
-      // whatever tables happened to be on screen already.
-      setTables([]);
       if (silent) return;
       const diagnostics = await getLocalHubStartDiagnostics();
       const reason = diagnostics && !diagnostics.started
@@ -254,21 +214,6 @@ export default function POSPage() {
     setCategories(derivedCategories.length ? ['All', ...derivedCategories] : ['All']);
     setProducts(offlineProducts);
     setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
-    // The real Dine-In table grid (name + isFamily + isActive) - see
-    // tablesCache.js/pushCurrentTablesCache. Falls back to whatever this
-    // till last saw while online instead of the empty picker in the
-    // screenshot this was fixing ("No tables configured yet." with real
-    // tables configured) - best-effort, so a Local Hub that has this
-    // reachable but has never had a tables snapshot pushed to it yet
-    // (brand new pairing, never been online once) just shows no tables,
-    // same as before this fix existed.
-    try {
-      const tablesSnapshot = await getTablesCache();
-      setTables(sortTables((tablesSnapshot.tables || []).filter((table) => table.isActive)));
-    } catch {
-      // Local Hub reachable but this specific cache call failed - leave
-      // whatever tables state already has rather than wiping it out.
-    }
     if (silent) return;
     if (offlineProducts.length === 0) {
       setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
@@ -284,47 +229,14 @@ export default function POSPage() {
     // is the only path at all for a plain browser tab (no Local Hub cache
     // to have shown a moment ago there).
     async function refreshFromCloud() {
-      // Tracks whether fetchTables() itself failed (network/auth/server
-      // error) vs. genuinely resolved with zero tables - previously both
-      // cases were flattened into the same empty array by a silent
-      // `.catch(() => [])`, which made a real backend failure here
-      // indistinguishable on screen from "this shop truly has no tables
-      // yet", with the only trace being a console/server-log line nobody
-      // was looking at. Now a real failure surfaces as a status banner
-      // (see below) instead of silently rendering "No tables configured
-      // yet" for the wrong reason.
-      let tableFetchError: Error | null = null;
-      const [productResponse, waiterResponse, shopProfile, tableResponse] = await Promise.all([
+      const [productResponse, waiterResponse] = await Promise.all([
         fetchProducts(),
         fetchWaiters(),
-        // Best-effort - a shop with no custom table layout (the default)
-        // just keeps using the plain numbered list if this fails, same as
-        // any other network hiccup here.
-        fetchShopProfile().catch(() => null),
-        // The real Table records (name + isFamily) that drive the rich
-        // table grid below - see TableManagementSection.tsx/Table model.
-        fetchTables().catch((error) => {
-          tableFetchError = error instanceof Error ? error : new Error('Failed to load tables.');
-          console.error('Failed to load tables for the Dine-In grid:', tableFetchError);
-          return [];
-        }),
       ]);
       setCategories(productResponse?.categories?.length ? productResponse.categories : ['All']);
       setProducts(productResponse?.products ?? []);
       setWaiters(waiterResponse.filter((waiter) => waiter.isActive));
-      setTables(sortTables((tableResponse ?? []).filter((table) => table.isActive)));
-      if (tableFetchError) {
-        setStatusMessage({ tone: 'error', text: `Couldn't load Dine-In tables: ${(tableFetchError as Error).message}` });
-      } else {
-        setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
-        // Keeps the Local Hub's offline table-grid snapshot fresh the
-        // moment this till has a real, successful fetch - see
-        // tablesCache.js/loadProductsFromLocalHub above. Only pushed on a
-        // genuine success (never on tableFetchError, which already fell
-        // back to []) so a transient fetch failure can't overwrite a
-        // perfectly good earlier snapshot with an empty one.
-        if (isDesktopApp()) void pushTablesCache(tableResponse ?? []).catch(() => {});
-      }
+      setStatusMessage((current) => (current?.text.startsWith('Offline') ? null : current));
 
       // Best-effort - keeps the Local Hub's offline copy fresh the moment
       // this till has real data, instead of only ever updating it on the
@@ -335,7 +247,6 @@ export default function POSPage() {
           products: productResponse?.products || [],
           customers: [],
           staff: waiterResponse,
-          tables: shopProfile?.tables || [],
           // `roles` deliberately omitted (not sent as []) - this call site
           // only ever refreshes products/waiters; referenceData.js's set()
           // preserves whatever roles offline-sync.ts's own less-frequent
@@ -391,115 +302,11 @@ export default function POSPage() {
   // is what shows the popup for real, on screen. See print-notify.ts.
   useEffect(() => listenForPrintSentMessages(shopToast), [shopToast]);
 
-  useEffect(() => {
-    void fetchTableSettings().then((settings) => {
-      if (settings?.tableTurnoverMinutes) setTableTurnoverMinutes(settings.tableTurnoverMinutes);
-    });
-  }, []);
-
-  // Which tables currently have an active (pending, un-expired) DineIn
-  // order, so the table grid below can lock them out. Called once
-  // immediately on mount, again right after this screen creates a new
-  // order (so the table it just used locks without waiting for the next
-  // poll), and on a short interval so a second terminal picks up changes
-  // too - navigating back to this screen after completing payment on the
-  // Sales page also re-runs the mount call, which is what makes a freed
-  // table feel instant in the common single-terminal workflow.
-  // Merges the till's own still-queued (not yet synced) local DineIn orders
-  // on top of whatever occupied-table set is already known - see
-  // occupiedTablesCache.js's own comment: "Read (pairing-key gated) by
-  // POSPage.tsx itself when offline, merged with this till's own still-
-  // queued local orders". That merge was previously dead code (the cache
-  // was pushed but nothing ever read it back) - a second offline order for
-  // the same table on the SAME till went completely unblocked, since
-  // localOrders.js's queueOrder has no occupancy check of its own at all.
-  // Each queued local order carries its own real createdAt/
-  // timerExtendedMinutes, so it gets an accurate countdown, unlike the
-  // cache-only entries this is layered on top of (see loadActiveTableOrders).
-  async function mergeLocalPendingIntoActiveTables(base: Record<string, TableTimerOrder>): Promise<Record<string, TableTimerOrder>> {
-    if (!isDesktopApp()) return base;
-    try {
-      const pending = await getPendingLocalOrders();
-      const next = { ...base };
-      pending.forEach((record) => {
-        const payload = record.payload as { orderType?: string; table?: string; status?: string; createdAt?: string; timerExtendedMinutes?: number; tableTimerCleared?: boolean };
-        if (payload.orderType !== 'DineIn' || !payload.table || payload.tableTimerCleared) return;
-        if (payload.status && payload.status !== 'pending') return;
-        const createdAt = payload.createdAt || record.queuedAt;
-        const existing = next[payload.table];
-        if (!existing || new Date(createdAt).getTime() > new Date(existing.createdAt).getTime()) {
-          next[payload.table] = { createdAt, timerExtendedMinutes: payload.timerExtendedMinutes };
-        }
-      });
-      return next;
-    } catch {
-      // Best-effort - the base set (cloud fetch or cache) is still shown.
-      return base;
-    }
-  }
-
-  async function loadActiveTableOrders() {
-    try {
-      const orders = await fetchOrders({ status: 'pending', orderType: 'DineIn' });
-      const nextActiveTableOrders: Record<string, TableTimerOrder> = {};
-      // Re-check status/orderType/table client-side instead of trusting the
-      // query params alone - a paid/completed/cancelled order must never
-      // keep a table locked, and this way a mismatched or stale backend
-      // (e.g. one that hasn't picked up a filter change yet) can't silently
-      // leave a freed table stuck showing a countdown. A tableTimerCleared
-      // order (staff dismissed it via the real-time alert's "Clear Table")
-      // never locks the table either, even though it's still "pending".
-      (orders ?? [])
-        .filter((order) => order.status === 'pending' && order.orderType === 'DineIn' && order.table && !order.tableTimerCleared)
-        .forEach((order) => {
-          const existing = nextActiveTableOrders[order.table];
-          if (!existing || new Date(order.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
-            nextActiveTableOrders[order.table] = { createdAt: order.createdAt, timerExtendedMinutes: order.timerExtendedMinutes };
-          }
-        });
-      setActiveTableOrders(await mergeLocalPendingIntoActiveTables(nextActiveTableOrders));
-    } catch (error) {
-      // Non-blocking in the sense that this never throws back up to the
-      // caller - but going offline used to mean this whole refresh just
-      // gave up here, leaving activeTableOrders frozen at whatever it last
-      // successfully loaded while online, which could silently let a
-      // second offline order double-book an already-occupied table. Fall
-      // back to whatever this till knows locally: the Local Hub's cached
-      // occupied-table snapshot (pushed down while last online - see
-      // offline-sync.ts's pushCurrentOccupiedTables) plus this till's own
-      // still-queued orders on top of it.
-      console.error('Failed to refresh table occupancy, falling back to local cache:', error);
-      if (!isDesktopApp()) return;
-      try {
-        const cache = await getOccupiedTablesCache();
-        const fromCache: Record<string, TableTimerOrder> = {};
-        // The cache only ever stores plain table NAMES (see
-        // occupiedTablesCache.js), not each order's real createdAt/timer -
-        // so a cache-only entry can't show an accurate countdown. Anchoring
-        // its createdAt to "now" keeps it locked for a full fresh turnover
-        // window from this exact moment, which is the safe direction to be
-        // wrong in offline (never silently unlocking a table that's
-        // actually still occupied) - the next successful online refresh
-        // replaces it with the real value.
-        const approximateCreatedAt = new Date().toISOString();
-        (cache.tables || []).forEach((table) => {
-          fromCache[table] = { createdAt: approximateCreatedAt, timerExtendedMinutes: 0 };
-        });
-        setActiveTableOrders(await mergeLocalPendingIntoActiveTables(fromCache));
-      } catch {
-        // Truly nothing available (Local Hub itself unreachable too) -
-        // leave activeTableOrders at whatever it last was, same as before.
-      }
-    }
-  }
-
   // Sums item quantities across every currently-pending order (any order
-  // type - a "3 Pending" burger badge should count a Dine-In, Takeaway, or
-  // Delivery order for it the same way) into pendingItemQuantities. Also
-  // folds in this till's own still-queued (not yet synced) local orders,
-  // same reasoning as mergeLocalPendingIntoActiveTables above - an offline
-  // order should bump the badge instantly on this till, not just once it's
-  // synced and shows up in the next cloud fetch.
+  // type) into pendingItemQuantities. Also folds in this till's own
+  // still-queued (not yet synced) local orders - an offline order should
+  // bump the badge instantly on this till, not just once it's synced and
+  // shows up in the next cloud fetch.
   async function loadPendingItemQuantities() {
     try {
       const orders = await fetchOrders({ status: 'pending' });
@@ -534,55 +341,12 @@ export default function POSPage() {
   }
 
   useEffect(() => {
-    void loadActiveTableOrders();
     void loadPendingItemQuantities();
     const interval = setInterval(() => {
-      void loadActiveTableOrders();
       void loadPendingItemQuantities();
-    }, TABLE_STATUS_POLL_MS);
+    }, PENDING_ITEMS_POLL_MS);
     return () => clearInterval(interval);
   }, []);
-
-  // Whether a table can be selected for a new order right now. Automatic,
-  // no staff decision involved: a table is locked only while it has a
-  // still-pending order AND that order's turnover window hasn't elapsed
-  // yet. The backend's own occupancy checks (orderController.js's
-  // autoFreeExpiredTable) enforce the exact same rule, so a second
-  // terminal can never slip a new order in during the gap before this
-  // client's own tableTimerCleared flag catches up.
-  //
-  // This is a plain, non-reactive check (no ticking clock state) - it's
-  // only ever called imperatively (on a data change, or at click time), so
-  // it just reads Date.now() at the moment it runs. The DineInTableGrid
-  // component below is what owns the actual per-second re-render for the
-  // LIVE countdown display - keeping that tick local to the small grid
-  // subtree instead of hoisted up here is what stops the whole page (the
-  // full product grid and cart) from needlessly re-rendering every single
-  // second while a cashier is just trying to type or click.
-  function isTableLocked(tableName: string): boolean {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return false;
-    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
-  }
-
-  // If the table currently selected in the form gets taken by another
-  // order (a second terminal, most likely) while this cashier is still
-  // building the cart, drop the now-stale selection instead of letting them
-  // submit straight into the 409 the backend would return. Only depends on
-  // activeTableOrders (refreshed every TABLE_STATUS_POLL_MS) - a table only
-  // ever becomes MORE locked when a new order actually lands on it
-  // somewhere, never just from time passing, so there's nothing here that
-  // needs a ticking clock to notice.
-  useEffect(() => {
-    if (!orderFormData.table) return;
-    if (!isTableLocked(orderFormData.table)) return;
-    const takenTable = orderFormData.table;
-    setOrderFormData((previous) => (previous.table === takenTable ? { ...previous, table: '' } : previous));
-    popup({ tone: 'error', title: 'Table No Longer Available', message: `Table ${takenTable} was just taken by another order. Pick a different table.` });
-    // Only re-checks when the underlying lock data changes, not on every
-    // orderFormData edit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTableOrders]);
 
   // Quick Delivery Charges preset only ever means anything on a Delivery
   // order - switching the order type away from Delivery (even after
@@ -829,18 +593,13 @@ export default function POSPage() {
 
       const typing = isTypingTarget(event.target);
 
-      // Ctrl+E / Ctrl+T / Ctrl+D: instantly switch the service option to
-      // Dine-In / Takeaway / Delivery - no mouse needed, and (like Ctrl+S
-      // below) these fire regardless of what's currently focused, since a
-      // Ctrl-held combo never types a character into a field. Right after
-      // one of these, a bare Enter falls straight through to the Ctrl+S/
-      // Enter check below and triggers Save Order/Checkout, exactly as if
-      // that service type had been picked from the dropdown by hand.
-      if (event.key.toLowerCase() === 'e' && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        setOrderFormData((previous) => ({ ...previous, orderType: 'DineIn' }));
-        return;
-      }
+      // Ctrl+T / Ctrl+D: instantly switch the service option to Takeaway /
+      // Delivery - no mouse needed, and (like Ctrl+S below) these fire
+      // regardless of what's currently focused, since a Ctrl-held combo
+      // never types a character into a field. Right after one of these, a
+      // bare Enter falls straight through to the Ctrl+S/Enter check below
+      // and triggers Save Order/Checkout, exactly as if that service type
+      // had been picked from the dropdown by hand.
       if (event.key.toLowerCase() === 't' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
         setOrderFormData((previous) => ({ ...previous, orderType: 'TakeAway' }));
@@ -909,7 +668,7 @@ export default function POSPage() {
   }, [variationPickerGroup, viewMode, visibleGroups, focusedProductIndex, activeCartItemIndex, cart]);
 
   function resetOrderForm() {
-    setOrderFormData({ orderType: 'DineIn', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', table: '' });
+    setOrderFormData({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
     setSuggestions([]);
     setShowNewCustomerPrompt(false);
     setSearchQuery('');
@@ -1079,19 +838,7 @@ export default function POSPage() {
   function validateOrderForm() {
     if (cart.length === 0) return showValidationError('Add at least one product before saving the order.');
 
-    if (orderFormData.orderType === 'DineIn') {
-      if (!orderFormData.table) return showValidationError('Please select a table before saving a dine-in order.');
-      // Defensive re-check - the table grid already disables a locked
-      // table's button, but this catches the rare case where it became
-      // occupied (another terminal) in the moment between selecting it
-      // and tapping Save.
-      if (isTableLocked(orderFormData.table)) return showValidationError(`Table ${orderFormData.table} already has an active order - complete/pay it, or wait for its timer to expire, to free it up.`);
-      if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty for dine-in.');
-      if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a dine-in phone number is entered.');
-      return true;
-    }
-
-    // Strict Delivery Field Validation: unlike DineIn/TakeAway (name/phone/
+    // Strict Delivery Field Validation: unlike TakeAway (name/phone/
     // address optional below), a Delivery order can't be handed to a rider
     // with no idea who to deliver to or where - Customer Name, Phone, and
     // Address are all mandatory here. No popup for this one: the Save
@@ -1113,9 +860,9 @@ export default function POSPage() {
 
     // TakeAway: name, phone, and address are all optional - a walk-in
     // counter customer or a quick phone order can check out with none of
-    // them, same as DineIn already allowed. If a phone IS entered though,
-    // it still has to be a real, valid number, and a name is required
-    // alongside it - a phone with no name (or an invalid one) is more
+    // them. If a phone IS entered though, it still has to be a real, valid
+    // number, and a name is required alongside it - a phone with no name
+    // (or an invalid one) is more
     // likely a typo than a deliberate walk-in, and a due left on a
     // phone-but-no-name order can't reliably be found again later.
     if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty.');
@@ -1180,12 +927,11 @@ export default function POSPage() {
       // Name/phone/address are optional for every order type now (see
       // validateOrderForm above) - an empty name falls back to the same
       // placeholder every other page in this app already uses to display a
-      // nameless order ('Dine-In Customer' for DineIn, 'Walk-in Customer'
-      // otherwise - see RecordPage.tsx/SalesPage.tsx's own label()
-      // functions), and an empty phone falls back to the walk-in
-      // placeholder number (03000000000) that Customer Dues/Ledger already
-      // knows to exclude from tracking.
-      const customerName = orderFormData.customer.trim() || (orderFormData.orderType === 'DineIn' ? 'Dine-In Customer' : 'Walk-in Customer');
+      // nameless order ('Walk-in Customer' - see RecordPage.tsx/
+      // SalesPage.tsx's own label() functions), and an empty phone falls
+      // back to the walk-in placeholder number (03000000000) that Customer
+      // Dues/Ledger already knows to exclude from tracking.
+      const customerName = orderFormData.customer.trim() || 'Walk-in Customer';
       const customerPhone = orderFormData.phone || '03000000000';
       const now = new Date().toISOString();
       const clientSyncId = crypto.randomUUID();
@@ -1203,7 +949,6 @@ export default function POSPage() {
         address: orderFormData.address,
         note: orderFormData.note,
         waiter: orderFormData.waiter,
-        table: orderFormData.table,
         status: 'pending',
         paymentMethod: selectedPaymentMethod,
         createdAt: now,
@@ -1388,22 +1133,16 @@ export default function POSPage() {
 
       setCart([]);
       resetOrderForm();
-      // Lock the table this order just used right away, instead of
-      // waiting up to TABLE_STATUS_POLL_MS for the next poll to notice it.
-      if (savedOrder.orderType === 'DineIn' && savedOrder.table) void loadActiveTableOrders();
-      // Same instant-feedback reasoning, for the pending-quantity badges -
-      // don't wait up to TABLE_STATUS_POLL_MS for this order's own items to
-      // show up on the product cards that were just used to build it.
+      // Instant feedback for the pending-quantity badges - don't wait up to
+      // PENDING_ITEMS_POLL_MS for this order's own items to show up on the
+      // product cards that were just used to build it.
       void loadPendingItemQuantities();
       orderFinalized = true;
-      // "content based on activity context" (Technical Requirements #1): a
-      // dine-in order mentions its table, and a customer-sync failure gets
-      // its own warning-toned popup instead of pretending everything went
-      // perfectly - the order itself is still saved fine either way.
+      // A customer-sync failure gets its own warning-toned popup instead of
+      // pretending everything went perfectly - the order itself is still
+      // saved fine either way.
       const savedOrderLabel = `Order #${savedOrder.dailyOrderNumber || savedOrder.id}`;
-      const contextLine = savedOrder.orderType === 'DineIn' && savedOrder.table
-        ? `Table ${savedOrder.table} - kitchen receipt is printing now.`
-        : 'Kitchen receipt is printing now.';
+      const contextLine = 'Kitchen receipt is printing now.';
 
       // No blocking pop-ups here by design - the notification bar/bell
       // (see lib/notifications.tsx) is now the sole confirmation surface
@@ -1518,21 +1257,21 @@ export default function POSPage() {
         // this into a real ShopSession the moment the till is back online
         // (see offline-sync.ts's reconciliation step).
         openShopLocally();
-        shopToast.success('Restaurant opened offline. Will sync once back online.');
+        shopToast.success('Shop opened offline. Will sync once back online.');
         return;
       }
       await openShopSession();
       await refreshShopSession();
-      shopToast.success('Restaurant opened. Orders can now be taken.');
+      shopToast.success('Shop opened. Orders can now be taken.');
     } catch (error) {
-      shopToast.error(error instanceof Error ? error.message : 'Failed to open restaurant.');
+      shopToast.error(error instanceof Error ? error.message : 'Failed to open shop.');
     } finally {
       setIsOpeningShop(false);
     }
   }
 
   // The shop must be explicitly opened (see DashboardShell's "Open
-  // Restaurant" button / ShopSessionProvider) before any order can be rung
+  // Shop" button / ShopSessionProvider) before any order can be rung
   // up here -
   // mirrors the same check the backend enforces in orderController.createOrder,
   // so staff see this up front instead of hitting an error after building
@@ -1545,9 +1284,9 @@ export default function POSPage() {
         <div className="glass-pill mb-5 flex h-16 w-16 items-center justify-center rounded-full text-gray-400">
           <Store size={28} />
         </div>
-        <h2 className="text-xl font-black text-gray-900">The restaurant is closed</h2>
+        <h2 className="text-xl font-black text-gray-900">The shop is closed</h2>
         <p className="mt-2 max-w-sm text-sm font-bold text-gray-400">
-          Open the restaurant to start taking orders. Once open, every order rung up here counts toward this shift's totals until it's closed.
+          Open the shop to start taking orders. Once open, every order rung up here counts toward this shift's totals until it's closed.
         </p>
         {canManage ? (
           <button
@@ -1557,10 +1296,10 @@ export default function POSPage() {
             className="mt-6 flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Store size={16} />
-            {isOpeningShop ? 'Opening...' : 'Open Restaurant'}
+            {isOpeningShop ? 'Opening...' : 'Open Shop'}
           </button>
         ) : (
-          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">Ask a Manager or the Restaurant Owner to open the restaurant.</p>
+          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">Ask a Manager or the Shop Owner to open the shop.</p>
         )}
       </div>
     );
@@ -1800,17 +1539,16 @@ export default function POSPage() {
 
           <div className="space-y-3 border-b border-white/40 bg-white/25 p-4">
             <select ref={orderTypeSelectRef} name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
-              <option value="DineIn">Dine In</option>
               <option value="TakeAway">Take Away</option>
               <option value="Delivery">Delivery</option>
             </select>
 
             <div className="relative space-y-3">
               <FormField label="Phone Number">
-                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Phone (optional for dine-in)' : 'Phone * (03XXXXXXXXX)'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('phone')}`} />
+                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Phone * (03XXXXXXXXX)" className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('phone')}`} />
               </FormField>
               <FormField label="Customer Name">
-                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={orderFormData.orderType === 'DineIn' ? 'Customer name (optional)' : 'Customer name *'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('customer')}`} />
+                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Customer name *" className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('customer')}`} />
               </FormField>
 
               {showSuggestions && (suggestions.length > 0 || showNewCustomerPrompt) ? (
@@ -1870,30 +1608,6 @@ export default function POSPage() {
             <FormField label="Order Note">
               <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
-            {orderFormData.orderType === 'DineIn' ? (
-              <>
-                <FormField label="Waiter">
-                  <select name="waiter" value={orderFormData.waiter} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
-                    <option value="">Select waiter</option>
-                    {waiters.map((waiter) => <option key={waiter.id} value={waiter.name}>{waiter.name}</option>)}
-                  </select>
-                </FormField>
-                <FormField label="Table Number">
-                  {tables.length === 0 ? (
-                    <p className="rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-xs font-bold text-gray-400 shadow-inner">No tables configured yet.</p>
-                  ) : (
-                    <DineInTableGrid
-                      tables={tables}
-                      activeTableOrders={activeTableOrders}
-                      tableTurnoverMinutes={tableTurnoverMinutes}
-                      selectedTable={orderFormData.table}
-                      onSelect={(name) => setOrderFormData((previous) => ({ ...previous, table: previous.table === name ? '' : name }))}
-                    />
-                  )}
-                </FormField>
-              </>
-            ) : null}
-
             {selectedCustomerId ? (
               <div className="rounded-xl border border-sky-200/70 bg-sky-50/60 p-2.5 text-[11px] text-sky-700 shadow-inner">
                 <div className="flex items-start gap-1.5">
@@ -2046,110 +1760,6 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
         </button>
       </div>
     </div>
-  );
-}
-
-// The Dine-In table picker, split out of POSPage so its live 1-second
-// countdown re-render stays local to this small subtree instead of forcing
-// the entire page (product grid, cart, every form field) to re-render
-// every second - that constant background churn was the single biggest
-// cause of the POS/Sales screens feeling laggy while a cashier was
-// actually typing or clicking, since a full-page re-render was competing
-// with their input every single second, the whole time this screen was
-// open. Only mounted (and only ticking) while orderType === 'DineIn' -
-// TakeAway/Delivery orders now pay zero cost for this at all.
-//
-// A table is "locked" purely as a function of `now` vs. its occupying
-// order's turnover window (see isTableTimerExpired) - never a separate
-// "Expired" state staff have to act on. Once expired it's immediately
-// selectable again, same as any other free table, so there's no more
-// "Expired - awaiting staff decision" branch here.
-function DineInTableGrid({
-  tables,
-  activeTableOrders,
-  tableTurnoverMinutes,
-  selectedTable,
-  onSelect,
-}: {
-  tables: Table[];
-  activeTableOrders: Record<string, TableTimerOrder>;
-  tableTurnoverMinutes: number;
-  selectedTable: string;
-  onSelect: (name: string) => void;
-}) {
-  const [tick, setTick] = useState(() => Date.now());
-
-  useEffect(() => {
-    const interval = setInterval(() => setTick(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  function getTableRemainingMs(tableName: string): number | null {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return null;
-    void tick; // re-evaluated every second purely to re-render the live countdown
-    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
-  }
-
-  function isTableLocked(tableName: string): boolean {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return false;
-    void tick;
-    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
-  }
-
-  return (
-    <>
-      <div className="grid grid-cols-5 gap-2">
-        {tables.map((table) => {
-          const isSelected = selectedTable === table.name;
-          const remainingMs = getTableRemainingMs(table.name);
-          const isLocked = isTableLocked(table.name);
-          return (
-            <button
-              key={table.id}
-              type="button"
-              disabled={isLocked}
-              onClick={() => onSelect(table.name)}
-              title={
-                isLocked
-                  ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
-                  : table.isFamily
-                    ? `Table ${table.name} - Family Table`
-                    : `Table ${table.name}`
-              }
-              className={`relative flex flex-col items-center justify-center gap-0.5 rounded-xl border px-2 py-2 text-xs font-black leading-tight backdrop-blur-md transition ${
-                isLocked
-                  ? 'cursor-not-allowed border-white/40 bg-white/30 text-gray-400 shadow-inner'
-                  : isSelected
-                    ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]'
-                    : table.isFamily
-                      ? 'border-pink-200/70 bg-pink-50/60 text-pink-700 shadow-inner hover:border-pink-300'
-                      : 'border-white/50 bg-white/50 text-gray-600 shadow-inner hover:border-[#E2F33C]/70'
-              }`}
-            >
-              <span>{table.name}</span>
-              {isLocked ? (
-                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
-              ) : null}
-              {table.isFamily ? (
-                <span className={`absolute -right-1.5 -top-1.5 rounded-full px-1 text-[8px] font-black leading-[14px] text-white ${isLocked ? 'bg-gray-400' : 'bg-pink-500'}`}>F</span>
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-bold">
-        {tables.some((table) => table.isFamily) ? (
-          <p className="flex items-center gap-1.5 text-pink-600">
-            <span className="inline-block h-2 w-2 rounded-full bg-pink-500" /> Family Table
-          </p>
-        ) : null}
-        <p className="flex items-center gap-1.5 text-gray-400">
-          <span className="inline-block h-2 w-2 rounded-full bg-gray-300" /> Occupied (frees up when paid, or when its timer expires)
-        </p>
-      </div>
-    </>
   );
 }
 

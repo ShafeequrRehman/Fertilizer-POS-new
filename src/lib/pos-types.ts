@@ -1,5 +1,12 @@
 export type OrderType = 'DineIn' | 'TakeAway' | 'Delivery';
 
+// The order types a NEW order can be placed as (POSPage.tsx's order-type
+// selector). 'DineIn' stays part of OrderType above only for backward
+// compatibility with historical orders already saved with it (receipts,
+// Sales/Record history, WhatsApp labels, etc. still need to render those
+// correctly) - it is no longer offered as a choice when creating an order.
+export type CreateOrderType = Exclude<OrderType, 'DineIn'>;
+
 export interface Product {
   id: string | number;
   name: string;
@@ -18,6 +25,12 @@ export interface Product {
   // backend/models/Product.js's partial unique index), but most
   // products/variations will simply leave it blank.
   productCode?: string;
+  // Optional company/brand name (e.g. "Engro", "Fauji", "FFC") - a shop
+  // selling branded goods (fertilizer, pesticide, seed, etc.) can record
+  // who makes a product separately from the product's own name (see
+  // ProductManagementSection.tsx's "Company" field). Purely informational -
+  // not used for grouping/search key logic, which still keys off name+category.
+  company?: string;
 }
 
 export interface ProductInput {
@@ -32,6 +45,7 @@ export interface ProductInput {
   isDeal?: boolean;
   dealItems?: string[];
   productCode?: string;
+  company?: string;
 }
 
 export interface Customer {
@@ -88,13 +102,6 @@ export interface LedgerCustomer {
 export interface Waiter {
   id: string;
   name: string;
-  isActive: boolean;
-}
-
-export interface Table {
-  id: string;
-  name: string;
-  isFamily: boolean;
   isActive: boolean;
 }
 
@@ -532,14 +539,13 @@ export interface CartItem {
 }
 
 export interface OrderFormData {
-  orderType: OrderType;
+  orderType: CreateOrderType;
   phone: string;
   customer: string;
   address: string;
   previousDues: number;
   note: string;
   waiter: string;
-  table: string;
   // Quick Delivery Charges preset (Free/30/50/Custom row) - only ever
   // meaningful for orderType 'Delivery'. Undefined/0 for every other order.
   deliveryFee?: number;
@@ -591,7 +597,10 @@ export interface OrderPayload {
   address: string;
   note: string;
   waiter: string;
-  table: string;
+  // No longer settable when creating an order (Dining Tables removed from
+  // the POS order flow) - stays optional for backward compatibility with
+  // historical Dine-In orders that already have one saved.
+  table?: string;
   status: 'pending' | 'completed' | 'cancelled' | 'paid';
   paymentMethod: 'Cash' | 'Card' | 'E-Wallet';
   createdAt: string;

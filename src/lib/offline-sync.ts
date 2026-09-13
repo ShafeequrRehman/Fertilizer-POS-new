@@ -20,8 +20,6 @@ import {
   syncOrderCounter,
   syncLifetimeCounter,
   pushEmployeesCache,
-  pushOccupiedTablesCache,
-  pushTablesCache,
   getPendingEmployeeCreates,
   ackEmployeeCreates,
   markEmployeeCreateFailed,
@@ -33,7 +31,7 @@ import {
   markEmployeeDeleteFailed,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, fetchOccupiedDineInTables, fetchShopProfile, openShopSession, fetchShopSessionStatus, fetchIngredients, fetchIngredientCategories, fetchRecipes, fetchTables } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession, fetchShopSessionStatus, fetchIngredients, fetchIngredientCategories, fetchRecipes } from '@/lib/pos-api';
 import { shopApi } from '@/lib/shop-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
@@ -348,7 +346,7 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
           imported: 0,
           skipped: 0,
           failed: 0,
-          error: 'Could not reconcile opening the restaurant offline with the server yet - will retry automatically.',
+          error: 'Could not reconcile opening the shop offline with the server yet - will retry automatically.',
         };
       }
     }
@@ -489,7 +487,6 @@ export function triggerBackgroundSync(): void {
       // (see offline-order-helpers.ts's loadOrdersFromLocalHub), never a
       // live call.
       await pushCurrentOrdersCache();
-      await pushCurrentOccupiedTables();
     } catch {
       // Best-effort, same as every other background push in this file.
     } finally {
@@ -504,12 +501,11 @@ export async function pushCurrentReferenceData(): Promise<void> {
   if (!hubUp) return;
 
   try {
-    const [productsResult, customers, waiters, roles, shopProfile] = await Promise.all([
+    const [productsResult, customers, waiters, roles] = await Promise.all([
       fetchProducts(),
       fetchAllCustomers(),
       fetchWaiters(),
       shopApi.listRoles(),
-      fetchShopProfile().catch(() => null),
     ]);
 
     await pushReferenceData({
@@ -518,7 +514,6 @@ export async function pushCurrentReferenceData(): Promise<void> {
       customers: customers || [],
       staff: waiters || [],
       roles: roles || [],
-      tables: shopProfile?.tables || [],
     });
   } catch {
     // Best-effort - the next 5-minute tick will just try again. Nothing
@@ -594,45 +589,6 @@ export async function pushCurrentEmployeesCache(): Promise<void> {
   }
 }
 
-// DineIn table-occupancy cache - see occupiedTablesCache.js. Deliberately
-// its own lightweight push (not folded into pushCurrentOrdersCache's
-// 14-day-bounded snapshot) - see fetchOccupiedDineInTables's own comment
-// for why this stays unbounded and cheap regardless of order history size.
-export async function pushCurrentOccupiedTables(): Promise<void> {
-  if (!isDesktopApp()) return;
-  const hubUp = await isLocalHubReachable();
-  if (!hubUp) return;
-
-  try {
-    const tables = await fetchOccupiedDineInTables();
-    await pushOccupiedTablesCache(tables || []);
-  } catch {
-    // Best-effort - same reasoning as pushCurrentReferenceData.
-  }
-}
-
-// The Dine-In table GRID's own cache - see backend/localHub/tablesCache.js.
-// Deliberately separate from pushCurrentOccupiedTables above (which only
-// ever pushes plain table NAMES that currently have a pending order) and
-// from pushCurrentReferenceData's `tables` field (a shop's plain custom
-// LABEL list, Shop.tables) - this pushes the real Table records
-// (id/name/isFamily/isActive) the grid itself renders/locks against, so a
-// till that goes offline still sees its actual configured tables instead
-// of an empty "No tables configured yet" picker (see POSPage.tsx's
-// loadProductsFromLocalHub).
-export async function pushCurrentTablesCache(): Promise<void> {
-  if (!isDesktopApp()) return;
-  const hubUp = await isLocalHubReachable();
-  if (!hubUp) return;
-
-  try {
-    const tables = await fetchTables();
-    await pushTablesCache(tables || []);
-  } catch {
-    // Best-effort - same reasoning as pushCurrentReferenceData.
-  }
-}
-
 // Mounted once near the app root (see DashboardShell.tsx) so the 5-minute
 // timer runs for the lifetime of the dashboard session, independent of
 // which page is currently open. Also exposes a manual trigger + live
@@ -667,8 +623,6 @@ export function useOfflineSync() {
       await pushCurrentIngredientsCache();
       await pushCurrentOrdersCache();
       await pushCurrentEmployeesCache();
-      await pushCurrentOccupiedTables();
-      await pushCurrentTablesCache();
       await refreshStatus();
       return result;
     } finally {

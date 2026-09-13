@@ -40,16 +40,6 @@ export async function fetchPublicMenu(shopId: string): Promise<PublicMenuRespons
   return response.data;
 }
 
-export interface PublicTablesResponse {
-  tables: string[];
-  occupied: string[];
-}
-
-export async function fetchPublicTables(shopId: string): Promise<PublicTablesResponse> {
-  const response = await api.get<PublicTablesResponse>(`/public/${shopId}/tables`);
-  return response.data;
-}
-
 export interface PublicCustomerStatus {
   // Any active (still status: "pending") order for this phone at this
   // shop - not Dine-In-specific anymore, see publicOrderController.js's
@@ -130,7 +120,9 @@ export async function requestOrderChange(
 }
 
 export interface PublicOrderPayload {
-  orderType: 'DineIn' | 'TakeAway' | 'Delivery';
+  // Dine-In/table selection has been removed from the customer ordering
+  // flow - a customer can only place a Takeaway or Delivery order now.
+  orderType: 'TakeAway' | 'Delivery';
   table?: string;
   customer: { name: string; phone: string; address?: string };
   paymentMethod: 'Cash' | 'Online' | 'JazzCash' | 'EasyPaisa';

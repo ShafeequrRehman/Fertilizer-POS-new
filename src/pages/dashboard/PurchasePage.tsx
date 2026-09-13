@@ -41,12 +41,12 @@ function formatPurchaseDateTime(value: string) {
   return date.toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-// Restaurant Name letterhead row for the Excel exports below - same
+// Shop Name letterhead row for the Excel exports below - same
 // reasoning/pattern as IngredientStockSection.tsx's own
 // buildRestaurantNameRow (a sheet forwarded straight to a supplier on
-// WhatsApp needs to say which restaurant it's from with no other context).
+// WhatsApp needs to say which shop it's from with no other context).
 function buildRestaurantNameRow(columnCount: number): ExcelCell[] {
-  const restaurantName = getAuthShop()?.name || 'Restaurant';
+  const restaurantName = getAuthShop()?.name || 'Shop';
   const row: ExcelCell[] = [{ value: restaurantName, style: { bold: true, fontSize: 14 } }];
   for (let i = 1; i < columnCount; i += 1) row.push({ value: '' });
   return row;
@@ -244,7 +244,7 @@ export default function PurchasePage() {
   const masterRangeLabel = rangeFrom === rangeTo ? formatDisplayDate(rangeFrom) : `${formatDisplayDate(rangeFrom)} - ${formatDisplayDate(rangeTo)}`;
 
   function buildMasterPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Restaurant';
+    const restaurantName = getAuthShop()?.name || 'Shop';
     const tables = masterCompanyGroups.map(([companyName, companyGroups]) => {
       const purchased = companyGroups.reduce((sum, g) => sum + g.totalAmount, 0);
       const paid = companyGroups.reduce((sum, g) => sum + g.paidAmount, 0);
@@ -288,7 +288,7 @@ export default function PurchasePage() {
         title="Master Purchase Log — All Companies"
         subtitle={`${masterCompanyGroups.length} compan${masterCompanyGroups.length === 1 ? 'y' : 'ies'} · ${groupedOrders.length} order${groupedOrders.length === 1 ? '' : 's'} · ${masterRangeLabel}`}
         stats={[
-          { label: 'Restaurant', value: restaurantName },
+          { label: 'Shop', value: restaurantName },
           { label: 'Total Purchased', value: formatMoney(masterTotals.purchased) },
           { label: 'Total Paid', value: formatMoney(masterTotals.paid) },
           { label: 'Total Due', value: formatMoney(masterTotals.due) },
@@ -1286,13 +1286,13 @@ function SupplierDashboard({
 
   // --- Pending: rate-less demand sheet (nothing has been priced yet) ---
   function buildPendingPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Restaurant';
+    const restaurantName = getAuthShop()?.name || 'Shop';
     return (
       <ReportPdfDocument
         title={`${supplier.name} — Purchase Demand Sheet`}
         subtitle={`${pendingGroups.length} pending order${pendingGroups.length === 1 ? '' : 's'} · ${rangeLabel}`}
         stats={[
-          { label: 'Restaurant', value: restaurantName },
+          { label: 'Shop', value: restaurantName },
           { label: 'Pending Orders', value: String(pendingGroups.length) },
           { label: 'Line Items', value: String(pendingGroups.reduce((sum, g) => sum + g.itemCount, 0)) },
         ]}
@@ -1379,13 +1379,13 @@ function SupplierDashboard({
   }
 
   function buildCompletedPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Restaurant';
+    const restaurantName = getAuthShop()?.name || 'Shop';
     return (
       <ReportPdfDocument
         title={`${supplier.name} — Purchase Statement`}
         subtitle={`${completedGroups.length} completed order${completedGroups.length === 1 ? '' : 's'} · ${rangeLabel}`}
         stats={[
-          { label: 'Restaurant', value: restaurantName },
+          { label: 'Shop', value: restaurantName },
           { label: 'Total Purchased', value: formatMoney(completedTotals.purchased) },
           { label: 'Total Paid', value: formatMoney(completedTotals.paid) },
           { label: 'Total Due', value: formatMoney(completedTotals.due) },

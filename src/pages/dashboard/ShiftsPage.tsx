@@ -68,7 +68,7 @@ export default function ShiftsPage() {
           <h1 className="text-3xl font-black text-gray-900 tracking-tight flex items-center gap-3">
             Shifts <Store className="text-indigo-600" size={30} />
           </h1>
-          <p className="text-gray-500 font-bold">Every Open Restaurant → Close Restaurant cycle, with the exact order count and sales locked in at close time.</p>
+          <p className="text-gray-500 font-bold">Every Open Shop → Close Shop cycle, with the exact order count and sales locked in at close time.</p>
         </div>
         <button
           type="button"
@@ -97,7 +97,7 @@ export default function ShiftsPage() {
         <div className="rounded-[32px] bg-white p-8 text-center text-sm font-bold text-gray-500 shadow-sm">Loading shift history...</div>
       ) : sessions.length === 0 ? (
         <div className="rounded-[32px] bg-white p-8 text-center text-sm font-bold text-gray-500 shadow-sm">
-          No shifts recorded yet. Use the "Open Restaurant" button to start one.
+          No shifts recorded yet. Use the "Open Shop" button to start one.
         </div>
       ) : (
         <div className="rounded-[32px] bg-white shadow-sm overflow-hidden">

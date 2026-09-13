@@ -165,21 +165,22 @@ async function backfillIngredientStockPrecision() {
   }
 }
 
-// Sidebar/Route Bypass Bug Fix: Dashboard, Dining Tables, and Connect
-// Devices used to have NO permission gate at all - every existing Role's
-// `permissions` array (stored in MongoDB before these three keys even
-// existed in code) obviously has no way to already contain them. Without
-// this backfill, the moment config/permissions.js's new view.dashboard/
-// manage.tables/manage.devices keys ship, EVERY existing employee would
-// instantly lose access to all three pages (checkbox never checked = no
-// permission, same as every other key in this additive system) - exactly
-// the kind of silent access break dropLegacyCustomerPhoneIndex/
-// backfillIngredientPurchaseStatus above exist to prevent. Granting these
-// three onto every pre-existing Role preserves the exact "everyone could
-// already see these" behavior that was true before the keys existed; a
-// Shop Owner can freely uncheck any of them per-role (or per-employee, via
-// the Manage Staff override modal) afterward. $addToSet is idempotent, so
-// this stays a safe no-op on every later startup.
+// Sidebar/Route Bypass Bug Fix: Dashboard and Connect Devices used to have
+// NO permission gate at all - every existing Role's `permissions` array
+// (stored in MongoDB before these keys even existed in code) obviously has
+// no way to already contain them. Without this backfill, the moment
+// config/permissions.js's new view.dashboard/manage.devices keys ship,
+// EVERY existing employee would instantly lose access to both pages
+// (checkbox never checked = no permission, same as every other key in this
+// additive system) - exactly the kind of silent access break
+// dropLegacyCustomerPhoneIndex/backfillIngredientPurchaseStatus above exist
+// to prevent. Granting these onto every pre-existing Role preserves the
+// exact "everyone could already see these" behavior that was true before
+// the keys existed; a Shop Owner can freely uncheck any of them per-role
+// (or per-employee, via the Manage Staff override modal) afterward.
+// $addToSet is idempotent, so this stays a safe no-op on every later
+// startup. (WORKSPACE_ACCESS_DEFAULTS used to include a third key,
+// "manage.tables", for the since-removed Dining Tables feature.)
 async function backfillWorkspaceAccessPermissions() {
   try {
     // Deliberately no filter (runs against every Role, not just ones
@@ -194,7 +195,7 @@ async function backfillWorkspaceAccessPermissions() {
       { $addToSet: { permissions: { $each: WORKSPACE_ACCESS_DEFAULTS } } }
     );
     if (result.modifiedCount > 0) {
-      console.log(`[Seed] Granted view.dashboard/manage.tables/manage.devices onto ${result.modifiedCount} pre-existing role(s) so nobody's current access broke.`);
+      console.log(`[Seed] Granted view.dashboard/manage.devices onto ${result.modifiedCount} pre-existing role(s) so nobody's current access broke.`);
     }
   } catch (error) {
     console.error("[Seed] Failed to backfill workspace access permissions:", error.message);
@@ -223,7 +224,7 @@ async function backfillWorkspaceAccessPermissions() {
 // 6. Round away any pre-existing floating-point drift in stored
 //    Ingredient.currentStock/averageCost values (see
 //    backfillIngredientStockPrecision above).
-// 7. Grant the new view.dashboard/manage.tables/manage.devices keys onto
+// 7. Grant the new view.dashboard/manage.devices keys onto
 //    every pre-existing Role, so their current sidebar access doesn't
 //    silently break the moment those keys start being enforced (see
 //    backfillWorkspaceAccessPermissions above).

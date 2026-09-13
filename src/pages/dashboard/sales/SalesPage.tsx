@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, CheckCircle2, Edit3, Globe, Heart, Lock, MapPin, PackagePlus, Pencil, Phone, Printer, RefreshCcw, Search, ShoppingBag, Star, Table2, UserRound, XCircle } from 'lucide-react';
-import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchTables, fetchTableSettings, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, respondToOrderChangeRequest, type TrackingStatus, type Rider } from '@/lib/pos-api';
-import { Discount, Product, SavedOrder, ShopSession, Table, Waiter } from '@/lib/pos-types';
-import { getTableTimerRemainingMs, isTableTimerExpired, formatTableCountdown, TABLE_STATUS_POLL_MS, type TableTimerOrder } from '@/lib/table-timer';
+import { ArrowRight, CheckCircle2, Edit3, Globe, Heart, Lock, MapPin, PackagePlus, Phone, Printer, RefreshCcw, Search, ShoppingBag, Star, Table2, UserRound, XCircle } from 'lucide-react';
+import { ApiError, claimKitchenUpdatePrint, fetchCustomerOutstanding, fetchOrder, fetchOrders, fetchOrdersList, fetchProducts, fetchShopProfile, fetchShopSessionHistory, fetchWaiters, fetchRiders, assignOrderRider, isAuthenticated, updateOrder, sendWhatsappMessage, sendWhatsappDocument, updateOrderTrackingStatus, respondToOrderChangeRequest, type TrackingStatus, type Rider } from '@/lib/pos-api';
+import { Discount, Product, SavedOrder, ShopSession, Waiter } from '@/lib/pos-types';
 import { StoreSettings, getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession } from '@/lib/shop-session';
@@ -94,11 +93,6 @@ export default function SalesPage() {
   useEffect(() => listenForPrintSentMessages(toast), [toast]);
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  // Every dine-in table's Family/Simple category, loaded once so each order
-  // card and the detail panel can look up "is table 7 a Family Table?"
-  // by name without re-fetching per order - see Table model / isFamily in
-  // TableManagementSection.tsx, the same source used on the POS table grid.
-  const [tables, setTables] = useState<Table[]>([]);
   // Real, DB-backed waiters (previously this filter row had hardcoded
   // placeholder names - "Fariha"/"Ahsan Raza"/etc - that never matched any
   // real order and made the filter buttons silently do nothing when
@@ -150,7 +144,6 @@ export default function SalesPage() {
   const [showPayment, setShowPayment] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showAddItems, setShowAddItems] = useState(false);
-  const [showTableEdit, setShowTableEdit] = useState(false);
   const [settings, setSettings] = useState<StoreSettings | null>(null);
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
@@ -324,7 +317,6 @@ export default function SalesPage() {
     }
     if (!isAuthenticated()) setStatus({ tone: 'info', text: 'Login token not found. Sales updates will not sync to MongoDB until you log in again.' });
     void load();
-    void fetchTables().then((result) => setTables(result ?? [])).catch(() => setTables([]));
     // Shop status can change (someone closes the shop) while this page is
     // sitting open, so the shift window is kept in sync the same way
     // RecordPage.tsx and the Dashboard do.
@@ -427,15 +419,6 @@ export default function SalesPage() {
     const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order)} ${phoneLabel(order)}`.toLowerCase();
     return byFilter && haystack.includes(search.toLowerCase());
   }), [filter, shiftOrders, search]);
-
-  // table name -> isFamily, so any order's `table` field (just a plain
-  // string like "7") can be resolved to its Family/Simple category without
-  // re-fetching per card. See Table model / TableManagementSection.tsx.
-  const familyTableNames = useMemo(() => {
-    const map: Record<string, boolean> = {};
-    tables.forEach((t) => { map[t.name] = t.isFamily; });
-    return map;
-  }, [tables]);
 
   // Every currently pending order shop-wide, with NO shift/date bound - a
   // still-open DineIn table or unclosed Delivery has to stay findable here
@@ -1323,8 +1306,8 @@ export default function SalesPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <p className="max-w-xs text-xs font-bold text-gray-500">
                   {shopSession
-                    ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this restaurant's last shift"} - not split by calendar date.`
-                    : 'No shift recorded yet. Open the restaurant to start taking orders.'}
+                    ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - not split by calendar date.`
+                    : 'No shift recorded yet. Open the shop to start taking orders.'}
                 </p>
                 <button type="button" onClick={() => void loadAny()} className="glass-dark rounded-2xl px-4 py-3 text-sm font-black"><RefreshCcw size={16} className="mr-2 inline" />Refresh</button>
               </div>
@@ -1441,7 +1424,7 @@ export default function SalesPage() {
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100/80 px-2 py-0.5 text-[10px] font-black text-slate-700 shadow-inner">
                               <Table2 size={10} /> Table {order.table}
                             </span>
-                            <TableTypeBadge tableName={order.table} isFamily={familyTableNames[order.table]} />
+                            <TableTypeBadge tableName={order.table} isFamily={undefined} />
                           </>
                         ) : null}
                       </div>
@@ -1550,36 +1533,18 @@ export default function SalesPage() {
                   {selectedOrder.orderType === 'DineIn' && hasCustomerPhone(selectedOrder) && selectedOrder.waiter ? (
                     <Box label="Waiter" value={selectedOrder.waiter} />
                   ) : null}
+                  {/* Read-only historical display only - Dining Tables (and
+                      the ability to reassign one on an existing order) has
+                      been removed, so this box is never clickable anymore.
+                      Still shown for any pre-existing DineIn order so its
+                      table renders correctly. */}
                   {selectedOrder.orderType === 'DineIn' ? (
-                    selectedOrder.status === 'pending' ? (
-                      <button
-                        disabled={!isSelectedOrderHydrated}
-                        type="button"
-                        onClick={() => setShowTableEdit(true)}
-                        // col-span-2: this box carries more content (number
-                        // + type badge + pencil) than a plain Box, so it
-                        // needs the full row width - squeezed into half of
-                        // the 2-col grid on a narrow detail panel, "Table 3"
-                        // itself was wrapping onto two lines.
-                        className="col-span-2 min-w-0 rounded-[20px] bg-white/50 px-4 py-3 text-left shadow-inner transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table</p>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          {selectedOrder.table ? (
-                            <>
-                              <span className="whitespace-nowrap text-sm font-black text-gray-900">Table {selectedOrder.table}</span>
-                              <TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} />
-                            </>
-                          ) : <span className="text-sm font-bold text-gray-900">Not set</span>}
-                          <Pencil size={12} className="shrink-0 text-gray-400" />
-                        </div>
-                      </button>
-                    ) : selectedOrder.table ? (
+                    selectedOrder.table ? (
                       <div className="col-span-2 min-w-0 rounded-[20px] bg-white/50 px-4 py-3 shadow-inner">
                         <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table</p>
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                           <span className="whitespace-nowrap text-sm font-black text-gray-900">Table {selectedOrder.table}</span>
-                          <TableTypeBadge tableName={selectedOrder.table} isFamily={familyTableNames[selectedOrder.table]} />
+                          <TableTypeBadge tableName={selectedOrder.table} isFamily={undefined} />
                         </div>
                       </div>
                     ) : (
@@ -1818,21 +1783,6 @@ export default function SalesPage() {
       {showCancel && selectedOrder ? <CancelOrderModal order={selectedOrder} onClose={() => setShowCancel(false)} onCancelled={handleOrderCancelled} /> : null}
 
       {showAddItems && selectedOrder ? <Modal title="Add Items To Order" onClose={() => setShowAddItems(false)} wide><AddItemsManager products={products} onSaveItems={addItems} onProductsChanged={refreshProducts} /></Modal> : null}
-      {showTableEdit && selectedOrder ? (
-        <TableChangeModal
-          order={selectedOrder}
-          tables={tables}
-          familyTableNames={familyTableNames}
-          onClose={() => setShowTableEdit(false)}
-          onSave={async (table) => {
-            const previousTable = selectedOrder.table;
-            const updated = await saveUpdate({ table });
-            if (updated) {
-              toast.success(previousTable ? `Table changed from ${previousTable} to ${table}.` : `Table set to ${table}.`);
-            }
-          }}
-        />
-      ) : null}
       {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
     </div>
   );
@@ -2076,200 +2026,5 @@ function OnlineOrderControls({
         </div>
       ) : null}
     </div>
-  );
-}
-// Lets a cashier move a DineIn order to a different table (a customer
-// asked to switch seats, or the table was mis-picked at placement) without
-// going through the full Edit Order page - just a field patch, same as
-// note/waiter (see saveUpdate's plain `{ table }` call, which
-// applyOrderPatch/updateQueuedOrder already both support - see
-// orderController.js/localOrders.js). Uses the same real Table model (with
-// isFamily) as POSPage.tsx's own table grid, rather than the older
-// Shop.tables/occupied-set system - table-timer locking already lives on
-// the POS/Sales table grid elsewhere, so this is just a quick reassignment,
-// not a second copy of that occupancy check.
-function TableChangeModal({
-  order,
-  tables,
-  familyTableNames,
-  onClose,
-  onSave,
-}: {
-  order: SavedOrder;
-  tables: Table[];
-  familyTableNames: Record<string, boolean>;
-  onClose: () => void;
-  onSave: (table: string) => Promise<void>;
-}) {
-  const [selected, setSelected] = useState(order.table || '');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [tableTurnoverMinutes, setTableTurnoverMinutes] = useState(45);
-  // tableName -> the most recent still-pending, not-yet-cleared DineIn order
-  // occupying it, EXCLUDING this very order (see loadActiveTableOrders
-  // below) - same lock data POSPage.tsx's Dine-In grid uses when placing a
-  // new order, so moving an existing order onto a different table only ever
-  // offers tables that are actually free right now.
-  const [activeTableOrders, setActiveTableOrders] = useState<Record<string, TableTimerOrder>>({});
-  const [tick, setTick] = useState(Date.now());
-
-  async function loadActiveTableOrders() {
-    try {
-      const orders = await fetchOrders({ status: 'pending', orderType: 'DineIn' });
-      const next: Record<string, TableTimerOrder> = {};
-      (orders ?? [])
-        .filter((o) => o.status === 'pending' && o.orderType === 'DineIn' && o.table && !o.tableTimerCleared && o.id !== order.id)
-        .forEach((o) => {
-          const existing = next[o.table];
-          if (!existing || new Date(o.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
-            next[o.table] = { createdAt: o.createdAt, timerExtendedMinutes: o.timerExtendedMinutes };
-          }
-        });
-      setActiveTableOrders(next);
-    } catch (err) {
-      console.error('Failed to refresh table occupancy:', err);
-    }
-  }
-
-  useEffect(() => {
-    void fetchTableSettings().then((settings) => {
-      if (settings?.tableTurnoverMinutes) setTableTurnoverMinutes(settings.tableTurnoverMinutes);
-    });
-    void loadActiveTableOrders();
-    const pollInterval = setInterval(() => void loadActiveTableOrders(), TABLE_STATUS_POLL_MS);
-    const tickInterval = setInterval(() => setTick(Date.now()), 1000);
-    return () => {
-      clearInterval(pollInterval);
-      clearInterval(tickInterval);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // If the table currently selected gets taken by another order while this
-  // modal is still open, drop the now-stale selection instead of letting
-  // staff submit straight into the 409 the backend would return.
-  useEffect(() => {
-    if (!selected || selected === order.table) return;
-    if (activeTableOrders[selected]) {
-      setSelected('');
-      setError(`Table ${selected} was just taken by another order. Pick a different table.`);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTableOrders]);
-
-  function getTableRemainingMs(tableName: string): number | null {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return null;
-    void tick; // re-evaluated every second purely to re-render the live countdown
-    return getTableTimerRemainingMs(occupying, tableTurnoverMinutes);
-  }
-
-  // Automatic, no staff decision involved - locked only while the occupying
-  // order's turnover window hasn't elapsed yet (same rule as POSPage.tsx's
-  // isTableLocked and the backend's autoFreeExpiredTable).
-  function isTableLocked(tableName: string): boolean {
-    const occupying = activeTableOrders[tableName];
-    if (!occupying) return false;
-    void tick;
-    return !isTableTimerExpired(occupying, tableTurnoverMinutes);
-  }
-
-  async function submit() {
-    if (!selected) {
-      setError('Select a table.');
-      return;
-    }
-    if (selected === order.table) {
-      onClose();
-      return;
-    }
-    if (isTableLocked(selected)) {
-      setError(`Table ${selected} already has an active order. Pick a different table.`);
-      return;
-    }
-    setSubmitting(true);
-    setError('');
-    try {
-      await onSave(selected);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to change table.');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Modal title={`Change Table - Order #${orderNumber(order)}`} onClose={onClose}>
-      <p className="text-sm text-gray-500">
-        Pick the new table below - occupied tables are locked, just like when placing a new order.
-      </p>
-      {/* Always visible so staff can see at a glance exactly which table's
-          order this is, and exactly where it's about to move to, before
-          they hit Save - important once more than one order's table might
-          be getting changed around the same time. */}
-      <div className="mt-3 flex items-center gap-3 rounded-2xl bg-gray-50 p-4">
-        <div className="min-w-0 flex-1 text-center">
-          <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">Current Table</p>
-          <p className="mt-1 truncate text-lg font-black text-gray-900">{order.table || 'Not set'}</p>
-        </div>
-        <ArrowRight size={20} className="shrink-0 text-gray-300" />
-        <div className="min-w-0 flex-1 text-center">
-          <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">New Table</p>
-          <p className={`mt-1 truncate text-lg font-black ${selected ? 'text-emerald-600' : 'text-gray-300'}`}>{selected || 'Select below'}</p>
-        </div>
-      </div>
-      {tables.length === 0 ? <p className="mt-3 text-xs font-bold text-gray-400">No tables configured yet.</p> : null}
-      <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-5">
-        {tables.map((table) => {
-          const isSelected = selected === table.name;
-          const remainingMs = getTableRemainingMs(table.name);
-          const isLocked = isTableLocked(table.name);
-          const isExpired = isLocked && remainingMs !== null && remainingMs <= 0;
-          return (
-            <button
-              key={table.id}
-              type="button"
-              disabled={isLocked}
-              title={
-                isExpired
-                  ? `Table ${table.name} - timer expired, awaiting staff to clear or extend it`
-                  : isLocked
-                    ? `Table ${table.name} - occupied, free in ~${formatTableCountdown(remainingMs ?? 0)}`
-                    : undefined
-              }
-              onClick={() => setSelected(table.name)}
-              className={`flex flex-col items-center gap-1 rounded-xl border py-2.5 text-sm font-black transition ${
-                isExpired
-                  ? 'cursor-not-allowed border-rose-300 bg-rose-50 text-rose-400'
-                  : isLocked
-                    ? 'cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400'
-                    : isSelected
-                      ? 'border-black bg-black text-white'
-                      : 'border-gray-200 bg-white text-gray-700 hover:border-gray-400'
-              }`}
-            >
-              <span>{table.name}</span>
-              {isExpired ? (
-                <span className="text-[9px] font-black normal-case text-rose-500">Expired</span>
-              ) : isLocked ? (
-                <span className="text-[9px] font-bold normal-case text-gray-400">{formatTableCountdown(remainingMs ?? 0)}</span>
-              ) : (
-                <TableTypeBadge tableName={table.name} isFamily={familyTableNames[table.name]} />
-              )}
-            </button>
-          );
-        })}
-      </div>
-      {error ? <p className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
-      <button
-        type="button"
-        disabled={submitting || !selected}
-        onClick={() => void submit()}
-        className="mt-5 w-full rounded-2xl bg-black py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {submitting ? 'Saving...' : 'Save New Table'}
-      </button>
-    </Modal>
   );
 }

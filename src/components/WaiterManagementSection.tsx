@@ -6,7 +6,7 @@ import { Waiter } from "@/lib/pos-types";
 
 export function WaiterManagementSection({
   title = "Waiter Directory",
-  description = "Add, update, activate, or remove waiters for this restaurant. The same list is used in POS order entry.",
+  description = "Add, update, activate, or remove waiters for this shop. The same list is used in POS order entry.",
   cardClassName = "rounded-[28px] border border-slate-200 bg-white p-6",
 }: {
   title?: string;

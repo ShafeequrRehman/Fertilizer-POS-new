@@ -74,8 +74,8 @@ export function SidebarPagesSection() {
       <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-6">
         <p className="text-sm font-black text-slate-900">Which pages does your dashboard show?</p>
         <p className="mt-1 text-xs font-bold text-slate-500">
-          Check a page to show it in the sidebar, uncheck it to hide it. This only affects your own restaurant -
-          not other restaurants on this software.
+          Check a page to show it in the sidebar, uncheck it to hide it. This only affects your own shop -
+          not other shops on this software.
         </p>
 
         <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -103,7 +103,7 @@ export function SidebarPagesSection() {
         {!profile?.hasPageVisibilityKey ? (
           <div className="mt-5 flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs font-bold text-amber-800">
             <AlertCircle size={16} />
-            No Page Visibility Key has been set up for your restaurant yet. Ask your software provider (Super Admin)
+            No Page Visibility Key has been set up for your shop yet. Ask your software provider (Super Admin)
             to set one before you can save changes here.
           </div>
         ) : null}
@@ -152,7 +152,7 @@ function PageVisibilityKeyModal({
 
   async function submit() {
     if (!key.trim()) {
-      setError("Enter the restaurant's Page Visibility Key.");
+      setError("Enter the shop's Page Visibility Key.");
       return;
     }
     setSubmitting(true);

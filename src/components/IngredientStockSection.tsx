@@ -665,14 +665,14 @@ export function IngredientStockSection({
     void downloadPdfDocument(doc, `${activeSupplier.name.replace(/\s+/g, '_')}_purchase_order_sheet.pdf`);
   }
 
-  // Restaurant Name letterhead - the very first row of every exported
+  // Shop Name letterhead - the very first row of every exported
   // sheet, bold and larger than everything below it, so a supplier opening
-  // this in Excel immediately sees which restaurant it's from with no
+  // this in Excel immediately sees which shop it's from with no
   // other context needed (same reasoning as the PDF header's own
   // restaurantName line). Same live localStorage-backed source
   // DashboardShell.tsx's sidebar reads.
   function buildRestaurantNameRow(columnCount: number): ExcelCell[] {
-    const restaurantName = getAuthShop()?.name || 'Restaurant';
+    const restaurantName = getAuthShop()?.name || 'Shop';
     const row: ExcelCell[] = [{ value: restaurantName, style: { bold: true, fontSize: 14 } }];
     for (let i = 1; i < columnCount; i += 1) row.push({ value: '' });
     return row;
@@ -770,7 +770,7 @@ export function IngredientStockSection({
   // the exported sheet always matches the list the manager is looking at),
   // so it can be printed, physically checked against the shelves, and used
   // to place the next purchase order straight off whatever's flagged Low.
-  // Restaurant Name + Live Generation Timestamp come for free from
+  // Shop Name + Live Generation Timestamp come for free from
   // ReportPdfDocument's own letterhead/generatedBlock (PDF) and
   // buildRestaurantNameRow/buildGeneratedAtRow (Excel) - same pattern every
   // other export in this file already follows.
@@ -1130,7 +1130,7 @@ export function IngredientStockSection({
             active company tab + search box above, same as filteredIngredients
             drives the list below) - so the manager can print it, physically
             cross-check shelves against it, and place the next purchase
-            orders straight off whatever's showing as low/out. Restaurant
+            orders straight off whatever's showing as low/out. Shop
             Name + Live Generation Timestamp come for free from
             ReportPdfDocument's own letterhead/generatedBlock. */}
         <div className="mb-3 flex flex-wrap items-center justify-end gap-2">

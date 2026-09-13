@@ -1,4 +1,12 @@
-require("dotenv").config();
+// Load .env relative to this file's own location (backend/../.env), not
+// whatever directory the Node process happened to be started from. aaPanel
+// (and some other process managers) can launch `node backend/index.js` with
+// a working directory that isn't the project root, which made a bare
+// `require("dotenv").config()` silently fail to find .env there and fall
+// through to whatever MONGO_URI was already set in the OS/parent-process
+// environment - see the production DB-routing incident write-up in the
+// Claude project for the full story.
+require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -40,7 +48,6 @@ const customerRoutes = require("./routes/customerRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const shopSessionRoutes = require("./routes/shopSessionRoutes");
 const waiterRoutes = require("./routes/waiterRoutes");
-const tableRoutes = require("./routes/tableRoutes");
 const ingredientRoutes = require("./routes/ingredientRoutes");
 const recipeRoutes = require("./routes/recipeRoutes");
 const ingredientPurchaseRoutes = require("./routes/ingredientPurchaseRoutes");
@@ -58,7 +65,13 @@ const sanitizeInput = require("./middleware/sanitizeInput");
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// Default express.json() body limit is 100kb - too small for a product's
+// manually-uploaded photo (sent as a base64 data URI in Product.image, see
+// resizeImageToDataUrl in ProductManagementSection.tsx, which caps the
+// resized image around ~250-350KB before base64 inflates it further). 8mb
+// matches the Local Hub's own express.json limit (localHub/server.js) with
+// headroom.
+app.use(express.json({ limit: "8mb" }));
 // See sanitizeInput.js - strips Mongo operator keys ($ne, $gt, etc.) out
 // of every request body/query/params before any route handler runs.
 app.use(sanitizeInput);
@@ -121,7 +134,6 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/shop-session", shopSessionRoutes);
 app.use("/api/waiters", waiterRoutes);
-app.use("/api/tables", tableRoutes);
 app.use("/api/ingredients", ingredientRoutes);
 app.use("/api/recipes", recipeRoutes);
 app.use("/api/ingredient-purchases", ingredientPurchaseRoutes);

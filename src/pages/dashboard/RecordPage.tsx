@@ -824,8 +824,8 @@ export default function RecordPage() {
             {isCustomRange
               ? `Showing orders from ${rangeFrom} to ${rangeTo}`
               : shopSession
-                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this restaurant's last shift"} - pending, completed, paid, and cancelled.`
-                : 'No shift recorded yet. Open the restaurant to start today\'s record.'}
+                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - pending, completed, paid, and cancelled.`
+                : 'No shift recorded yet. Open the shop to start today\'s record.'}
           </p>
         </div>
         <div className="flex items-center gap-2">

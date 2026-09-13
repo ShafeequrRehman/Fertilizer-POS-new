@@ -22,13 +22,8 @@ const { notifyRiderForDelivery } = require("../services/riderNotificationService
 // length/shape-checked, and the routes are rate-limited (see
 // publicOrderRoutes.js) since there's no auth gate to slow down abuse.
 
-const DEFAULT_TABLE_COUNT = 20;
 const MAX_ITEM_LINES = 50;
 const MAX_QTY_PER_LINE = 50;
-
-function defaultTableOptions() {
-  return Array.from({ length: DEFAULT_TABLE_COUNT }, (_, index) => String(index + 1));
-}
 
 function normalizePhone(phone) {
   return String(phone || "").trim();
@@ -204,25 +199,6 @@ exports.getMenu = async (req, res) => {
   }
 };
 
-// GET /api/public/:shopId/tables
-exports.getTables = async (req, res) => {
-  try {
-    const shopId = req.shop._id;
-    const orders = await Order.find({
-      shopId,
-      orderType: "DineIn",
-      status: "pending",
-      table: { $nin: [null, ""] },
-    })
-      .select("table")
-      .lean();
-    const occupied = Array.from(new Set(orders.map((order) => order.table).filter(Boolean)));
-    res.json({ tables: req.shop.tables || [], occupied });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
 // GET /api/public/:shopId/customer-status?phone=...
 // Checks for ANY still-active order (any orderType) for this phone at this
 // shop - the one-active-order-per-phone restriction now applies across
@@ -286,8 +262,8 @@ exports.createOrder = async (req, res) => {
     const payload = req.body || {};
 
     const orderType = payload.orderType;
-    if (!["DineIn", "TakeAway", "Delivery"].includes(orderType)) {
-      return res.status(400).json({ message: "Choose Dine-In, Takeaway, or Delivery.", reason: "invalid_order_type" });
+    if (!["TakeAway", "Delivery"].includes(orderType)) {
+      return res.status(400).json({ message: "Choose Takeaway or Delivery.", reason: "invalid_order_type" });
     }
 
     const customerName = String(payload.customer?.name || "").trim();
@@ -318,15 +294,6 @@ exports.createOrder = async (req, res) => {
         message: "Please allow location access so the rider can find you - location is required for delivery orders.",
         reason: "location_required",
       });
-    }
-
-    let table = "";
-    if (orderType === "DineIn") {
-      table = String(payload.table || "").trim();
-      const allowedTables = req.shop.tables && req.shop.tables.length > 0 ? req.shop.tables : defaultTableOptions();
-      if (!table || !allowedTables.includes(table)) {
-        return res.status(400).json({ message: "Please choose a table.", reason: "invalid_table" });
-      }
     }
 
     const openSession = await ShopSession.findOne({ shopId, status: "open" }).lean();
@@ -386,13 +353,6 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    if (orderType === "DineIn") {
-      const tableTaken = await Order.exists({ shopId, orderType: "DineIn", status: "pending", table });
-      if (tableTaken) {
-        return res.status(409).json({ message: `Table ${table} is already occupied - please choose another.`, reason: "table_occupied" });
-      }
-    }
-
     const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
     const total = subtotal; // No tax/discount on a public order - staff can still adjust before completing it.
 
@@ -440,7 +400,6 @@ exports.createOrder = async (req, res) => {
       customer: { name: customerName, phone: customerPhone, address: customerAddress },
       address: customerAddress,
       note: noteParts.join(" - "),
-      table,
       paymentMethod,
       dailyOrderNumber,
       shopSequenceNumber,

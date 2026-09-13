@@ -1,10 +1,9 @@
 
-import { useEffect, useMemo, useState } from "react";
-import { Plus, Package, Edit, Archive, X, Trash2, ListChecks, Search, ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Plus, Package, Edit, Archive, X, Trash2, Search, ChevronDown, ChevronRight, Upload } from "lucide-react";
 import { createProduct, deleteProduct, fetchProducts, updateProduct } from "@/lib/pos-api";
 import { Product } from "@/lib/pos-types";
 import { useToast } from "@/lib/toast";
-import { getProductImageUrl } from "@/lib/asset-path";
 import { resolveProductImage } from "@/lib/food-images";
 
 // Products that share the same name+category are different "variations" of
@@ -16,23 +15,60 @@ type ProductGroup = {
   key: string;
   name: string;
   category: string;
+  company?: string;
   image?: string;
   isDeal: boolean;
   variations: Product[];
 };
 
-const AVAILABLE_ICONS = [
-  "beef-burger-combo.svg", "butter-croissant.svg", "chicken-tikka-pizza.svg",
-  "coffee-beans.svg", "dark-chocolate.svg", "family-deal.svg", "fresh-avocado.svg",
-  "malai-boti-roll.svg", "organic-milk.svg", "red-apple.svg", "sparkling-water.svg",
-  "whole-grain-bread.svg", "zinger-shawarma.svg", "mega-deal.svg", "couple-deal.svg",
-  "midnight-deal.svg", "lunch-deal.svg", "kids-meal.svg", "party-deal.svg",
-  "french-fries.svg", "ice-cream.svg", "donut.svg", "hot-dog.svg", "soft-drink.svg",
-  "cold-coffee.svg",
-  // Added for pizza/desi-menu items (pizza slice, paratha roll, etc.)
-  "pizza-slice.svg", "paratha-roll.svg", "chicken-roll.svg", "biryani.svg",
-  "chai-tea.svg", "samosa.svg", "sandwich.svg", "nuggets.svg", "chicken-wings.svg"
-];
+// Longest side an uploaded product photo is resized down to before it's
+// stored as a data: URI - keeps the resulting string (and the eventual
+// Mongo document + every page that has to send/render it) small, while
+// still looking sharp as a product-card/cart thumbnail. Never upscales a
+// smaller source image.
+const MAX_UPLOAD_DIMENSION = 480;
+
+// Reads an image File picked from the device, downsizes it on an offscreen
+// <canvas> so its longest side is ~MAX_UPLOAD_DIMENSION px (preserving
+// aspect ratio), and returns it as a compressed JPEG data: URI. That string
+// is set directly as the existing `image` field - no upload endpoint, no
+// separate storage - so it's just an ordinary string value handled by the
+// existing save/display path (see resolveProductImage in food-images.ts,
+// which treats a data: URI as a highest-priority custom image and falls
+// back to a generic placeholder when `image` is empty).
+function resizeImageToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) {
+      reject(new Error("Please choose an image file (JPG, PNG, etc.)."));
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read that file."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That file doesn't look like a valid image."));
+      img.onload = () => {
+        const scale = Math.min(1, MAX_UPLOAD_DIMENSION / Math.max(img.width, img.height));
+        const width = Math.max(1, Math.round(img.width * scale));
+        const height = Math.max(1, Math.round(img.height * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Couldn't process that image."));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.75));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export function ProductManagementSection({
   title = "Manage Products",
@@ -54,7 +90,6 @@ export function ProductManagementSection({
   const [statusMessage, setStatusMessage] = useState<{ tone: "success"; text: string } | null>(null);
 
   // General Form states
-  const [formType, setFormType] = useState<"Product" | "Deal">("Product");
   const [editingId, setEditingId] = useState<string | number | null>(null);
   // Editing an entire product GROUP at once (name/category/image shared by
   // every variation, plus each variation's own name/price/qty) - distinct
@@ -72,6 +107,10 @@ export function ProductManagementSection({
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
   const [category, setCategory] = useState("");
+  // Company/brand name (e.g. "Engro", "Fauji", "FFC") - shared by every
+  // variation of a group, same as category/image - see Product.company's
+  // own comment in pos-types.ts/backend/models/Product.js.
+  const [company, setCompany] = useState("");
   const [image, setImage] = useState("");
   const [variation, setVariation] = useState("Standard");
   // Product Code / SKU: optional, typed or barcode-scanned on the POS
@@ -88,13 +127,22 @@ export function ProductManagementSection({
     { id: "1", name: "", price: "", qty: "", productCode: "" },
   ]);
 
-  // Deals states
-  const [dealItems, setDealItems] = useState<string[]>([]);
-  // Filters the "Select Items for this Deal" checkbox grid below - with
-  // 100+ products in the full catalog, scrolling to find one by eye was
-  // the actual complaint, so this is purely a client-side name/category
-  // filter over the same `products` list already in memory.
-  const [dealItemSearch, setDealItemSearch] = useState("");
+  // Deal fields (isDeal/dealItems/description) no longer have any creation
+  // or editing UI here (see "Create Deal" removal) - but an existing Deal
+  // product can still be opened via the regular Edit button (it's just
+  // treated as a normal product: name/price/category/image are editable,
+  // its deal composition isn't). Whatever it already had is captured here
+  // on edit-open and passed straight back through unchanged on save, so
+  // saving an edit never silently strips a product's deal status/items.
+  const [preservedDealFields, setPreservedDealFields] = useState<{ isDeal: boolean; dealItems: string[]; description: string }>({
+    isDeal: false,
+    dealItems: [],
+    description: "",
+  });
+  // Manual photo upload (see resizeImageToDataUrl above) - imageFileInputRef
+  // is the hidden <input type="file"> the "Upload Photo" button clicks.
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -133,10 +181,11 @@ export function ProductManagementSection({
     setPrice("");
     setQty("");
     setCategory("");
+    setCompany("");
     setImage("");
-    setFormType("Product");
     setVariation("Standard");
     setProductCode("");
+    setPreservedDealFields({ isDeal: false, dealItems: [], description: "" });
     // Defaults to ON for a brand new product - most menu items (pizzas,
     // burgers, etc.) come in more than one size, so leading with the
     // Small/Medium/Large rows front-and-center is the common case. A
@@ -144,7 +193,6 @@ export function ProductManagementSection({
     // click away.
     setHasVariations(true);
     setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
-    setDealItems([]);
   }
 
   // One-tap presets for the most common size/flavour patterns - replaces
@@ -158,12 +206,16 @@ export function ProductManagementSection({
   function getBasePayload() {
     return {
       name: name.trim(),
-      category: formType === "Deal" ? "Deals" : category.trim(),
+      category: category.trim(),
+      company: company.trim(),
       image: image,
       color: "bg-indigo-500",
-      description: formType === "Deal" ? "Special Combo Deal" : "",
-      isDeal: formType === "Deal",
-      dealItems: formType === "Deal" ? dealItems : [],
+      // Preserved as-is from whatever was already on the product being
+      // edited (or the "not a deal" defaults for a brand new product) -
+      // there's no UI here to change these anymore, see preservedDealFields.
+      description: preservedDealFields.description,
+      isDeal: preservedDealFields.isDeal,
+      dealItems: preservedDealFields.dealItems,
     };
   }
 
@@ -173,7 +225,7 @@ export function ProductManagementSection({
       return;
     }
 
-    if (formType === "Product" && !category.trim()) {
+    if (!category.trim()) {
       popup({ tone: "error", title: "Missing information", message: "Category is required." });
       return;
     }
@@ -188,12 +240,7 @@ export function ProductManagementSection({
       return;
     }
 
-    if (formType === "Deal" && dealItems.length === 0) {
-      popup({ tone: "error", title: "Missing information", message: "Deals must include at least one item." });
-      return;
-    }
-
-    if (formType === "Product" && !editingId && hasVariations) {
+    if (!editingId && hasVariations) {
       if (variationsData.length === 0) {
         popup({ tone: "error", title: "Missing information", message: "Please add at least one variation, or uncheck the variations option." });
         return;
@@ -262,17 +309,17 @@ export function ProductManagementSection({
           ...getBasePayload(),
           price: Number(price),
           stock: qty ? Number(qty) : 0,
-          variation: formType === "Deal" ? "Deal" : variation,
+          variation,
           productCode: productCode.trim(),
         };
         const updated = await updateProduct(editingId, payload);
         if (updated) {
           setProducts((prev) => prev.map((p) => (p.id === editingId ? updated : p)));
-          setStatusMessage({ tone: "success", text: `${formType} "${updated.name}" updated successfully.` });
+          setStatusMessage({ tone: "success", text: `Product "${updated.name}" updated successfully.` });
           resetForm();
         }
       } else {
-        if (formType === "Product" && hasVariations) {
+        if (hasVariations) {
           const newProducts: Product[] = [];
           
           for (const v of variationsData) {
@@ -296,13 +343,13 @@ export function ProductManagementSection({
             ...getBasePayload(),
             price: Number(price),
             stock: qty ? Number(qty) : 0,
-            variation: formType === "Deal" ? "Deal" : "Standard",
+            variation: "Standard",
             productCode: productCode.trim(),
           };
           const created = await createProduct(payload);
           if (created) {
             setProducts((prev) => [...prev, created]);
-            setStatusMessage({ tone: "success", text: `${formType} "${created.name}" added successfully.` });
+            setStatusMessage({ tone: "success", text: `Product "${created.name}" added successfully.` });
             resetForm();
           }
         }
@@ -323,21 +370,18 @@ export function ProductManagementSection({
     setQty(product.stock > 0 ? product.stock.toString() : "");
     setImage(product.image || "");
     setProductCode(product.productCode || "");
-
-    const editingDeal = product.isDeal || product.variation?.includes("Deal") || product.description?.includes("Deal") || product.category === "Deals";
-    
-    if (editingDeal) {
-      setFormType("Deal");
-      setCategory("Deals");
-      setDealItems(product.dealItems || []);
-      setHasVariations(false);
-    } else {
-      setFormType("Product");
-      setCategory(product.category);
-      setHasVariations(false);
-    }
-    
+    setCategory(product.category);
+    setCompany(product.company || "");
+    setHasVariations(false);
     setVariation(product.variation || "Standard");
+    // Carry through whatever deal-only fields this product already had
+    // (there's no UI here to change them) so saving doesn't strip an
+    // existing Deal's isDeal/dealItems - see preservedDealFields above.
+    setPreservedDealFields({
+      isDeal: !!product.isDeal,
+      dealItems: product.dealItems || [],
+      description: product.description || "",
+    });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -371,10 +415,10 @@ export function ProductManagementSection({
   // one variation/Product document at a time).
   function handleEditGroupClick(group: ProductGroup) {
     resetForm();
-    setFormType(group.isDeal ? "Deal" : "Product");
     setIsEditingGroup(true);
     setName(group.name);
     setCategory(group.category);
+    setCompany(group.company || "");
     setImage(group.image || "");
     setHasVariations(true);
     setOriginalGroupVariationIds(new Set(group.variations.map((v) => String(v.id))));
@@ -394,9 +438,9 @@ export function ProductManagementSection({
   // group (e.g. adding "Large" to a Pizza that currently only has Small/Medium).
   function handleAddVariationClick(group: ProductGroup) {
     resetForm();
-    setFormType("Product");
     setName(group.name);
     setCategory(group.category);
+    setCompany(group.company || "");
     setImage(group.image || "");
     setHasVariations(true);
     setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
@@ -410,15 +454,33 @@ export function ProductManagementSection({
   function handleAddVariationFromEdit() {
     const groupName = name;
     const groupCategory = category;
+    const groupCompany = company;
     const groupImage = image;
     resetForm();
-    setFormType("Product");
     setName(groupName);
     setCategory(groupCategory);
+    setCompany(groupCompany);
     setImage(groupImage);
     setHasVariations(true);
     setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // Handles a file picked (or dropped) via the "Upload Photo" button/input -
+  // resizes it client-side and sets the resulting data: URI as the form's
+  // `image` string.
+  async function handleImageFileSelected(file: File | null) {
+    if (!file) return;
+    try {
+      setIsUploadingImage(true);
+      const dataUrl = await resizeImageToDataUrl(file);
+      setImage(dataUrl);
+    } catch (error) {
+      popup({ tone: "error", title: "Couldn't use that photo", message: error instanceof Error ? error.message : "Failed to process that image." });
+    } finally {
+      setIsUploadingImage(false);
+      if (imageFileInputRef.current) imageFileInputRef.current.value = "";
+    }
   }
 
   function toggleGroup(key: string) {
@@ -433,33 +495,27 @@ export function ProductManagementSection({
     });
   }
 
-  const directoryProducts = useMemo(
-    () =>
-      products.filter((p) =>
-        formType === "Deal"
-          ? p.isDeal || p.category.toLowerCase().includes("deal")
-          : !p.isDeal && !p.category.toLowerCase().includes("deal")
-      ),
-    [products, formType]
-  );
-
+  // Shows every product, including any existing Deals (with their own "Deal
+  // Bundle" badge/read-only item list below) - there's no separate Deal
+  // creation mode to filter by anymore, so this is just one combined
+  // directory an admin can view/search/edit from.
   const directoryGroups = useMemo<ProductGroup[]>(() => {
     const map = new Map<string, ProductGroup>();
     const order: string[] = [];
     // Reversed so the oldest-created item of each group appears first,
     // matching the previous (ungrouped) directory ordering.
-    for (const p of [...directoryProducts].reverse()) {
+    for (const p of [...products].reverse()) {
       const key = p.isDeal ? `deal:${p.id}` : `${p.category}::${p.name}`;
       let group = map.get(key);
       if (!group) {
-        group = { key, name: p.name, category: p.category, image: p.image, isDeal: !!p.isDeal, variations: [] };
+        group = { key, name: p.name, category: p.category, company: p.company, image: p.image, isDeal: !!p.isDeal, variations: [] };
         map.set(key, group);
         order.push(key);
       }
       group.variations.push(p);
     }
     return order.map((key) => map.get(key)!);
-  }, [directoryProducts]);
+  }, [products]);
 
   return (
     <div className={cardClassName}>
@@ -477,136 +533,82 @@ export function ProductManagementSection({
       ) : null}
 
       <div className="rounded-[32px] border border-slate-100 bg-slate-50 p-6 space-y-6 shadow-sm">
-        
-        {/* Toggle Form Type */}
-        {!editingId && !isEditingGroup && (
-          <div className="flex bg-slate-200/40 p-1.5 rounded-[20px] mb-2">
-            <button
-              type="button"
-              onClick={() => { setFormType("Product"); setHasVariations(true); }}
-              className={`flex-1 py-3 px-4 rounded-2xl text-sm transition-all ${formType === "Product" ? "bg-white text-indigo-700 font-black shadow-sm" : "text-slate-500 font-bold hover:text-slate-900 hover:bg-slate-200/50"}`}>
-              Add Product
-            </button>
-            <button
-              type="button" 
-              onClick={() => { setFormType("Deal"); setHasVariations(false); }} 
-              className={`flex-1 py-3 px-4 rounded-2xl text-sm transition-all ${formType === "Deal" ? "bg-white text-indigo-700 font-black shadow-sm" : "text-slate-500 font-bold hover:text-slate-900 hover:bg-slate-200/50"}`}>
-              Create Deal
-            </button>
-          </div>
-        )}
 
         {(editingId || isEditingGroup) && (
           <h4 className="text-sm font-black uppercase text-indigo-600 tracking-wider flex items-center gap-2 border-b border-indigo-100 pb-3">
-            <Edit size={16} /> {isEditingGroup ? `Edit ${formType} (all variations)` : `Edit ${formType}`}
+            <Edit size={16} /> {isEditingGroup ? "Edit Product (all variations)" : "Edit Product"}
           </h4>
         )}
-        
+
         {/* Category comes first on purpose - it's the top of the hierarchy
             (Category -> Sub Category/Item -> Sizes) a menu naturally follows,
             e.g. "Pizza" -> "Behari Kabab" -> Small/Medium/Large. Existing
             categories are one tap away as chips so building out a menu
             doesn't mean retyping "Pizza" for every single item. */}
-        {formType === "Product" && (
-          <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
-            <input
-              type="text"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              list="categories-list"
-              placeholder="e.g. Pizza"
-              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-            />
-            <datalist id="categories-list">
-              {categories.map((c, i) => (
-                <option key={i} value={c} />
+        <div className="space-y-2">
+          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
+          <input
+            type="text"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            list="categories-list"
+            placeholder="e.g. Khad, Spray, Seed"
+            className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+          />
+          <datalist id="categories-list">
+            {categories.map((c, i) => (
+              <option key={i} value={c} />
+            ))}
+          </datalist>
+          {categories.filter((c) => c !== "All").length > 0 ? (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {categories.filter((c) => c !== "All").map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setCategory(c)}
+                  className={`rounded-full px-3.5 py-1.5 text-[11px] font-black transition-all ${category === c ? "bg-indigo-600 text-white shadow-sm" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-600"}`}
+                >
+                  {c}
+                </button>
               ))}
-            </datalist>
-            {categories.filter((c) => c !== "All").length > 0 ? (
-              <div className="flex flex-wrap gap-2 pt-1">
-                {categories.filter((c) => c !== "All").map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setCategory(c)}
-                    className={`rounded-full px-3.5 py-1.5 text-[11px] font-black transition-all ${category === c ? "bg-indigo-600 text-white shadow-sm" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-600"}`}
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        )}
+            </div>
+          ) : null}
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-2">
             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">
-              {formType === "Deal" ? "Deal Name" : "Sub Category (Item Name)"}
+              Company (Optional)
+            </label>
+            <input
+              type="text"
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+              placeholder="e.g. Engro, Fauji, FFC"
+              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">
+              Product Name
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={formType === "Deal" ? "e.g. Family Feast Combo" : "e.g. Behari Kabab"}
+              placeholder="e.g. Urea, DAP, Antracool, Poma"
               className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
             />
-            {formType === "Product" ? (
-              <p className="text-[10px] font-bold text-slate-400 ml-1">This is what shows as its own card under "{category || "Category"}" - add its sizes/flavours below.</p>
-            ) : null}
+            <p className="text-[10px] font-bold text-slate-400 ml-1">This is what shows as its own card under "{category || "Category"}" - add its sizes/flavours below.</p>
           </div>
         </div>
 
-        {formType === "Deal" && (
-           <div className="space-y-2">
-             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2"><ListChecks size={14} /> Select Items for this Deal {dealItems.length > 0 ? <span className="text-indigo-500">({dealItems.length} selected)</span> : null}</label>
-             <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input
-                   value={dealItemSearch}
-                   onChange={(event) => setDealItemSearch(event.target.value)}
-                   placeholder="Search products to add..."
-                   className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm font-semibold outline-none focus:border-indigo-400"
-                />
-             </div>
-             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[280px] overflow-y-auto p-4 bg-slate-100/50 rounded-3xl ring-1 ring-slate-200 inset-shadow-sm">
-                {products
-                  .filter(p => !p.isDeal && !p.category.toLowerCase().includes("deal"))
-                  .filter(p => {
-                     const q = dealItemSearch.trim().toLowerCase();
-                     if (!q) return true;
-                     return p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || (p.variation || "").toLowerCase().includes(q);
-                  })
-                  .map(p => {
-                   const isSelected = dealItems.includes(String(p.id));
-                   return (
-                     <label key={p.id} className={`flex items-start gap-4 p-4 rounded-[20px] cursor-pointer transition-all ${isSelected ? 'bg-indigo-600 ring-2 ring-indigo-600 shadow-inner text-white' : 'bg-white ring-1 ring-slate-200 hover:ring-indigo-300 text-slate-700'}`}>
-                        <input 
-                           type="checkbox"
-                           className="mt-0.5 w-5 h-5 rounded accent-indigo-500"
-                           checked={isSelected}
-                           onChange={(e) => {
-                              if (e.target.checked) setDealItems([...dealItems, String(p.id)]);
-                              else setDealItems(dealItems.filter(id => id !== String(p.id)));
-                           }}
-                        />
-                        <div className="flex-1 mt-0.5">
-                           <div className={`text-sm font-black ${isSelected ? 'text-white' : 'text-slate-900'}`}>{p.name} {p.variation && p.variation !== "Standard" ? <span className="opacity-70 font-bold ml-1">({p.variation})</span> : ""}</div>
-                           <div className={`text-xs font-bold mt-1 ${isSelected ? 'text-indigo-200' : 'text-slate-400'}`}>PKR {p.price}</div>
-                        </div>
-                     </label>
-                   )
-                })}
-             </div>
-           </div>
-        )}
-
-        {/* Global Price & Qty for single product or deal */}
-        {(formType === "Deal" || (!hasVariations || editingId)) && (
+        {/* Global Price & Qty for a single (non-variation) product */}
+        {(!hasVariations || editingId) && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-2">
             <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{formType === "Deal" ? "Total Deal Price" : "Price"}</label>
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Price</label>
               <div className="relative">
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 font-black text-[14px]">PKR</span>
                 <input
@@ -638,7 +640,7 @@ export function ProductManagementSection({
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
-            {formType === "Product" && editingId && (
+            {editingId && (
               <div className="space-y-2 md:col-span-2">
                 <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Variation Name</label>
                 <div className="flex flex-wrap items-center gap-3">
@@ -664,8 +666,8 @@ export function ProductManagementSection({
           </div>
         )}
 
-        {/* Variations UI Only For Products */}
-        {formType === "Product" && !editingId && (
+        {/* Variations UI - only when creating a brand new product */}
+        {!editingId && (
           <div className="pt-2">
             <label className="flex items-center gap-3 cursor-pointer mb-4 p-4 rounded-2xl bg-white ring-1 ring-slate-200 hover:bg-slate-50 transition-colors">
               <input
@@ -781,27 +783,49 @@ export function ProductManagementSection({
           </div>
         )}
 
-        {/* Visual SVGs Selection */}
+        {/* Product Photo - manual upload only (the old preset restaurant-
+            icon grid - burgers, pizza slices, etc. - was removed as not
+            relevant to every business; resolveProductImage still falls back
+            to a clean generic placeholder when a product has no photo). */}
         <div className="pt-2">
-          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 block mb-3">Display Icon</label>
-          <div className="flex items-center gap-3 overflow-x-auto pb-4 pt-1 px-1 snap-x no-scrollbar">
-             <button 
-               type="button" 
-               onClick={() => setImage("")} 
-               className={`shrink-0 w-[72px] h-[72px] rounded-[24px] border-2 flex items-center justify-center transition-all snap-start ${image === "" ? "border-indigo-500 bg-indigo-50 text-indigo-600 shadow-sm" : "border-slate-200 bg-white text-slate-400 hover:border-indigo-300 hover:text-indigo-400 shadow-sm"}`}
-             >
-               <Package size={26} strokeWidth={2.5}/>
-             </button>
-             {AVAILABLE_ICONS.map(icon => (
+          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 block mb-3">Product Photo</label>
+          <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-dashed border-slate-300 bg-white p-4">
+            <div className="h-16 w-16 shrink-0 overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
+              <img
+                src={resolveProductImage({ image, name, category })}
+                alt="Product preview"
+                className="h-full w-full object-cover"
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
-                  key={icon}
                   type="button"
-                  onClick={() => setImage(icon)}
-                  className={`shrink-0 w-[72px] h-[72px] rounded-[24px] border-2 flex flex-col items-center justify-center transition-all snap-start overflow-hidden bg-white hover:-translate-y-1 ${image === icon ? "border-indigo-500 shadow-inner ring-4 ring-indigo-50" : "border-slate-200 hover:border-indigo-300 shadow-sm"}`}
+                  onClick={() => imageFileInputRef.current?.click()}
+                  disabled={isUploadingImage}
+                  className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-4 py-2.5 rounded-xl transition-colors shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                   <img src={getProductImageUrl(icon)} alt={icon} className="w-9 h-9 object-contain drop-shadow-sm" />
+                  <Upload size={14} /> {isUploadingImage ? "Processing..." : "Upload Photo"}
                 </button>
-             ))}
+                {image ? (
+                  <button
+                    type="button"
+                    onClick={() => setImage("")}
+                    className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-rose-600 bg-rose-50 hover:bg-rose-100 px-4 py-2.5 rounded-xl transition-colors shadow-sm"
+                  >
+                    <X size={14} /> Remove Photo
+                  </button>
+                ) : null}
+              </div>
+              <input
+                ref={imageFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => void handleImageFileSelected(e.target.files?.[0] ?? null)}
+              />
+              <p className="text-[10px] font-bold text-slate-400">Upload a photo from your device (JPG/PNG) - it's resized automatically.</p>
+            </div>
           </div>
         </div>
 
@@ -813,7 +837,7 @@ export function ProductManagementSection({
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/30 bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] transition-all hover:-translate-y-0.5"
           >
             {(editingId || isEditingGroup) ? <Edit size={16} /> : <Plus size={16} />}
-            {isSaving ? "Saving..." : ((editingId || isEditingGroup) ? `Update ${formType}` : `Publish ${formType}`)}
+            {isSaving ? "Saving..." : ((editingId || isEditingGroup) ? "Update Product" : "Publish Product")}
           </button>
 
           {(editingId || isEditingGroup) && (
@@ -832,7 +856,7 @@ export function ProductManagementSection({
       <div className="mt-10 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-3">
           <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider flex items-center gap-2">
-             <Package size={14} /> {formType === "Deal" ? "Deals Directory" : "Products Directory"} ({directoryGroups.length})
+             <Package size={14} /> Products Directory ({directoryGroups.length})
           </h4>
           <div className="relative w-full sm:w-64">
              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
@@ -904,7 +928,7 @@ export function ProductManagementSection({
                         {group.isDeal && <span className="bg-rose-100 text-rose-600 px-2 py-0.5 rounded-lg text-[10px] uppercase font-black tracking-wider shadow-sm">Deal Bundle</span>}
                       </div>
                       <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mt-1">
-                        {group.category}
+                        {group.category}{group.company ? ` · ${group.company}` : ""}
                       </p>
                       {group.isDeal && single.dealItems && single.dealItems.length > 0 ? (
                         <div className="mt-2 flex flex-wrap gap-1.5">

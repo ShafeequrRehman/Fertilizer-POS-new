@@ -59,19 +59,9 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   // deliberately excluded from Recipe Management below, matching that
   // role's "Ingredient Stock only" restriction).
   { key: 'ingredient-stock', label: 'Ingredient Stock', href: '/dashboard/ingredient-stock', permission: ['inventory.manage', 'stock.manage'], hotkey: 'F5' },
-  { key: 'recipe-management', label: 'Recipe Management', href: '/dashboard/recipe-management', permission: 'inventory.manage', hotkey: 'F6' },
-  // Sidebar/Route Bypass Bug Fix: this used to be deliberately ungated
-  // (table CRUD itself has no backend permission requirement - see
-  // tableRoutes.js's own comment, only the turnover-timer setting needs
-  // 'settings.manage' - so every shop member could reach it regardless).
-  // Now gated on the sidebar/route level by the new 'manage.tables' key -
-  // note the backend table CRUD endpoints themselves are unchanged and
-  // still open to any shop member, so this is a workspace-layout/UI
-  // restriction, not (yet) a backend access boundary.
-  { key: 'dining-tables', label: 'Dining Tables', href: '/dashboard/dining-tables', permission: 'manage.tables', hotkey: 'F7' },
-  { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F8' },
-  { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F9' },
-  { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F10' },
+  { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F6' },
+  { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F7' },
+  { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F8' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
   // Sidebar/Route Bypass Bug Fix: same story as Dining Tables above - used
@@ -120,7 +110,11 @@ export function getFirstAccessiblePage(): string {
   if (role !== 'employee' || (!getIsDashboardHidden() && hasPermission('view.dashboard'))) return '/dashboard';
 
   const firstAllowed = DASHBOARD_PAGES.find((item) => {
-    if ((item.key === 'employees' || item.key === 'payroll') && role !== 'shopowner') return false;
+    // role is narrowed to the literal 'employee' by the guard above, so
+    // this is always true - kept (with an explicit string cast so TS
+    // doesn't flag the comparison as unreachable) as a defensive check in
+    // case that guard is ever loosened later.
+    if ((item.key === 'employees' || item.key === 'payroll') && (role as string) !== 'shopowner') return false;
     if (item.key === 'dashboard') return false;
     if (item.permission) {
       const allowed = Array.isArray(item.permission) ? hasAnyPermission(item.permission) : hasPermission(item.permission);

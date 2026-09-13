@@ -42,11 +42,11 @@ const styles = StyleSheet.create({
   page: { padding: 28, paddingBottom: 36, fontSize: 9, fontFamily: 'Helvetica', color: '#1f2937' },
   header: { marginBottom: 14, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   headerLeft: { flexShrink: 1 },
-  // Restaurant Name - the letterhead every exported PDF opens with, above
+  // Shop Name - the letterhead every exported PDF opens with, above
   // the report's own title. The whole reason this matters: these sheets
   // routinely get forwarded straight to a supplier on WhatsApp with no
   // other context attached, so whoever opens it needs to immediately see
-  // WHICH restaurant's stock order/statement this is, not just what kind
+  // WHICH shop's stock order/statement this is, not just what kind
   // of report it is.
   restaurantName: { fontSize: 16, fontWeight: 700, color: '#111827', letterSpacing: 0.2 },
   title: { fontSize: 12.5, fontWeight: 700, color: '#374151', marginTop: 4 },
@@ -151,12 +151,12 @@ export function ReportPdfDocument({
   // WhatsApp send both call this fresh), not cached or reused across
   // exports.
   const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
-  // Restaurant Name letterhead - read fresh at render time (same
+  // Shop Name letterhead - read fresh at render time (same
   // localStorage-backed source DashboardShell.tsx's sidebar reads, kept
   // current the instant Settings saves a new name via updateCachedShopName)
   // so a stale name is never baked into a PDF someone downloaded before an
   // edit synced.
-  const restaurantName = getAuthShop()?.name || 'Restaurant';
+  const restaurantName = getAuthShop()?.name || 'Shop';
   return (
     <Document>
       <Page size="A4" orientation="landscape" style={styles.page} wrap>

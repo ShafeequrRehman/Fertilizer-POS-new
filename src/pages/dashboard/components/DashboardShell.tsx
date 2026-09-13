@@ -5,7 +5,7 @@ import {
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
   Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
-  Menu, X, Smartphone, Boxes, ChefHat, Table2
+  Menu, X, Smartphone, Boxes
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, getAuthShop, hasPermission, hasAnyPermission, isPageEnabled, getIsDashboardHidden } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
@@ -31,8 +31,6 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   accounting: <Calculator size={18} />,
   purchase: <Package size={18} />,
   'ingredient-stock': <Boxes size={18} />,
-  'recipe-management': <ChefHat size={18} />,
-  'dining-tables': <Table2 size={18} />,
   management: <Users size={18} />,
   dues: <FileText size={18} />,
   ledger: <BookText size={18} />,
@@ -211,7 +209,7 @@ export default function DashboardShell() {
                   (Shop.name, cached at login - see auth.ts's SessionShop)
                   - "Starline" is only the fallback for the rare case that
                   cache is somehow missing. The Shop Owner can override it
-                  from Settings > Restaurant Profile (Restaurant Name),
+                  from Settings > Shop Profile (Shop Name),
                   which patches this same cached value via
                   updateCachedShopName so it shows up here immediately, no
                   re-login needed. */}
@@ -625,7 +623,7 @@ function ShopStatusControl() {
   const canManage = hasPermission('shop.session.manage');
   const [busy, setBusy] = useState(false);
   const { isOnline } = useNetworkStatus();
-  // Day-End Shop Closing Summary Sheet: "Close Restaurant" now opens this
+  // Day-End Shop Closing Summary Sheet: "Close Shop" now opens this
   // review screen first instead of closing immediately - handleClose
   // itself (unresolved-orders confirmation, the actual close call, the
   // success toast) is unchanged and untouched, just triggered from the
@@ -637,18 +635,18 @@ function ShopStatusControl() {
     setBusy(true);
     try {
       if (isDesktopApp() && !isOnline) {
-        // Same offline path as POSPage's "Open Restaurant" button - see
+        // Same offline path as POSPage's "Open Shop" button - see
         // shop-session.tsx's openLocally() and offline-sync.ts's
         // reconciliation step for how this becomes a real ShopSession.
         openLocally();
-        toast.success('Restaurant opened offline. Will sync once back online.');
+        toast.success('Shop opened offline. Will sync once back online.');
         return;
       }
       await openShopSession();
       await refresh();
-      toast.success('Restaurant opened. Orders can now be taken.');
+      toast.success('Shop opened. Orders can now be taken.');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to open restaurant.');
+      toast.error(error instanceof Error ? error.message : 'Failed to open shop.');
     } finally {
       setBusy(false);
     }
@@ -681,7 +679,7 @@ function ShopStatusControl() {
         // while the Unresolved Orders dialog still opens and drives its own
         // "Close Anyway" -> handleClose(true) recursion independently.
         void confirm(
-          `${orders.length} order${orders.length === 1 ? ' is' : 's are'} still pending or unpaid:\n\n${preview}${extra}\n\nClose the restaurant anyway? These orders stay in the system either way.`,
+          `${orders.length} order${orders.length === 1 ? ' is' : 's are'} still pending or unpaid:\n\n${preview}${extra}\n\nClose the shop anyway? These orders stay in the system either way.`,
           { title: 'Unresolved orders', confirmText: 'Close Anyway', tone: 'danger' }
         ).then((confirmed) => {
           if (confirmed) void handleClose(true);
@@ -692,10 +690,10 @@ function ShopStatusControl() {
       await refresh();
       if (result.session) {
         const s = result.session.summary;
-        toast.success(`Restaurant closed. ${s.orderCount} order${s.orderCount === 1 ? '' : 's'}, PKR ${s.totalSales.toLocaleString()} total sales.`);
+        toast.success(`Shop closed. ${s.orderCount} order${s.orderCount === 1 ? '' : 's'}, PKR ${s.totalSales.toLocaleString()} total sales.`);
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to close restaurant.');
+      toast.error(error instanceof Error ? error.message : 'Failed to close shop.');
     } finally {
       setBusy(false);
     }
@@ -711,11 +709,11 @@ function ShopStatusControl() {
         type="button"
         onClick={handleOpen}
         disabled={busy || !canManage}
-        title={canManage ? 'Open the restaurant to start taking orders' : 'Only a Manager or Restaurant Owner can open the restaurant'}
+        title={canManage ? 'Open the shop to start taking orders' : 'Only a Manager or Shop Owner can open the shop'}
         className="flex items-center gap-1.5 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <Store size={13} />
-        {busy ? 'Opening...' : 'Open Restaurant'}
+        {busy ? 'Opening...' : 'Open Shop'}
       </button>
     );
   }
@@ -740,7 +738,7 @@ function ShopStatusControl() {
           className="flex items-center gap-1.5 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-2.5 py-1.5 text-xs font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition-colors hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Lock size={13} />
-          {busy ? 'Closing...' : 'Close Restaurant'}
+          {busy ? 'Closing...' : 'Close Shop'}
         </button>
       )}
       {showClosingSummary && (

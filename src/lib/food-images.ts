@@ -2,13 +2,14 @@
 // the app (POS product grid + cart + variation picker, Sales order cards/
 // detail, Record page item rows, etc.) - see Technical Requirement: "if
 // pizza then add [a real] pizza image, if burger then add [a real] burger
-// image... everywhere its [used]". The existing icon picker in
-// ProductManagementSection.tsx only ever offers 33 flat, single-color SVG
-// glyphs (public/products/*.svg) - fine as a tiny admin-picker thumbnail,
-// but never good enough as the actual photo shown to staff ringing up an
-// order or a customer-facing screen. This module maps every one of those
-// SVGs (and free-typed product names/categories) to a matching real photo
-// instead, without requiring anyone to re-pick anything.
+// image... everywhere its [used]". ProductManagementSection.tsx used to
+// offer a picker of 33 flat, single-color SVG glyphs (public/products/*.svg)
+// before manual photo upload was added - fine as a tiny admin-picker
+// thumbnail, but never good enough as the actual photo shown to staff
+// ringing up an order or a customer-facing screen. This module maps every
+// one of those old SVG filenames (and free-typed product names/categories)
+// to a matching real photo instead, so products saved back when the picker
+// still existed keep looking right with no re-picking needed.
 //
 // Photos are hotlinked from images.unsplash.com (Unsplash's own CDN, not a
 // deprecated "random by keyword" redirector) using specific, verified photo
@@ -54,9 +55,11 @@ const PHOTOS = {
   defaultFood: photo("1504674900247-0877df9cc836"),
 } as const;
 
-// Direct 1:1 map for every filename the "Display Icon" picker offers (see
-// ProductManagementSection.tsx AVAILABLE_ICONS) - a product that already
-// picked one of these gets an exact, unambiguous real photo instantly.
+// Direct 1:1 map for every filename the old "Display Icon" preset picker
+// used to offer (removed from ProductManagementSection.tsx - manual photo
+// upload only now) - kept so any product that already picked one of these
+// filenames before the picker was removed still gets an exact, unambiguous
+// real photo instead of falling through to the generic default.
 const ICON_FILE_TO_PHOTO: Record<string, string> = {
   "beef-burger-combo.svg": PHOTOS.burger,
   "biryani.svg": PHOTOS.biryani,

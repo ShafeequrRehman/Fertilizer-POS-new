@@ -602,58 +602,6 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-// POST /api/orders/:id/extend-timer
-// No longer wired to any UI button - table expiry is now fully automatic
-// (see autoFreeExpiredTable above and lib/notifications.tsx's poll), with
-// no staff decision to make, so there's nothing left to "extend" from.
-// Left in place rather than removed in case a future need for it comes
-// back; harmless and unused otherwise.
-exports.extendTableTimer = async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    if (order.status !== "pending") {
-      return res.status(400).json({ error: "Only a still-pending order's table timer can be extended." });
-    }
-    order.timerExtendedMinutes = Number(order.timerExtendedMinutes || 0) + 10;
-    await order.save();
-    res.json({ ...order.toObject(), id: String(order._id) });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// POST /api/orders/:id/clear-table
-// Frees this order's table for a new order immediately (everywhere - the
-// occupancy checks above, and every terminal's POS table grid on its next
-// poll) without changing the order's own status, since the order itself
-// might still need completing/paying later (e.g. a walk-out, or the bill
-// gets settled at a different table). Table expiry now auto-clears itself
-// (see autoFreeExpiredTable and lib/notifications.tsx's poll) - this
-// endpoint is what that auto-clear calls under the hood; it's no longer
-// reachable from any staff-facing button.
-exports.clearTableTimer = async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    const order = await Order.findOne({ _id: req.params.id, ...buildShopScope(req) });
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    order.tableTimerCleared = true;
-    await order.save();
-    res.json({ ...order.toObject(), id: String(order._id) });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
 // POST /api/orders/import-offline
 // Called by the desktop app's offline sync engine (see
 // pos-web/src/lib/offline-sync.ts) every 5 minutes (and on demand) once
@@ -933,35 +881,6 @@ exports.importOfflineOrders = async (req, res) => {
 // without the phone needing its own Bluetooth printer. Cancelled orders are
 // excluded (nothing to cook); oldest first so tickets come out in the order
 // they were actually placed.
-// GET /api/orders/dinein/occupied-tables
-// Deliberately separate from getOrders above (and its date/since bound) -
-// a DineIn table needs to stay marked "occupied" for as long as its order
-// is still pending, even if that order was placed days ago and just never
-// got completed/cancelled (see POSPage.tsx's occupiedTables check, which
-// blocks a table from being picked for a brand-new order while it's
-// already tied to one). Bounding this by date the way getOrders does would
-// silently let a stale-but-still-open old order's table look "free"
-// again, which is exactly the double-booking this feature exists to
-// prevent. Safe to leave unbounded regardless of a shop's order history
-// size: a "pending DineIn order" count can never realistically exceed the
-// shop's own physical table count, so this result set is always small.
-exports.getOccupiedDineInTables = async (req, res) => {
-  try {
-    const orders = await Order.find({
-      ...buildShopScope(req),
-      orderType: "DineIn",
-      status: "pending",
-      table: { $nin: [null, ""] },
-    })
-      .select("table")
-      .lean();
-    const tables = Array.from(new Set(orders.map((order) => order.table).filter(Boolean)));
-    res.json({ tables });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
 exports.getUnprintedKitchenOrders = async (req, res) => {
   try {
     // .lean() + no per-document .toObject() below - this is read-only

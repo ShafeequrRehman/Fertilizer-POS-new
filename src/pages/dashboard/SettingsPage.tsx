@@ -18,7 +18,7 @@ import { useToast } from '@/lib/toast';
 
 export default function SettingsPage() {
   const { toast } = useToast();
-  const [activeSection, setActiveSection] = useState("Restaurant Profile");
+  const [activeSection, setActiveSection] = useState("Shop Profile");
   const [settings, setSettings] = useState<StoreSettings | null>(null);
   const [printers, setPrinters] = useState<string[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -123,7 +123,7 @@ export default function SettingsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const menuItems = [
-    { id: "Restaurant Profile", icon: <Store size={18} /> },
+    { id: "Shop Profile", icon: <Store size={18} /> },
     { id: "Manage Products", icon: <Package size={18} /> },
     { id: "Manage Receipt", icon: <Receipt size={18} /> },
     { id: "Sidebar Pages", icon: <Eye size={18} /> },
@@ -310,13 +310,13 @@ export default function SettingsPage() {
             <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Restaurant Name</label>
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Shop Name</label>
                 <input
                   type="text"
                   value={shopName}
                   onChange={e => setShopName(e.target.value)}
                   disabled={shopProfileLoading}
-                  placeholder="Your restaurant's name"
+                  placeholder="Your shop's name"
                   className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none disabled:opacity-50"
                 />
               </div>
@@ -332,13 +332,13 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Restaurant Address</label>
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Shop Address</label>
               <textarea
                 rows={3}
                 value={shopAddress}
                 onChange={e => setShopAddress(e.target.value)}
                 disabled={shopProfileLoading}
-                placeholder="Your restaurant's address"
+                placeholder="Your shop's address"
                 className="w-full p-4 bg-slate-50 rounded-2xl border-none focus:ring-2 focus:ring-indigo-500 font-bold outline-none resize-none disabled:opacity-50"
               />
             </div>

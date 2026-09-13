@@ -39,7 +39,7 @@ const PERMISSIONS = [
   // only the data these keys authorize - not just a UI-hidden superset of
   // the full report). Independent of reports.view: a role can hold one,
   // both, or neither of these without ever gaining the full Day-End report.
-  { key: "reports.view.own_sales", label: "View Own Sales Report", module: "Reports", description: "View only their own daily personal sales - no restaurant-wide analytics, cost, or profit figures." },
+  { key: "reports.view.own_sales", label: "View Own Sales Report", module: "Reports", description: "View only their own daily personal sales - no shop-wide analytics, cost, or profit figures." },
   { key: "reports.view.inventory", label: "View Inventory Reports", module: "Reports", description: "View kitchen stock purchase logs and supplier dues - no revenue or profit figures." },
   { key: "employees.manage", label: "Manage Employees", module: "Employees", description: "Create, edit, and remove employee accounts and roles." },
   { key: "settings.manage", label: "Manage Settings", module: "Settings", description: "Change shop profile, receipt, and hardware settings." },
@@ -70,7 +70,6 @@ const PERMISSIONS = [
   // "Hasan" in the override modal) without touching the whole role. Either
   // one hiding it is enough - see dashboard-pages.ts/DashboardPageClient.tsx.
   { key: "view.dashboard", label: "View Dashboard", module: "Workspace Access", description: "See the main Dashboard home page (sales/order overview) after logging in." },
-  { key: "manage.tables", label: "Manage Dining Tables", module: "Workspace Access", description: "View and manage the Dining Tables page - table layout, categories, and turnover timers." },
   { key: "manage.devices", label: "Manage Connect Devices", module: "Workspace Access", description: "View and manage the Connect Devices page - local network/offline sync setup." },
 ];
 
@@ -79,13 +78,16 @@ const PERMISSION_KEYS = PERMISSIONS.map((permission) => permission.key);
 // Sensible starting permission sets for the default roles the migration /
 // shop-creation flow seeds automatically. Shop owners can freely edit or
 // delete these afterward - they are not hardcoded elsewhere.
-// Sidebar/Route Bypass Bug Fix: every default role below gets all three
-// new Workspace Access keys (view.dashboard/manage.tables/manage.devices) -
-// before those keys existed, Dashboard/Dining Tables/Connect Devices were
-// ungated and every role could already see them, so a freshly-seeded shop
-// should keep that exact behavior on day one. A Shop Owner can freely
-// uncheck any of these per-role (or per-employee) afterward.
-const WORKSPACE_ACCESS_DEFAULTS = ["view.dashboard", "manage.tables", "manage.devices"];
+// Sidebar/Route Bypass Bug Fix: every default role below gets both Workspace
+// Access keys (view.dashboard/manage.devices) - before those keys existed,
+// Dashboard/Connect Devices were ungated and every role could already see
+// them, so a freshly-seeded shop should keep that exact behavior on day one.
+// A Shop Owner can freely uncheck any of these per-role (or per-employee)
+// afterward. ("manage.tables" - Dining Tables - was removed along with the
+// Dining Tables feature itself; a Role document from before that still has
+// the string in its stored permissions array is harmless, it just no longer
+// corresponds to anything.)
+const WORKSPACE_ACCESS_DEFAULTS = ["view.dashboard", "manage.devices"];
 
 const DEFAULT_ROLE_PRESETS = {
   Cashier: ["sales.create", "sales.print", "customers.manage", ...WORKSPACE_ACCESS_DEFAULTS],

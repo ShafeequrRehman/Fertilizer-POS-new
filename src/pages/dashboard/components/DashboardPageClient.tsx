@@ -534,7 +534,7 @@ function formatTime(value: Date) {
 function buildDashboardWindow(session: ShopSession | null, now: Date): BusinessWindow {
   const window = getBusinessWindow(session, now);
   if (!window.hasSession) {
-    return { ...window, label: 'No shift yet — open the restaurant to start counting orders' };
+    return { ...window, label: 'No shift yet — open the shop to start counting orders' };
   }
 
   const label = window.isOpen

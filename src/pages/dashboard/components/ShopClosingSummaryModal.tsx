@@ -11,7 +11,7 @@ function formatMoney(amount: number) {
 }
 
 // Day-End Shop Closing Summary Sheet - opened by ShopStatusControl's
-// "Close Restaurant" button (DashboardShell.tsx) BEFORE the shop is
+// "Close Shop" button (DashboardShell.tsx) BEFORE the shop is
 // actually closed, so whoever's closing out the shift can review the
 // day's real numbers - Total Revenue, Expenses Breakdown split into
 // Kitchen Stock vs Manual Operations, Net Profit, Total Orders (Dine-In/
@@ -251,7 +251,7 @@ export default function ShopClosingSummaryModal({
                 disabled={confirming || closing}
                 className="flex w-full items-center justify-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-4 py-3.5 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_8px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Lock size={16} /> {confirming || closing ? 'Closing...' : 'Confirm & Close Restaurant'}
+                <Lock size={16} /> {confirming || closing ? 'Closing...' : 'Confirm & Close Shop'}
               </button>
             </div>
           )}

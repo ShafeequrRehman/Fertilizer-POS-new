@@ -24,6 +24,11 @@ const productSchema = new mongoose.Schema(
     // ambiguous about which product to add - enforced by the partial unique
     // index below (only applies to non-empty values).
     productCode: { type: String, default: "", trim: true },
+    // Optional company/brand name (e.g. "Engro", "Fauji", "FFC") - lets a
+    // shop selling branded goods (fertilizer, pesticide, seed, etc.) record
+    // who makes a product, separately from the product's own name. Purely
+    // informational - not used in any grouping/uniqueness logic.
+    company: { type: String, default: "", trim: true },
   },
   { timestamps: true }
 );

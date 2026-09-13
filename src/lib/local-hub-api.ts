@@ -1,7 +1,6 @@
 import axios from 'axios';
 import { getIpcRenderer } from '@/lib/electron-bridge';
 import { isDesktopApp } from '@/lib/api';
-import type { Table } from '@/lib/pos-types';
 
 // Talks to THIS till's own Local Hub (backend/localHub/server.js), always
 // on localhost since it's embedded in this same Electron app - never the
@@ -189,11 +188,6 @@ export interface ReferenceDataSnapshot {
   // EmployeesPage.tsx's staff form populate its Role dropdown while
   // offline.
   roles: unknown[];
-  // This shop's custom DineIn table labels (Shop.tables), if any - see
-  // src/lib/table-options.ts's getTableOptions for how POSPage.tsx/
-  // SalesPage.tsx fall back to the default numbered list when this is
-  // empty/missing.
-  tables: string[];
 }
 
 export async function pushReferenceData(data: {
@@ -206,8 +200,6 @@ export async function pushReferenceData(data: {
   // frequent products/waiters-only push) can leave this out entirely
   // rather than being forced to explicitly wipe it with [].
   roles?: unknown[];
-  // Same omit-to-preserve convention as roles above.
-  tables?: string[];
 }) {
   // Make sure the key is cached before this runs at least once per app
   // session - harmless if already cached (getPairingInfo is idempotent).
@@ -271,30 +263,6 @@ export async function pushIngredientsCache(data: { ingredients: unknown[]; categ
 export async function getIngredientsCache(): Promise<IngredientsCacheSnapshot> {
   if (!getCachedPairingKey()) await getPairingInfo();
   const response = await hub.get<IngredientsCacheSnapshot>('/ingredients-cache');
-  return response.data;
-}
-
-// --- Dine-In table grid offline snapshot ----------------------------------
-// See backend/localHub/tablesCache.js for the full design - a read-only
-// cache of this shop's real Table records (id/name/isFamily/isActive),
-// pushed down while online, read back by POSPage.tsx the moment a live
-// GET /tables call fails. Deliberately separate from ReferenceDataSnapshot's
-// own `tables` field above (that one is just a shop's plain custom table-
-// name LABELS, Shop.tables) - this is the richer per-table record set the
-// Dine-In grid actually renders/locks against.
-export interface TablesCacheSnapshot {
-  updatedAt: string | null;
-  tables: Table[];
-}
-
-export async function pushTablesCache(tables: Table[]) {
-  if (!getCachedPairingKey()) await getPairingInfo();
-  await hub.post('/tables-cache', { tables });
-}
-
-export async function getTablesCache(): Promise<TablesCacheSnapshot> {
-  if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.get<TablesCacheSnapshot>('/tables-cache');
   return response.data;
 }
 
@@ -655,24 +623,3 @@ export async function markEmployeeDeleteFailed(id: string, error: string) {
   await hub.post(`/employees/deletes/${id}/fail`, { error });
 }
 
-// --- DineIn table-occupancy cache (see backend/localHub/occupiedTablesCache.js)
-// - deliberately separate from, and never bounded the way, getOrdersCache
-// above is (14 days) - an old pending DineIn order must keep marking its
-// table occupied for as long as it stays open, however many days ago it
-// was placed. See POSPage.tsx's loadOccupiedTables.
-
-export interface OccupiedTablesSnapshot {
-  updatedAt: string | null;
-  tables: string[];
-}
-
-export async function pushOccupiedTablesCache(tables: string[]) {
-  if (!getCachedPairingKey()) await getPairingInfo();
-  await hub.post('/occupied-tables-cache', { tables });
-}
-
-export async function getOccupiedTablesCache(): Promise<OccupiedTablesSnapshot> {
-  if (!getCachedPairingKey()) await getPairingInfo();
-  const response = await hub.get<OccupiedTablesSnapshot>('/occupied-tables-cache');
-  return response.data;
-}

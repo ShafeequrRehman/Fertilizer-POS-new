@@ -1,30 +1,23 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CheckCircle2, Clock, Save } from "lucide-react";
-import { clearOrderTableTimer, fetchOrders, fetchTableSettings } from "@/lib/pos-api";
-import type { SavedOrder } from "@/lib/pos-types";
-import { isTableTimerExpired, tableTimerAlertKey } from "@/lib/table-timer";
-import { hasPermission } from "@/lib/auth";
 import { playToastSound } from "@/lib/audio-feedback";
 
 // Real-time operational-event notification system - separate from the
 // generic toast/popup/confirm system in lib/toast.tsx (that one stays for
-// ad-hoc UI messages like validation errors or "table just got taken").
-// This one is specifically for the three business events tracked with real
-// history: a table's timer expiring, an order being saved, and an order
+// ad-hoc UI messages like validation errors). This one is for business
+// events tracked with real history: an order being saved and an order
 // being completed. Mounted once at the app root (see main.tsx) so it's
 // live no matter which screen staff are on.
 //
 // No blocking pop-ups anywhere in this system by design - every one of
 // these events surfaces ONLY as a stacked, auto-dismissing toast plus a
-// bell-history entry. This also owns the table-timer polling that used to
-// live in the old TableTimerAlertWatcher.tsx (now retired - see that
-// file): there is no staff decision involved any more at all - a table
-// whose turnover window elapses is cleared automatically, right here, the
-// moment this poll notices it (backend/controllers/orderController.js's
-// autoFreeExpiredTable is the same rule's server-side backstop, covering
-// the gap before this poll's next tick). Completing an order frees its
-// table the same way it always has, simply by no longer being "pending".
+// bell-history entry.
+//
+// "table_timer_expired" is a retired notification kind (Dining Tables has
+// been removed) - kept in the union/style maps below only so any
+// still-referenced historical/leftover values don't break the TS build; it
+// is never emitted anymore.
 export type NotificationKind = "table_timer_expired" | "order_saved" | "order_completed" | "info";
 
 export interface AppNotification {
@@ -44,10 +37,6 @@ export const EDITABLE_WINDOW_MS = 10 * 60 * 1000;
 // How long a single toast stays on screen before auto-dismissing - the
 // decreasing progress bar on each toast animates over exactly this long.
 export const TOAST_DURATION_MS = 5000;
-
-// How often the table-timer watch polls for newly-expired Dine-In orders -
-// same cadence the old TableTimerAlertWatcher.tsx used.
-const TABLE_TIMER_POLL_MS = 6000;
 
 // How many past notifications the bell's history keeps - old enough
 // entries just fall off the end rather than growing unbounded for a shop
@@ -112,10 +101,6 @@ export function formatNotificationAge(createdAt: number): string {
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   return `${hours}h ${mins % 60}m ago`;
-}
-
-function orderNumber(order: SavedOrder) {
-  return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, "0");
 }
 
 export function NotificationProvider({ children }: { children: ReactNode }) {
@@ -185,69 +170,6 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, [navigate]);
 
   const markAllRead = useCallback(() => setUnreadCount(0), []);
-
-  // ---- Table timer watch (moved here from the old TableTimerAlertWatcher.tsx) ----
-  // Same gate as POS/Sales access - only staff who actually work orders and
-  // tables need this.
-  const canWatchTables = hasPermission("sales.create");
-  // Keys (see tableTimerAlertKey) already surfaced as a notification - a key
-  // is only ever added once, so the notification fires exactly once per
-  // expiry even though this polls every TABLE_TIMER_POLL_MS.
-  const notifiedKeysRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!canWatchTables) return;
-    let cancelled = false;
-
-    async function poll() {
-      try {
-        const [orders, settings] = await Promise.all([
-          fetchOrders({ status: "pending", orderType: "DineIn" }),
-          fetchTableSettings(),
-        ]);
-        if (cancelled) return;
-        const minutes = settings?.tableTurnoverMinutes || 45;
-        const expired = (orders ?? [])
-          .filter((order) => order.table && !order.tableTimerCleared && isTableTimerExpired(order, minutes))
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-        // Fully automatic now - no staff decision, no modal to tap into.
-        // The instant this poll notices a table past its turnover window,
-        // it clears that table right away (same clearOrderTableTimer call
-        // the old manual "Clear Table" button used) and just informs staff
-        // it happened. orderController.js's autoFreeExpiredTable is the
-        // same rule enforced server-side too, so a table is never actually
-        // blocked waiting on this poll's next tick.
-        for (const order of expired) {
-          const key = tableTimerAlertKey(order);
-          if (!notifiedKeysRef.current.has(key)) {
-            notifiedKeysRef.current.add(key);
-            notify("table_timer_expired", `Table ${order.table}'s ${minutes}-min timer expired (Order #${orderNumber(order)}) - table auto-cleared for a new order.`);
-            void clearOrderTableTimer(order.id).catch((clearError) => {
-              // Non-fatal - the backend's own autoFreeExpiredTable check
-              // will free the table anyway the next time anyone tries to
-              // use it, even if this particular call failed.
-              console.error("Failed to auto-clear expired table timer:", clearError);
-            });
-          }
-        }
-      } catch (error) {
-        // Non-blocking - the watch just skips this cycle; the next poll
-        // retries. Table selection itself is still separately protected
-        // server-side in orderController.createOrder regardless of
-        // whether this watch ever notices.
-        console.error("Failed to poll table timers:", error);
-      }
-    }
-
-    void poll();
-    const interval = setInterval(() => void poll(), TABLE_TIMER_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canWatchTables]);
 
   const value = useMemo<NotificationContextValue>(
     () => ({ notifications, unreadCount, notify, markAllRead }),

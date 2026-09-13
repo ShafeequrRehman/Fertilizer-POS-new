@@ -62,7 +62,7 @@ export default function LicenseExpiredPage() {
           </div>
           <div className="flex items-center justify-center gap-2 text-gray-500">
             <Phone size={14} />
-            <span>Reference your Restaurant ID when reaching out</span>
+            <span>Reference your Shop ID when reaching out</span>
           </div>
         </div>
 

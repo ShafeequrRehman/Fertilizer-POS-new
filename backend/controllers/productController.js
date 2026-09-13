@@ -12,6 +12,7 @@ exports.getProducts = async (req, res) => {
     query.$or = [
       { name: { $regex: safeSearch, $options: "i" } },
       { category: { $regex: safeSearch, $options: "i" } },
+      { company: { $regex: safeSearch, $options: "i" } },
     ];
   }
   // .lean() - read-only list, fetched on every POS/Sales/Record page load

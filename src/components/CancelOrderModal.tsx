@@ -116,7 +116,7 @@ export default function CancelOrderModal({
 
   async function submit() {
     if (!key.trim()) {
-      setError("Enter the restaurant's Cancel Order Key.");
+      setError("Enter the shop's Cancel Order Key.");
       return;
     }
     setSubmitting(true);
@@ -167,7 +167,7 @@ export default function CancelOrderModal({
           <div>
             <h2 className="text-xl font-black text-gray-900">Cancel Order #{orderLabel}</h2>
             <p className="mt-1 text-xs font-bold text-gray-400">
-              Ask the Restaurant Owner for the Cancel Order Key set up in the Super Admin panel.
+              Ask the Shop Owner for the Cancel Order Key set up in the Super Admin panel.
             </p>
           </div>
           <button type="button" onClick={onClose} className="glass-pill rounded-full p-2.5 text-gray-500 transition hover:bg-white/70 hover:text-gray-900">

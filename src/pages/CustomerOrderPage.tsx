@@ -7,7 +7,6 @@ import {
   fetchPublicCustomerStatus,
   fetchPublicMenu,
   fetchPublicOrderStatus,
-  fetchPublicTables,
   initiatePublicPayment,
   requestOrderChange,
   type PaymentRedirect,
@@ -17,8 +16,16 @@ import {
   type PublicOrderStatus,
   type PublicChangeRequest,
 } from '@/lib/public-order-api';
-import { getTableOptions, formatTableLabel } from '@/lib/table-options';
 import { getApiBaseCandidates } from '@/lib/api';
+
+// A plain numbered table ("5") still needs the "Table " prefix to read as
+// a table at all - a custom label already reads fine on its own. Only ever
+// used for a pre-existing Dine-In order's historical table display below
+// (Dining Tables/table selection has been removed from the ordering flow
+// itself).
+function formatTableLabel(table: string): string {
+  return /^\d+$/.test(table) ? `Table ${table}` : table;
+}
 
 // The customer-facing QR ordering PWA (see Settings > Customer Ordering for
 // how a shop gets its link/QR) - reachable at /order/:shopId with NO login,
@@ -38,7 +45,9 @@ import { getApiBaseCandidates } from '@/lib/api';
 // rejects it, not to be the source of truth for any of those checks itself.
 
 type CartLine = { product: PublicMenuProduct; quantity: number };
-type OrderType = 'DineIn' | 'TakeAway' | 'Delivery';
+// Dine-In/table selection has been removed from customer ordering - a
+// customer can only place a Takeaway or Delivery order now.
+type OrderType = 'TakeAway' | 'Delivery';
 
 const formatter = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 });
 
@@ -121,7 +130,7 @@ function clearSavedOrderId(shopId: string) {
 }
 
 const TRACKING_LABELS: Record<string, { label: string; tone: string }> = {
-  awaiting_confirmation: { label: 'Waiting for the restaurant to accept your order', tone: 'bg-amber-50 text-amber-800' },
+  awaiting_confirmation: { label: 'Waiting for the shop to accept your order', tone: 'bg-amber-50 text-amber-800' },
   confirmed: { label: 'Order confirmed - getting started', tone: 'bg-blue-50 text-blue-800' },
   preparing: { label: 'Preparing your order', tone: 'bg-indigo-50 text-indigo-800' },
   ready: { label: 'Ready', tone: 'bg-emerald-50 text-emerald-800' },
@@ -501,7 +510,7 @@ function ChangeRequestModal({
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Anything else to tell the restaurant about this request..."
+          placeholder="Anything else to tell the shop about this request..."
           rows={2}
           className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none"
         />
@@ -514,7 +523,7 @@ function ChangeRequestModal({
           disabled={!canSubmit}
           className="mt-4 w-full rounded-2xl bg-[#E2F33C] py-3.5 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {submitting ? 'Sending Request...' : 'Send Request to Restaurant'}
+          {submitting ? 'Sending Request...' : 'Send Request to Shop'}
         </button>
       </div>
     </div>
@@ -684,7 +693,7 @@ function OrderStatusPanel({
 
         {changeRequest && changeRequest.status === 'pending' ? (
           <div className="mt-3 rounded-2xl bg-amber-50 p-4 text-left text-xs font-bold text-amber-800">
-            <p>Your change request is waiting for the restaurant's approval:</p>
+            <p>Your change request is waiting for the shop's approval:</p>
             <ul className="mt-1.5 space-y-0.5">
               {changeRequest.addItems.map((item, index) => (
                 <li key={`add-${index}`}>+ {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</li>
@@ -908,16 +917,12 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   const [cart, setCart] = useState<Map<string, CartLine>>(new Map());
   const [showCart, setShowCart] = useState(false);
 
-  const [orderType, setOrderType] = useState<OrderType>('DineIn');
+  const [orderType, setOrderType] = useState<OrderType>('TakeAway');
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerAddress, setCustomerAddress] = useState('');
   const [note, setNote] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Online' | 'JazzCash' | 'EasyPaisa'>('Cash');
-
-  const [tables, setTables] = useState<string[]>([]);
-  const [occupiedTables, setOccupiedTables] = useState<Set<string>>(new Set());
-  const [table, setTable] = useState('');
 
   const [activeOrderWarning, setActiveOrderWarning] = useState<{ id: string; orderType: string; table: string; dailyOrderNumber: number } | null>(null);
   const phoneCheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -940,7 +945,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         setMenu(result);
       } catch (err) {
         const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-        setLoadError(message || "Couldn't load this restaurant's menu. Please try again.");
+        setLoadError(message || "Couldn't load this shop's menu. Please try again.");
       } finally {
         setLoading(false);
       }
@@ -978,27 +983,6 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     setShowIosInstallHint(isIos && !isStandalone);
   }, []);
 
-  useEffect(() => {
-    if (!shopId || orderType !== 'DineIn') return undefined;
-    let cancelled = false;
-    async function load() {
-      try {
-        const result = await fetchPublicTables(shopId);
-        if (cancelled) return;
-        setTables(result.tables);
-        setOccupiedTables(new Set(result.occupied));
-      } catch {
-        // Best-effort - the backend re-checks at submit time regardless.
-      }
-    }
-    void load();
-    const intervalId = window.setInterval(load, 15000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [shopId, orderType]);
-
   // Checked regardless of which order type is currently selected - the
   // one-active-order-per-phone restriction applies across Dine-In/
   // Takeaway/Delivery alike now (see publicOrderController.js's
@@ -1024,7 +1008,6 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   }, [shopId, customerPhone]);
 
   const products = menu?.products || [];
-  const tableOptions = getTableOptions(tables);
   // Category -> product name -> size/variation, same three-level browse as
   // desktop's POSPage.tsx (see groupMenuProducts' own comment) - "Pizza"
   // (category) contains "Special Pizza" (one tile/group), which opens a
@@ -1085,8 +1068,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
     menu?.isOpen &&
     customerName.trim().length >= 2 &&
     phoneDigits.length >= 10 &&
-    (orderType !== 'Delivery' || customerAddress.trim().length >= 5) &&
-    (orderType !== 'DineIn' || Boolean(table));
+    (orderType !== 'Delivery' || customerAddress.trim().length >= 5);
 
   async function handlePlaceOrder() {
     if (!canSubmit || placing) return;
@@ -1109,7 +1091,6 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       }
       const result = await createPublicOrder(shopId, {
         orderType,
-        table: orderType === 'DineIn' ? table : undefined,
         customer: { name: customerName.trim(), phone: customerPhone.trim(), address: customerAddress.trim() },
         paymentMethod,
         note: note.trim(),
@@ -1181,7 +1162,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
 
       {!menu?.isOpen ? (
         <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 p-4 text-xs font-bold text-amber-800">
-          <AlertCircle size={16} /> This restaurant is currently closed and isn't taking orders right now.
+          <AlertCircle size={16} /> This shop is currently closed and isn't taking orders right now.
         </div>
       ) : null}
 
@@ -1317,14 +1298,14 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
             <div className="mt-5 space-y-3">
               <p className="text-xs font-black uppercase tracking-[0.14em] text-gray-400">Order Type</p>
               <div className="flex gap-2">
-                {(['DineIn', 'TakeAway', 'Delivery'] as OrderType[]).map((type) => (
+                {(['TakeAway', 'Delivery'] as OrderType[]).map((type) => (
                   <button
                     key={type}
                     type="button"
                     onClick={() => setOrderType(type)}
                     className={`flex-1 rounded-xl py-2.5 text-xs font-black ${orderType === type ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}
                   >
-                    {type === 'DineIn' ? 'Dine-In' : type}
+                    {type}
                   </button>
                 ))}
               </div>
@@ -1359,28 +1340,6 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 </div>
               ) : null}
 
-              {orderType === 'DineIn' && !activeOrderWarning ? (
-                <div>
-                  <p className="mb-2 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Choose Your Table</p>
-                  <div className="flex flex-wrap gap-2">
-                    {tableOptions.map((tableNumber) => {
-                      const isOccupied = occupiedTables.has(tableNumber) && table !== tableNumber;
-                      const isActive = table === tableNumber;
-                      return (
-                        <button
-                          key={tableNumber}
-                          type="button"
-                          disabled={isOccupied}
-                          onClick={() => setTable(tableNumber)}
-                          className={`rounded-xl px-3 py-2 text-xs font-black ${isActive ? 'bg-black text-white' : isOccupied ? 'cursor-not-allowed bg-gray-100 text-gray-300' : 'bg-[#F8F9FB] text-gray-700'}`}
-                        >
-                          {formatTableLabel(tableNumber)}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : null}
 
               <p className="mt-3 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Payment</p>
               <div className="flex flex-wrap gap-2">
@@ -1401,7 +1360,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 ) : null}
               </div>
               {paymentMethod === 'Online' ? (
-                <p className="text-[11px] font-semibold text-gray-400">You'll pay the restaurant directly online (bank transfer, EasyPaisa, or JazzCash) - they'll confirm your order once payment is received.</p>
+                <p className="text-[11px] font-semibold text-gray-400">You'll pay the shop directly online (bank transfer, EasyPaisa, or JazzCash) - they'll confirm your order once payment is received.</p>
               ) : paymentMethod === 'JazzCash' || paymentMethod === 'EasyPaisa' ? (
                 <p className="text-[11px] font-semibold text-gray-400">You'll be taken to {paymentMethod}'s secure payment page next - your order is confirmed automatically once payment clears.</p>
               ) : null}

@@ -7,9 +7,7 @@ const referenceData = require("./referenceData");
 const orderCache = require("./orderCache");
 const localStaff = require("./localStaff");
 const employeesCache = require("./employeesCache");
-const occupiedTablesCache = require("./occupiedTablesCache");
 const ingredientsCache = require("./ingredientsCache");
-const tablesCache = require("./tablesCache");
 
 // The Local Hub: a small, self-contained Express server that runs inside
 // the desktop (Electron) app ALWAYS, independent of whether this till
@@ -205,18 +203,6 @@ app.get("/employees-cache", requirePairingKey, (req, res) => {
   res.json(employeesCache.get());
 });
 
-// DineIn table-occupancy cache - see occupiedTablesCache.js. Same
-// push/read shape as /orders-cache and /employees-cache above, but
-// deliberately never date-bounded.
-app.post("/occupied-tables-cache", requireLoopback, (req, res) => {
-  const snapshot = occupiedTablesCache.set(req.body?.tables || []);
-  res.json(snapshot);
-});
-
-app.get("/occupied-tables-cache", requirePairingKey, (req, res) => {
-  res.json(occupiedTablesCache.get());
-});
-
 // Ingredient Stock / Recipe Management offline snapshot - see
 // ingredientsCache.js for the full design. Same push (loopback)/read
 // (pairing-key) shape as the caches above.
@@ -227,18 +213,6 @@ app.post("/ingredients-cache", requireLoopback, (req, res) => {
 
 app.get("/ingredients-cache", requirePairingKey, (req, res) => {
   res.json(ingredientsCache.get());
-});
-
-// Dine-In table grid offline snapshot - see tablesCache.js for the full
-// design. Same push (loopback)/read (pairing-key) shape as the caches
-// above.
-app.post("/tables-cache", requireLoopback, (req, res) => {
-  const snapshot = tablesCache.set(req.body?.tables);
-  res.json(snapshot);
-});
-
-app.get("/tables-cache", requirePairingKey, (req, res) => {
-  res.json(tablesCache.get());
 });
 
 // Queue an order locally - called by a paired phone's Checkout screen, or

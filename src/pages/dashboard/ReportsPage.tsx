@@ -171,7 +171,7 @@ function CategoryComboBox({ value, onChange, options, placeholder }: {
 
 // Role-Based Security: which report a logged-in account actually sees.
 // Full 'reports.view' (Owner/Manager/Accountant) keeps the existing
-// restaurant-wide Day-End Profit report exactly as it was. The
+// shop-wide Day-End Profit report exactly as it was. The
 // Receptionist role has only 'reports.view.own_sales' - their own daily
 // sales, nothing else. The Stock Manager role has only
 // 'reports.view.inventory' - kitchen stock logs + supplier dues, nothing
