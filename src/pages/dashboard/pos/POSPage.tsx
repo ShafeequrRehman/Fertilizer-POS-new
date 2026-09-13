@@ -720,6 +720,18 @@ export default function POSPage() {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, price: nextPrice } : item)));
   }
 
+  // Lets a cashier click the quantity number itself and type an exact
+  // amount (e.g. "34") instead of only tapping +/- one at a time. The
+  // input below is deliberately uncontrolled (keyed on the committed
+  // quantity - see its own comment) so the cashier's in-progress typing is
+  // never fought by a re-render; this handler only runs once, on blur/
+  // Enter, to commit whatever was typed back into the cart.
+  function handleQuantityInputChange(index: number, value: string) {
+    const parsedQuantity = Math.max(1, Math.floor(Number(value)) || 1);
+    setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: parsedQuantity } : item)));
+    setActiveCartItemIndex(index);
+  }
+
   function handleRemoveItem(index: number) {
     setCart((previousCart) => previousCart.filter((_, itemIndex) => itemIndex !== index));
     // The active-cart-item pointer (see its own comment above) needs to
@@ -1741,7 +1753,24 @@ export default function POSPage() {
                 {!item.specialType ? (
                 <div className="glass-pill flex items-center gap-1 rounded-full p-1">
                   <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Minus size={10} /></button>
-                  <span className="min-w-5 text-center text-xs font-black">{item.quantity}</span>
+                  {/* Uncontrolled + remounted-on-commit: keying on the
+                      committed item.quantity means the box only ever
+                      resets to the cart's real value right after a commit
+                      (this input's own blur/Enter, or the +/- buttons) -
+                      never mid-keystroke, so typing "34" isn't fought by
+                      a re-render on every character. */}
+                  <input
+                    key={`qty-${item.id}-${item.variation}-${index}-${item.quantity}`}
+                    type="number"
+                    min={1}
+                    defaultValue={item.quantity}
+                    onFocus={(event) => event.target.select()}
+                    onBlur={(event) => handleQuantityInputChange(index, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') event.currentTarget.blur();
+                    }}
+                    className="w-9 min-w-5 rounded-md border border-transparent bg-transparent text-center text-xs font-black text-gray-900 outline-none focus:border-white/70 focus:bg-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  />
                   <button type="button" onClick={() => handleIncreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Plus size={10} /></button>
                 </div>
                 ) : null}
