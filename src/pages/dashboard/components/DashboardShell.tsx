@@ -5,7 +5,7 @@ import {
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
   Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
-  Menu, X, Smartphone, Boxes, ChefHat
+  Menu, X, Smartphone, Boxes
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, getAuthShop, hasPermission, hasAnyPermission, isPageEnabled, getIsDashboardHidden } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
@@ -33,7 +33,6 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   accounting: <Calculator size={18} />,
   purchase: <Package size={18} />,
   'ingredient-stock': <Boxes size={18} />,
-  'recipe-management': <ChefHat size={18} />,
   management: <Users size={18} />,
   dues: <FileText size={18} />,
   ledger: <BookText size={18} />,

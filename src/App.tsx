@@ -15,7 +15,6 @@ import PrintOrderPage from '@/pages/dashboard/sales/PrintOrderPage';
 import AccountingPage from '@/pages/dashboard/AccountingPage';
 import PurchasePage from '@/pages/dashboard/PurchasePage';
 import IngredientStockPage from '@/pages/dashboard/IngredientStockPage';
-import RecipeManagementPage from '@/pages/dashboard/RecipeManagementPage';
 import ManagementPage from '@/pages/dashboard/ManagementPage';
 import DuesPage from '@/pages/dashboard/DuesPage';
 import LedgerPage from '@/pages/dashboard/LedgerPage';
@@ -110,9 +109,6 @@ export default function App() {
             </Route>
             <Route element={<RequirePermission permission={['inventory.manage', 'stock.manage']} />}>
               <Route path="ingredient-stock" element={<IngredientStockPage />} />
-            </Route>
-            <Route element={<RequirePermission permission="inventory.manage" />}>
-              <Route path="recipe-management" element={<RecipeManagementPage />} />
             </Route>
             <Route element={<RequirePermission permission="customers.manage" />}>
               <Route path="management" element={<ManagementPage />} />
