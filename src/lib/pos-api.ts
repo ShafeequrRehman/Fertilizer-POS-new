@@ -385,6 +385,32 @@ export async function fetchRecipes() {
   }
 }
 
+export async function fetchRecipeForProduct(productId: string) {
+  try {
+    const response = await api.get<(Recipe & { _id?: string }) | null>(`/recipes/product/${productId}`);
+    return response.data ? normalizeRecipe(response.data) : null;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function saveRecipeForProduct(productId: string, ingredients: Array<{ ingredientId: string; quantity: number; unit?: IngredientUnit }>) {
+  try {
+    const response = await api.put<Recipe & { _id?: string }>(`/recipes/product/${productId}`, { ingredients });
+    return normalizeRecipe(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteRecipeForProduct(productId: string) {
+  try {
+    await api.delete(`/recipes/product/${productId}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // --- Ingredient Purchases (Purchasing/Financial Logic Task 1) ---
 
 function normalizeIngredientPurchase(purchase: IngredientPurchase & { _id?: string }) {

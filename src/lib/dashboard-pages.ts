@@ -59,6 +59,16 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   // deliberately excluded from Recipe Management below, matching that
   // role's "Ingredient Stock only" restriction).
   { key: 'ingredient-stock', label: 'Ingredient Stock', href: '/dashboard/ingredient-stock', permission: ['inventory.manage', 'stock.manage'], hotkey: 'F5' },
+  // Restored (was removed in an earlier pass along with Dining Tables/Create
+  // Deal as part of a restaurant->fertilizer-shop declutter): a shop that
+  // resells raw stock directly under a Product with the same name/unit as
+  // its Ingredient (e.g. "Urea") still needs this to link the two, since
+  // that's what services/stockService.js's automatic deduction on every
+  // order actually reads - without a recipe here, selling a product never
+  // touches its Ingredient stock at all, recipe or not. No hotkey assigned
+  // here so the existing F6/F7/F8 badges on Customers & HR/Dues/Ledger below
+  // don't have to shift.
+  { key: 'recipe-management', label: 'Recipe Management', href: '/dashboard/recipe-management', permission: 'inventory.manage' },
   { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F6' },
   { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F7' },
   { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F8' },
