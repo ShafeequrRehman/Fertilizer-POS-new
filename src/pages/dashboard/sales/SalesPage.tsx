@@ -20,6 +20,7 @@ import { useNotifications } from '@/lib/notifications';
 import AddItemsManager from '@/pages/dashboard/sales/components/AddItemsManager';
 import CancelOrderModal from '@/components/CancelOrderModal';
 import { resolveProductImage, resolveOrderImage } from '@/lib/food-images';
+import { useLanguage } from '@/i18n';
 
 const BASE_FILTERS = ['All', 'Dine In', 'Take Away', 'Delivery'];
 
@@ -85,6 +86,7 @@ function isReceiptPdfResult(value: unknown): value is ReceiptPdfResult {
 export default function SalesPage() {
   const { toast, popup, confirm } = useToast();
   const { notify } = useNotifications();
+  const { t } = useLanguage();
   // The hidden auto-print iframe (see printReadyUrl further down) loads
   // PrintOrderPage.tsx in its own separate React tree - a toast shown from
   // inside it would render invisibly in that hidden iframe. It posts a
@@ -274,8 +276,8 @@ export default function SalesPage() {
       }
     } catch {
       const diagnostics = await getLocalHubStartDiagnostics();
-      const reason = diagnostics && !diagnostics.started ? ` (${diagnostics.error || 'failed to start'})` : '';
-      setStatus({ tone: 'error', text: `Couldn't reach this till's own Local Hub${reason} - restart the app to enable offline order history.` });
+      const reason = diagnostics && !diagnostics.started ? ` (${diagnostics.error || t('sales.failedToStart')})` : '';
+      setStatus({ tone: 'error', text: t('sales.localHubUnreachable', { reason }) });
     }
   }
 
@@ -315,7 +317,7 @@ export default function SalesPage() {
         setLoading(false);
       }
     }
-    if (!isAuthenticated()) setStatus({ tone: 'info', text: 'Login token not found. Sales updates will not sync to MongoDB until you log in again.' });
+    if (!isAuthenticated()) setStatus({ tone: 'info', text: t('sales.loginTokenMissing') });
     void load();
     // Shop status can change (someone closes the shop) while this page is
     // sitting open, so the shift window is kept in sync the same way
@@ -416,9 +418,9 @@ export default function SalesPage() {
       || (filter === 'Take Away' && order.orderType === 'TakeAway')
       || (filter === 'Delivery' && order.orderType === 'Delivery')
       || order.waiter === filter;
-    const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order)} ${phoneLabel(order)}`.toLowerCase();
+    const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order, t)} ${phoneLabel(order, t)}`.toLowerCase();
     return byFilter && haystack.includes(search.toLowerCase());
-  }), [filter, shiftOrders, search]);
+  }), [filter, shiftOrders, search, t]);
 
   // Every currently pending order shop-wide, with NO shift/date bound - a
   // still-open DineIn table or unclosed Delivery has to stay findable here
@@ -444,9 +446,9 @@ export default function SalesPage() {
       || (filter === 'Take Away' && order.orderType === 'TakeAway')
       || (filter === 'Delivery' && order.orderType === 'Delivery')
       || order.waiter === filter;
-    const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order)} ${phoneLabel(order)}`.toLowerCase();
+    const haystack = `${order.id} ${order.dailyOrderNumber ?? ''} ${label(order, t)} ${phoneLabel(order, t)}`.toLowerCase();
     return byFilter && haystack.includes(search.toLowerCase());
-  }), [filter, allPendingOrders, search]);
+  }), [filter, allPendingOrders, search, t]);
 
   // The Completed tab - unlike visibleOrders above, sourced from
   // filteredOrders (shift-scoped) rather than an unbounded fetch, so it
@@ -680,10 +682,10 @@ export default function SalesPage() {
           setOrders((previous) => previous.map((order) => order.id === id ? found : order));
           setSelectedOrder(found);
         } else {
-          toast.error("This order isn't in this till's local cache - try again once back online.");
+          toast.error(t('sales.orderNotInLocalCache'));
         }
       } catch {
-        toast.error("Couldn't refresh this order offline.");
+        toast.error(t('sales.couldNotRefreshOffline'));
       }
       return;
     }
@@ -692,7 +694,7 @@ export default function SalesPage() {
       setOrders((previous) => previous.map((order) => order.id === id ? updated : order));
       setSelectedOrder(updated);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not refresh this order.');
+      toast.error(err instanceof Error ? err.message : t('sales.couldNotRefreshOrder'));
     }
   }
 
@@ -755,7 +757,7 @@ export default function SalesPage() {
     );
     const match = exactMatch ?? visibleOrders[0];
     if (!match) {
-      toast.error(`No pending order found matching "${trimmed}".`);
+      toast.error(t('sales.noPendingOrderFound', { query: trimmed }));
       return;
     }
     setStatusTab('pending');
@@ -830,12 +832,12 @@ export default function SalesPage() {
         setStatus({
           tone: 'info',
           text: willPrintKitchen
-            ? `Saved - kitchen ticket printed. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`
-            : isOnline ? 'Saved - syncing to the cloud...' : 'Saved - will sync once back online.',
+            ? (isOnline ? t('sales.savedKitchenPrintedSyncing') : t('sales.savedKitchenPrintedOffline'))
+            : isOnline ? t('sales.savedSyncingToCloud') : t('sales.savedWillSyncOffline'),
         });
         return updated;
       } catch (err) {
-        setStatus({ tone: 'error', text: err instanceof Error ? err.message : 'Could not save this change.' });
+        setStatus({ tone: 'error', text: err instanceof Error ? err.message : t('sales.couldNotSaveChange') });
         return null;
       }
     }
@@ -971,7 +973,7 @@ export default function SalesPage() {
           : { ...order, previousDues: customerDue };
         reportPrintOutcome(
           ipcRenderer.invoke('print-cashier-receipt-data', receiptData, settings.counterPrinter, printLogo, settings),
-          'Customer receipt',
+          t('sales.customerReceiptLabel'),
           toast,
         );
       } catch {
@@ -1006,7 +1008,7 @@ export default function SalesPage() {
     const paid = full ? payable : Math.max(0, Math.min(tendered, payable));
     const changeAmount = Math.max(tendered - payable, 0);
     if (!full && (paid < 0 || paid > payable)) {
-      popup({ tone: 'error', title: 'Invalid Payment Amount', message: 'Enter a valid payment amount.' });
+      popup({ tone: 'error', title: t('sales.invalidPaymentAmountTitle'), message: t('sales.enterValidPaymentAmount') });
       return;
     }
     // Zero payment (empty field + "Put in Pending" ticked, or a literal
@@ -1025,7 +1027,7 @@ export default function SalesPage() {
     // an unpaid due with no confirmation at all. Typing any real amount
     // (partial or full via the field) never needs the tick.
     if (isZeroPayment && !confirmPending) {
-      popup({ tone: 'error', title: 'Payment Amount Required', message: 'Enter a payment amount, or check "Put in Pending" to confirm this order with no payment collected.' });
+      popup({ tone: 'error', title: t('sales.paymentAmountRequiredTitle'), message: t('sales.paymentAmountRequiredMessage') });
       return;
     }
     // Completing with less than the full payable amount leaves a real due
@@ -1049,8 +1051,8 @@ export default function SalesPage() {
       if (!hasCustomerPhone(selectedOrder) || !selectedOrder.customer.name?.trim()) {
         toast.error(
           isZeroPayment
-            ? "Add the customer's name and phone number before confirming with zero payment - the full amount becomes a due, and dues need a real customer to track them against. Edit the order first, or pay in full instead."
-            : "Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against. Edit the order first, or pay in full instead.",
+            ? t('sales.zeroPaymentCustomerRequired')
+            : t('sales.partialPaymentCustomerRequired'),
         );
         return;
       }
@@ -1063,8 +1065,8 @@ export default function SalesPage() {
     // affirmatively confirm that here ensures it's intentional, not a slip.
     if (isZeroPayment) {
       const proceedWithZeroPayment = await confirm(
-        `No payment will be collected right now for Order #${orderNumber(selectedOrder)} - the full ₨${payable} will be recorded as a due against ${selectedOrder.customer.name}. Continue?`,
-        { title: 'Confirm Zero Payment', confirmText: 'Confirm', tone: 'danger' },
+        t('sales.confirmZeroPaymentMessage', { orderNumber: orderNumber(selectedOrder), payable, customerName: selectedOrder.customer.name ?? '' }),
+        { title: t('sales.confirmZeroPaymentTitle'), confirmText: t('common.confirm'), tone: 'danger' },
       );
       if (!proceedWithZeroPayment) return;
     }
@@ -1093,8 +1095,8 @@ export default function SalesPage() {
     notify(
       'order_completed',
       changeAmount > 0
-        ? `Order #${orderNumber(updated)} completed - Rs ${paid} collected, Rs ${changeAmount} change returned.`
-        : `Order #${orderNumber(updated)} completed - Rs ${paid} collected.`,
+        ? t('sales.orderCompletedChange', { orderNumber: orderNumber(updated), paid, change: changeAmount })
+        : t('sales.orderCompletedNoChange', { orderNumber: orderNumber(updated), paid }),
     );
   }
 
@@ -1133,7 +1135,7 @@ export default function SalesPage() {
       await sendWhatsappDocument(order.customer.phone, result.fileBase64, `receipt-${receiptNumber}.pdf`);
     } catch (error) {
       console.error('Failed to send completed receipt PDF on WhatsApp:', error);
-      setStatus({ tone: 'error', text: 'Order completed, but WhatsApp PDF receipt could not be sent.' });
+      setStatus({ tone: 'error', text: t('sales.whatsappReceiptSendFailed') });
     }
   }
 
@@ -1142,7 +1144,7 @@ export default function SalesPage() {
     setOrders((previous) => previous.map((order) => (order.id === updated.id ? updated : order)));
     setSelectedOrder(updated);
     setShowCancel(false);
-    setStatus({ tone: 'success', text: `Order ${updated.dailyOrderNumber ?? updated.id} cancelled successfully.` });
+    setStatus({ tone: 'success', text: t('sales.orderCancelledSuccessfully', { orderId: updated.dailyOrderNumber ?? updated.id }) });
   }
 
   const [updatingTrackingStatus, setUpdatingTrackingStatus] = useState(false);
@@ -1154,7 +1156,7 @@ export default function SalesPage() {
   // a Delivery order also triggers the WhatsApp rider notification
   // server-side - nothing extra to do here for that.
   async function handleTrackingStatusChange(order: SavedOrder, trackingStatus: TrackingStatus) {
-    if (trackingStatus === 'cancelled' && !window.confirm('Decline/cancel this online order?')) return;
+    if (trackingStatus === 'cancelled' && !window.confirm(t('sales.declineOnlineOrderConfirm'))) return;
     setUpdatingTrackingStatus(true);
     try {
       const updated = await updateOrderTrackingStatus(order.id, trackingStatus);
@@ -1162,10 +1164,10 @@ export default function SalesPage() {
         localEditVersionRef.current += 1;
         setOrders((previous) => previous.map((o) => (o.id === updated.id ? updated : o)));
         setSelectedOrder(updated);
-        toast.success(`Order #${updated.dailyOrderNumber ?? updated.id} marked ${trackingStatus.replace('_', ' ')}.`);
+        toast.success(t('sales.orderMarkedStatus', { orderId: updated.dailyOrderNumber ?? updated.id, status: trackingStepLabel(trackingStatus, t) }));
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not update this order.');
+      toast.error(err instanceof Error ? err.message : t('sales.couldNotUpdateOrder'));
     } finally {
       setUpdatingTrackingStatus(false);
     }
@@ -1188,12 +1190,12 @@ export default function SalesPage() {
         setSelectedOrder(result.order);
         toast.success(
           result.riderNotified
-            ? `Assigned to ${rider.name} - WhatsApp sent.`
-            : `Assigned to ${rider.name}, but the WhatsApp message could not be sent.`,
+            ? t('sales.assignedRiderNotified', { name: rider.name })
+            : t('sales.assignedRiderNotNotified', { name: rider.name }),
         );
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not assign this rider.');
+      toast.error(err instanceof Error ? err.message : t('sales.couldNotAssignRider'));
     } finally {
       setAssigningRider(false);
     }
@@ -1214,58 +1216,58 @@ export default function SalesPage() {
         localEditVersionRef.current += 1;
         setOrders((previous) => previous.map((o) => (o.id === updated.id ? updated : o)));
         setSelectedOrder(updated);
-        toast.success(action === 'approve' ? 'Change request approved - order updated.' : 'Change request declined.');
+        toast.success(action === 'approve' ? t('sales.changeRequestApproved') : t('sales.changeRequestDeclined'));
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not respond to this request.');
+      toast.error(err instanceof Error ? err.message : t('sales.couldNotRespondToRequest'));
     } finally {
       setRespondingToChangeRequest(false);
     }
   }
 
   async function addItems(items: Array<{ name: string; price: number; quantity: number; variation: string; image?: string }>) {
-    if (items.length === 0) return setStatus({ tone: 'error', text: 'Select at least one item.' });
+    if (items.length === 0) return setStatus({ tone: 'error', text: t('sales.selectAtLeastOneItem') });
     const updated = await saveUpdate({ action: 'addItems', items });
     if (!updated) return;
     setShowAddItems(false);
     setStatus(
       isDesktopApp()
-        ? { tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}` }
-        : { tone: 'success', text: `Added ${items.length} item(s) to ${updated.id}.` },
+        ? { tone: 'success', text: isOnline ? t('sales.addedItemsSyncing', { count: items.length, orderId: updated.id }) : t('sales.addedItemsOffline', { count: items.length, orderId: updated.id }) }
+        : { tone: 'success', text: t('sales.addedItemsPlain', { count: items.length, orderId: updated.id }) },
     );
   }
 
   async function handleSendWhatsAppReciept(order: SavedOrder) {
     if (isDesktopApp() && !isOnline) {
-      return setStatus({ tone: 'error', text: 'WhatsApp needs an internet connection - try again once back online.' });
+      return setStatus({ tone: 'error', text: t('sales.whatsappNeedsInternet') });
     }
     if (!order.customer.phone || order.customer.phone === '03000000000') {
-      return setStatus({ tone: 'error', text: 'No valid phone number for this customer.' });
+      return setStatus({ tone: 'error', text: t('sales.noValidPhoneNumber') });
     }
 
     setIsSendingWA(true);
     try {
       const lines = [];
       lines.push(`*The Heaven Slice*`);
-      lines.push(`Order No: *${orderNumber(order)}*`);
-      lines.push(`Total: *PKR ${order.total}*`);
+      lines.push(t('sales.whatsappOrderNo', { number: orderNumber(order) }));
+      lines.push(t('sales.whatsappTotal', { total: order.total }));
       lines.push(`--------------------`);
       order.items.forEach((item) => {
         lines.push(`${item.quantity}x ${item.name} @ PKR ${item.price}`);
       });
       lines.push(`--------------------`);
-      lines.push(`Thank you for your order!`);
+      lines.push(t('sales.whatsappThankYou'));
 
       const message = lines.join('\n');
       const res = await sendWhatsappMessage(order.customer.phone, message);
 
       if (res?.success) {
-        setStatus({ tone: 'success', text: `Receipt sent via WhatsApp to ${order.customer.phone}` });
+        setStatus({ tone: 'success', text: t('sales.receiptSentWhatsApp', { phone: order.customer.phone }) });
       } else {
-        setStatus({ tone: 'error', text: res?.error || 'Failed to send WhatsApp message. Is it connected?' });
+        setStatus({ tone: 'error', text: res?.error || t('sales.whatsappSendFailed') });
       }
     } catch (err) {
-      setStatus({ tone: 'error', text: 'WhatsApp send failed: ' + (err instanceof Error ? err.message : '') });
+      setStatus({ tone: 'error', text: t('sales.whatsappSendFailedPrefix') + (err instanceof Error ? err.message : '') });
     } finally {
       setIsSendingWA(false);
     }
@@ -1278,10 +1280,10 @@ export default function SalesPage() {
           truncated every currency value down to "Rs 45,2..." - illegible),
           4-up from tablet width (sm, 640px) up where there's actually room. */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <StatCard label="Pending Orders" value={String(visibleOrders.length)} />
-        <StatCard label="Completed" value={String(filteredOrders.filter((order) => order.status === 'completed').length)} />
-        <StatCard label="Cancelled" value={String(filteredOrders.filter((order) => order.status === 'cancelled').length)} />
-        <StatCard label="Open Value" value={`Rs ${visibleOrders.reduce((sum, order) => sum + order.total, 0)}`} />
+        <StatCard label={t('sales.stats.pendingOrders')} value={String(visibleOrders.length)} />
+        <StatCard label={t('sales.stats.completed')} value={String(filteredOrders.filter((order) => order.status === 'completed').length)} />
+        <StatCard label={t('sales.stats.cancelled')} value={String(filteredOrders.filter((order) => order.status === 'cancelled').length)} />
+        <StatCard label={t('sales.stats.openValue')} value={`Rs ${visibleOrders.reduce((sum, order) => sum + order.total, 0)}`} />
       </div>
 
       {/* Order detail sits to the right of the order list from tablet width
@@ -1300,16 +1302,16 @@ export default function SalesPage() {
           <div className="glass rounded-[32px] p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="relative w-full lg:max-w-md">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={handleOrderSearchKeyDown} placeholder="Search orders, tables, customers, waiters - Enter to check out" className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none focus:border-[#D6E332]" />
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 rtl:left-auto rtl:right-4" size={18} />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={handleOrderSearchKeyDown} placeholder={t('sales.searchPlaceholder')} className="w-full rounded-full border border-white/60 bg-white/50 py-4 pl-12 pr-4 shadow-inner outline-none focus:border-[#D6E332] rtl:pl-4 rtl:pr-12" />
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <p className="max-w-xs text-xs font-bold text-gray-500">
                   {shopSession
-                    ? `Showing orders for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - not split by calendar date.`
-                    : 'No shift recorded yet. Open the shop to start taking orders.'}
+                    ? (shopSession.status === 'open' ? t('sales.shiftContext.openShift') : t('sales.shiftContext.lastShift'))
+                    : t('sales.shiftContext.noShiftRecorded')}
                 </p>
-                <button type="button" onClick={() => void loadAny()} className="glass-dark rounded-2xl px-4 py-3 text-sm font-black"><RefreshCcw size={16} className="mr-2 inline" />Refresh</button>
+                <button type="button" onClick={() => void loadAny()} className="glass-dark rounded-2xl px-4 py-3 text-sm font-black"><RefreshCcw size={16} className="mr-2 inline rtl:mr-0 rtl:ml-2" />{t('common.refresh')}</button>
               </div>
             </div>
             <div className="mt-4 flex gap-1.5 rounded-full bg-white/40 p-1.5 shadow-inner">
@@ -1318,24 +1320,24 @@ export default function SalesPage() {
                 onClick={() => setStatusTab('pending')}
                 className={`flex-1 rounded-full px-4 py-2.5 text-sm font-black transition ${statusTab === 'pending' ? 'glass-dark' : 'text-gray-500 hover:bg-white/60'}`}
               >
-                Pending ({visibleOrders.length})
+                {t('sales.tabs.pending', { count: visibleOrders.length })}
               </button>
               <button
                 type="button"
                 onClick={() => setStatusTab('completed')}
                 className={`flex-1 rounded-full px-4 py-2.5 text-sm font-black transition ${statusTab === 'completed' ? 'glass-dark' : 'text-gray-500 hover:bg-white/60'}`}
               >
-                Completed ({completedOrders.length})
+                {t('sales.tabs.completed', { count: completedOrders.length })}
               </button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
-              {filters.map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-4 py-2 text-sm font-bold transition ${filter === item ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>{item}</button>)}
+              {filters.map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-4 py-2 text-sm font-bold transition ${filter === item ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>{filterDisplayLabel(item, t)}</button>)}
             </div>
           </div>
 
-          {loading ? <Surface text="Loading orders..." /> : null}
+          {loading ? <Surface text={t('sales.loadingOrders')} /> : null}
           {!loading && activeOrders.length === 0 ? (
-            <Surface text={statusTab === 'pending' ? 'No pending orders matched the current filters.' : 'No completed orders matched the current filters.'} />
+            <Surface text={statusTab === 'pending' ? t('sales.noPendingOrdersFiltered') : t('sales.noCompletedOrdersFiltered')} />
           ) : null}
           {!loading && activeOrders.length > 0 ? (
             // Grid: 1 column on a real phone (this pane is full-width there,
@@ -1381,11 +1383,11 @@ export default function SalesPage() {
                       size no matter how much detail the card underneath it
                       has. */}
                   <div className="relative h-40 w-full shrink-0 overflow-hidden bg-slate-100">
-                    <img src={heroImage} alt={order.items[0]?.name ?? 'Order'} loading="lazy" className="h-full w-full object-cover" />
+                    <img src={heroImage} alt={order.items[0]?.name ?? t('sales.orderImageAlt')} loading="lazy" className="h-full w-full object-cover" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-black/0 to-transparent" />
-                    <span className={`absolute right-2 top-2 rounded-full px-3 py-1 text-[11px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-1px_3px_rgba(0,0,0,0.12)] ${STATUS_BADGE[order.status] ?? 'bg-gray-100 text-gray-600'}`}>{order.status}</span>
-                    <span className="absolute bottom-2 left-2 min-w-0 max-w-[85%] truncate rounded-full bg-white/90 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-gray-700 shadow-sm backdrop-blur-sm">
-                      {age(order.createdAt)} &middot; {formatOrderDateTime(order.createdAt)}
+                    <span className={`absolute right-2 top-2 rounded-full px-3 py-1 text-[11px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-1px_3px_rgba(0,0,0,0.12)] rtl:right-auto rtl:left-2 ${STATUS_BADGE[order.status] ?? 'bg-gray-100 text-gray-600'}`}>{orderStatusLabel(order.status, t)}</span>
+                    <span className="absolute bottom-2 left-2 min-w-0 max-w-[85%] truncate rounded-full bg-white/90 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-gray-700 shadow-sm backdrop-blur-sm rtl:left-auto rtl:right-2">
+                      {age(order.createdAt, t)} &middot; {formatOrderDateTime(order.createdAt)}
                     </span>
                   </div>
                   <div className="p-4">
@@ -1405,34 +1407,34 @@ export default function SalesPage() {
                       >
                         <Globe size={10} className="shrink-0" />
                         <span className="truncate">
-                          {order.trackingStatus === 'awaiting_confirmation' ? 'Online - Waiting Acceptance' : `Online - ${TRACKING_STEP_LABEL[order.trackingStatus] || order.trackingStatus}`}
+                          {order.trackingStatus === 'awaiting_confirmation' ? t('sales.onlineWaitingAcceptance') : t('sales.onlineStatusPrefix', { status: trackingStepLabel(order.trackingStatus, t) })}
                         </span>
                       </div>
                     ) : null}
                     {order.source === 'customer-qr' && order.customerChangeRequest?.status === 'pending' ? (
                       <div className="mb-2 flex animate-pulse items-center gap-1 rounded-lg bg-amber-500 px-2 py-1 text-[9px] font-black uppercase tracking-wide text-white">
                         <Edit3 size={10} className="shrink-0" />
-                        <span className="truncate">Change Requested</span>
+                        <span className="truncate">{t('sales.changeRequestedBadge')}</span>
                       </div>
                     ) : null}
-                    <h3 className="truncate text-lg font-black text-gray-900">Order #{orderNumber(order)}</h3>
+                    <h3 className="truncate text-lg font-black text-gray-900">{t('sales.orderNumberHeading', { number: orderNumber(order) })}</h3>
                     <div className="mt-3 space-y-2 text-sm text-gray-600">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <div className="min-w-0 shrink-0"><Line icon={<UserRound size={15} />} text={label(order)} /></div>
+                        <div className="min-w-0 shrink-0"><Line icon={<UserRound size={15} />} text={label(order, t)} /></div>
                         {order.orderType === 'DineIn' && order.table ? (
                           <>
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100/80 px-2 py-0.5 text-[10px] font-black text-slate-700 shadow-inner">
-                              <Table2 size={10} /> Table {order.table}
+                              <Table2 size={10} /> {t('sales.tableLabel', { table: order.table })}
                             </span>
                             <TableTypeBadge tableName={order.table} isFamily={undefined} />
                           </>
                         ) : null}
                       </div>
-                      <Line icon={<Phone size={15} />} text={phoneLabel(order)} />
-                      <Line icon={<ShoppingBag size={15} />} text={`${prettyType(order)} • ${order.itemCount ?? order.items.length} items`} />
+                      <Line icon={<Phone size={15} />} text={phoneLabel(order, t)} />
+                      <Line icon={<ShoppingBag size={15} />} text={t('sales.orderTypeItemsCount', { type: prettyType(order, t), count: order.itemCount ?? order.items.length })} />
                     </div>
                     <div className={`mt-4 flex items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-black ${STATUS_TOTAL_PILL[order.status] ?? 'glass-dark'}`}>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-white/75">Total</span>
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-white/75">{t('common.total')}</span>
                       <span className="text-white/40">|</span>
                       <span className="truncate">Rs {order.total}</span>
                     </div>
@@ -1449,7 +1451,7 @@ export default function SalesPage() {
                 onClick={() => setVisibleOrderCount((previous) => previous + 10)}
                 className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
               >
-                Load More ({activeOrders.length - pagedOrders.length} more)
+                {t('sales.loadMore', { count: activeOrders.length - pagedOrders.length })}
               </button>
             </div>
           ) : null}
@@ -1460,19 +1462,19 @@ export default function SalesPage() {
             <div className="flex flex-col">
               <div className="shrink-0 border-b border-white/40 p-6">
                 <div className="flex items-start justify-between gap-4">
-                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-500">Order Detail</p><h2 className="mt-2 text-2xl font-black text-gray-900">Order #{orderNumber(selectedOrder)}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p>
+                  <div><p className="text-xs font-black uppercase tracking-[0.18em] text-gray-500">{t('sales.orderDetailLabel')}</p><h2 className="mt-2 text-2xl font-black text-gray-900">{t('sales.orderNumberHeading', { number: orderNumber(selectedOrder) })}</h2><p className="mt-2 text-sm text-gray-500">{formatOrderDateTime(selectedOrder.createdAt)}</p>
                     {/* isSelectedOrderHydrated is false only right after
                         picking a card whose data came from the lean
                         list=true endpoint - a background refreshOne is
                         already in flight (see selectOrder) and this
                         clears itself the moment it lands, same fetch a
                         manual tap of the refresh icon below would do. */}
-                    {!isSelectedOrderHydrated ? <p className="mt-1 text-xs font-bold text-amber-600">Loading full order details...</p> : null}
+                    {!isSelectedOrderHydrated ? <p className="mt-1 text-xs font-bold text-amber-600">{t('sales.loadingFullOrderDetails')}</p> : null}
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     {selectedOrder.customer.phone && selectedOrder.customer.phone !== '03000000000' && (
                       <button disabled={isSendingWA || !isSelectedOrderHydrated} type="button" onClick={() => void handleSendWhatsAppReciept(selectedOrder)} className="rounded-2xl bg-gradient-to-b from-emerald-400 to-emerald-600 px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] disabled:opacity-50">
-                        {isSendingWA ? 'Sending...' : 'WhatsApp'}
+                        {isSendingWA ? t('sales.sendingEllipsis') : 'WhatsApp'}
                       </button>
                     )}
                     <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => {
@@ -1501,14 +1503,14 @@ export default function SalesPage() {
                       } else {
                         setPrintReadyUrl(`/dashboard/sales/print/${selectedOrder.id}?auto=true&type=kitchen`);
                       }
-                    }} className="glass-dark rounded-2xl px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] disabled:opacity-50">Send to Kitchen</button>
-                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => printCustomerReceipt(selectedOrder)} className="glass-pill rounded-2xl px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">Print Receipt</button>
+                    }} className="glass-dark rounded-2xl px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] disabled:opacity-50">{t('sales.sendToKitchen')}</button>
+                    <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => printCustomerReceipt(selectedOrder)} className="glass-pill rounded-2xl px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">{t('sales.printReceipt')}</button>
                     <Link to={`/dashboard/sales/print/${selectedOrder.id}`} className="glass-pill rounded-2xl p-2.5 text-gray-500"><Printer size={16} /></Link>
                     <button type="button" onClick={() => void refreshOne(selectedOrder.id)} className="glass-pill rounded-2xl p-2.5 text-gray-500"><RefreshCcw size={16} /></button>
                     {selectedOrder.status === 'pending' ? (
-                      <Link to={`/dashboard/sales/${selectedOrder.id}/edit`} className="glass-pill rounded-2xl px-3 py-2.5 text-xs font-black text-gray-600">Edit</Link>
+                      <Link to={`/dashboard/sales/${selectedOrder.id}/edit`} className="glass-pill rounded-2xl px-3 py-2.5 text-xs font-black text-gray-600">{t('common.edit')}</Link>
                     ) : (
-                      <span className="glass-pill cursor-not-allowed rounded-2xl px-3 py-2.5 text-xs font-black text-gray-400">Edit Locked</span>
+                      <span className="glass-pill cursor-not-allowed rounded-2xl px-3 py-2.5 text-xs font-black text-gray-400">{t('sales.editLocked')}</span>
                     )}
                   </div>
                 </div>
@@ -1516,22 +1518,22 @@ export default function SalesPage() {
 
               <div className="space-y-5 p-6">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <Box label="Order Number" value={`#${orderNumber(selectedOrder)}`} />
-                  <Box label="Created At" value={formatOrderDateTime(selectedOrder.createdAt)} />
-                  <Box label="Customer" value={label(selectedOrder)} />
+                  <Box label={t('sales.boxLabels.orderNumber')} value={`#${orderNumber(selectedOrder)}`} />
+                  <Box label={t('sales.boxLabels.createdAt')} value={formatOrderDateTime(selectedOrder.createdAt)} />
+                  <Box label={t('sales.boxLabels.customer')} value={label(selectedOrder, t)} />
                   {/* Shows the real "Waiter" label only when there's no real
                       customer phone to show instead (see phoneLabel's own
                       comment) - a Dine-In order placed through the customer
                       QR page always has a real phone and no waiter, a
                       staff-placed Dine-In order usually has the reverse. */}
-                  <Box label={selectedOrder.orderType === 'DineIn' && !hasCustomerPhone(selectedOrder) ? 'Waiter' : 'Phone'} value={phoneLabel(selectedOrder)} />
+                  <Box label={selectedOrder.orderType === 'DineIn' && !hasCustomerPhone(selectedOrder) ? t('sales.boxLabels.waiter') : t('common.phone')} value={phoneLabel(selectedOrder, t)} />
                   {/* Dedicated Waiter box - only shown when there IS a real
                       phone number above (so the waiter box above didn't
                       already cover it) and a waiter is actually assigned,
                       e.g. a Dine-In order a customer placed via QR that
                       staff then assigned a waiter to after the fact. */}
                   {selectedOrder.orderType === 'DineIn' && hasCustomerPhone(selectedOrder) && selectedOrder.waiter ? (
-                    <Box label="Waiter" value={selectedOrder.waiter} />
+                    <Box label={t('sales.boxLabels.waiter')} value={selectedOrder.waiter} />
                   ) : null}
                   {/* Read-only historical display only - Dining Tables (and
                       the ability to reassign one on an existing order) has
@@ -1541,19 +1543,19 @@ export default function SalesPage() {
                   {selectedOrder.orderType === 'DineIn' ? (
                     selectedOrder.table ? (
                       <div className="col-span-2 min-w-0 rounded-[20px] bg-white/50 px-4 py-3 shadow-inner">
-                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">Table</p>
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-500">{t('sales.boxLabels.table')}</p>
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          <span className="whitespace-nowrap text-sm font-black text-gray-900">Table {selectedOrder.table}</span>
+                          <span className="whitespace-nowrap text-sm font-black text-gray-900">{t('sales.tableLabel', { table: selectedOrder.table })}</span>
                           <TableTypeBadge tableName={selectedOrder.table} isFamily={undefined} />
                         </div>
                       </div>
                     ) : (
-                      <Box label="Table" value="N/A" />
+                      <Box label={t('sales.boxLabels.table')} value={t('sales.notApplicable')} />
                     )
                   ) : null}
-                  <Box label="Order Type" value={prettyType(selectedOrder)} />
-                  <Box label="Address" value={selectedOrder.address || 'N/A'} />
-                  <Box label="Payment Method" value={selectedOrder.paymentMethod} />
+                  <Box label={t('sales.boxLabels.orderType')} value={prettyType(selectedOrder, t)} />
+                  <Box label={t('common.address')} value={selectedOrder.address || t('sales.notApplicable')} />
+                  <Box label={t('sales.boxLabels.paymentMethod')} value={selectedOrder.paymentMethod} />
                   {selectedOrder.orderType === 'Delivery' ? (
                     selectedOrder.deliveryLocation?.lat != null && selectedOrder.deliveryLocation?.lng != null ? (
                       <a
@@ -1562,18 +1564,18 @@ export default function SalesPage() {
                         rel="noreferrer"
                         className="min-w-0 rounded-[20px] bg-[#F8F9FB] px-4 py-3 transition hover:bg-gray-100"
                       >
-                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Delivery Location</p>
+                        <p className="truncate text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('sales.boxLabels.deliveryLocation')}</p>
                         <p className="mt-1 flex items-center gap-1.5 text-sm font-bold text-indigo-600">
-                          <MapPin size={12} className="shrink-0" /> Open in Maps
+                          <MapPin size={12} className="shrink-0" /> {t('sales.openInMaps')}
                         </p>
                       </a>
                     ) : (
-                      <Box label="Delivery Location" value="Not shared" />
+                      <Box label={t('sales.boxLabels.deliveryLocation')} value={t('sales.notShared')} />
                     )
                   ) : null}
-                  <Box label="Previous Dues" value={`Rs ${customerDue}`} />
-                  <Box label="Remaining" value={`Rs ${selectedOrder.remainingAmount ?? 0}`} />
-                  {selectedOrder.note ? <Box label="Note" value={selectedOrder.note} /> : null}
+                  <Box label={t('sales.boxLabels.previousDues')} value={`Rs ${customerDue}`} />
+                  <Box label={t('sales.boxLabels.remaining')} value={`Rs ${selectedOrder.remainingAmount ?? 0}`} />
+                  {selectedOrder.note ? <Box label={t('sales.boxLabels.note')} value={selectedOrder.note} /> : null}
                 </div>
 
                 {selectedOrder.source === 'customer-qr' ? (
@@ -1591,16 +1593,16 @@ export default function SalesPage() {
 
                 <div>
                   <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-black uppercase tracking-[0.18em] text-gray-500">Items</h3>
+                    <h3 className="text-sm font-black uppercase tracking-[0.18em] text-gray-500">{t('sales.items')}</h3>
                     {selectedOrder.status === 'pending' ? (
-                      <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => setShowAddItems(true)} className="glass-dark rounded-full px-4 py-2 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50"><PackagePlus size={14} className="mr-2 inline" />Add Items</button>
+                      <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => setShowAddItems(true)} className="glass-dark rounded-full px-4 py-2 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50"><PackagePlus size={14} className="mr-2 inline rtl:mr-0 rtl:ml-2" />{t('sales.addItems')}</button>
                     ) : (
-                      <span className="glass-pill rounded-full px-4 py-2 text-xs font-black text-gray-500">Order Locked</span>
+                      <span className="glass-pill rounded-full px-4 py-2 text-xs font-black text-gray-500">{t('sales.orderLocked')}</span>
                     )}
                   </div>
                   <div className="space-y-3">
                     {!isSelectedOrderHydrated ? (
-                      <p className="text-sm text-gray-400">Loading items...</p>
+                      <p className="text-sm text-gray-400">{t('sales.loadingItems')}</p>
                     ) : (
                       selectedOrder.items.map((item, index) => (
                         <div key={`${item.name}-${index}`} className="flex items-center gap-3 rounded-[24px] bg-white/45 p-3 shadow-inner">
@@ -1609,7 +1611,7 @@ export default function SalesPage() {
                           </div>
                           <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
                             <div className="min-w-0"><p className="truncate font-black text-gray-900">{item.name}</p><p className="text-xs text-gray-500">{item.variation}</p></div>
-                            <div className="shrink-0 text-right"><p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p><p className="text-xs text-gray-500">Qty {item.quantity}</p></div>
+                            <div className="shrink-0 text-right"><p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p><p className="text-xs text-gray-500">{t('sales.qty', { quantity: item.quantity })}</p></div>
                           </div>
                         </div>
                       ))
@@ -1620,8 +1622,8 @@ export default function SalesPage() {
 
               <div className="shrink-0 space-y-4 rounded-b-[32px] border-t border-white/40 bg-white/30 p-6">
                 <div className="rounded-[24px] bg-white/50 p-4 shadow-inner">
-                  <Row label="Subtotal" value={`Rs ${orderSubtotal}`} />
-                  <Row label="Tax" value={`Rs ${orderTax}`} />
+                  <Row label={t('sales.billSummary.subtotal')} value={`Rs ${orderSubtotal}`} />
+                  <Row label={t('sales.billSummary.tax')} value={`Rs ${orderTax}`} />
                   {/* While still pending, this reflects the discount the
                       cashier has typed into the card above but hasn't
                       confirmed yet - a live preview, same figures the
@@ -1635,15 +1637,15 @@ export default function SalesPage() {
                       blank suffix for a flat-value discount. */}
                   {selectedOrder.status === 'pending' ? (
                     discountAmount > 0 ? (
-                      <Row label={`Discount (${discountType === 'percent' ? `${discountRawValue}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${discountAmount}`} />
+                      <Row label={discountType === 'percent' ? t('sales.billSummary.discountPercent', { value: discountRawValue }) : t('sales.billSummary.discountFixed')} value={`-Rs ${discountAmount}`} />
                     ) : null
                   ) : selectedOrder.discount && selectedOrder.discount.amount > 0 ? (
-                    <Row label={`Discount (${selectedOrder.discount.type === 'percent' ? `${selectedOrder.discount.value}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${selectedOrder.discount.amount}`} />
+                    <Row label={selectedOrder.discount.type === 'percent' ? t('sales.billSummary.discountPercent', { value: selectedOrder.discount.value }) : t('sales.billSummary.discountFixed')} value={`-Rs ${selectedOrder.discount.amount}`} />
                   ) : null}
-                  <Row label="Bill Total" value={`Rs ${selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total}`} />
-                  <Row label="Previous Dues" value={`Rs ${customerDue}`} />
-                  <Row label="Paid" value={`Rs ${selectedOrder.paidAmount ?? 0}`} />
-                  <Row label="Grand Total" value={`Rs ${(selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total) + customerDue}`} strong />
+                  <Row label={t('sales.billSummary.billTotal')} value={`Rs ${selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total}`} />
+                  <Row label={t('sales.boxLabels.previousDues')} value={`Rs ${customerDue}`} />
+                  <Row label={t('sales.billSummary.paid')} value={`Rs ${selectedOrder.paidAmount ?? 0}`} />
+                  <Row label={t('sales.billSummary.grandTotal')} value={`Rs ${(selectedOrder.status === 'pending' ? adjustedTotal : selectedOrder.total) + customerDue}`} strong />
                 </div>
                 {selectedOrder.status === 'pending' ? (
                   <div ref={completeButtonsRef} className="grid gap-2.5">
@@ -1653,7 +1655,7 @@ export default function SalesPage() {
                       onClick={() => { setDiscountAmountInput(''); setDiscountPercentInput(''); setShowPayment(true); }}
                       className="flex items-center justify-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-5 py-4 text-lg font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.5),inset_0_-4px_10px_rgba(6,95,70,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <CheckCircle2 size={20} /> Complete Order
+                      <CheckCircle2 size={20} /> {t('sales.completeOrder')}
                     </button>
                     {hasPermission('sales.delete') ? (
                       <button
@@ -1662,25 +1664,25 @@ export default function SalesPage() {
                         onClick={() => setShowCancel(true)}
                         className="flex items-center justify-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-5 py-4 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.35),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        <Lock size={16} /> Cancel Order
+                        <Lock size={16} /> {t('sales.cancelOrder')}
                       </button>
                     ) : null}
                   </div>
                 ) : selectedOrder.status === 'cancelled' ? (
                   <div className="space-y-1.5 rounded-[24px] bg-rose-50/60 px-4 py-4 text-sm font-bold text-rose-700 shadow-inner">
-                    <p>This order was cancelled and kept for record.</p>
-                    {selectedOrder.cancelledBy ? <p className="text-xs font-semibold text-rose-500">Cancelled by {selectedOrder.cancelledBy}{selectedOrder.cancelledAt ? ` · ${formatOrderDateTime(selectedOrder.cancelledAt)}` : ''}</p> : null}
-                    {selectedOrder.cancelReason ? <p className="text-xs font-semibold text-rose-500">Reason: {selectedOrder.cancelReason}</p> : null}
+                    <p>{t('sales.orderCancelledKept')}</p>
+                    {selectedOrder.cancelledBy ? <p className="text-xs font-semibold text-rose-500">{t('sales.cancelledBy', { name: selectedOrder.cancelledBy })}{selectedOrder.cancelledAt ? ` · ${formatOrderDateTime(selectedOrder.cancelledAt)}` : ''}</p> : null}
+                    {selectedOrder.cancelReason ? <p className="text-xs font-semibold text-rose-500">{t('sales.reasonLabel', { reason: selectedOrder.cancelReason })}</p> : null}
                   </div>
-                ) : <div className="rounded-[24px] bg-emerald-50/60 px-4 py-4 text-sm font-bold text-emerald-700 shadow-inner">This order is completed and stored in sales history.</div>}
+                ) : <div className="rounded-[24px] bg-emerald-50/60 px-4 py-4 text-sm font-bold text-emerald-700 shadow-inner">{t('sales.orderCompletedStored')}</div>}
               </div>
             </div>
-          ) : <div className="flex min-h-[680px] flex-col items-center justify-center gap-4 p-6 text-center text-gray-400 lg:min-h-0 lg:h-full"><ShoppingBag size={56} strokeWidth={1.4} /><div><p className="font-bold text-gray-500">Select an order</p><p className="text-sm">Choose any order card from the left.</p></div></div>}
+          ) : <div className="flex min-h-[680px] flex-col items-center justify-center gap-4 p-6 text-center text-gray-400 lg:min-h-0 lg:h-full"><ShoppingBag size={56} strokeWidth={1.4} /><div><p className="font-bold text-gray-500">{t('sales.selectOrderTitle')}</p><p className="text-sm">{t('sales.selectOrderHint')}</p></div></div>}
         </aside>
       </div>
 
       {showPayment && selectedOrder ? (
-        <Modal title="Complete Payment" onClose={() => { setShowPayment(false); setConfirmPending(false); }}>
+        <Modal title={t('sales.completePaymentTitle')} onClose={() => { setShowPayment(false); setConfirmPending(false); }}>
           <div
             className="space-y-4"
             onKeyDown={(event) => {
@@ -1701,17 +1703,17 @@ export default function SalesPage() {
                 comment) - this modal just reviews the figures it already
                 produces, read-only. */}
             <div className="rounded-[24px] bg-white/50 p-4 text-sm shadow-inner">
-              <Row label="Subtotal" value={`Rs ${orderSubtotal}`} />
-              <Row label="Tax" value={`Rs ${orderTax}`} />
+              <Row label={t('sales.billSummary.subtotal')} value={`Rs ${orderSubtotal}`} />
+              <Row label={t('sales.billSummary.tax')} value={`Rs ${orderTax}`} />
               {discountAmount > 0 ? (
-                <Row label={`Discount (${discountType === 'percent' ? `${discountRawValue}% - Percentage` : 'Fixed Value'})`} value={`-Rs ${discountAmount}`} />
+                <Row label={discountType === 'percent' ? t('sales.billSummary.discountPercent', { value: discountRawValue }) : t('sales.billSummary.discountFixed')} value={`-Rs ${discountAmount}`} />
               ) : null}
-              <Row label="Bill Total" value={`Rs ${adjustedTotal}`} />
-              <Row label="Previous Dues" value={`Rs ${customerDue}`} />
-              <Row label="Final Payable" value={`Rs ${payable}`} strong />
+              <Row label={t('sales.billSummary.billTotal')} value={`Rs ${adjustedTotal}`} />
+              <Row label={t('sales.boxLabels.previousDues')} value={`Rs ${customerDue}`} />
+              <Row label={t('sales.billSummary.finalPayable')} value={`Rs ${payable}`} strong />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-semibold text-gray-700">Amount Paid / Cash Received</label>
+              <label className="mb-1 block text-sm font-semibold text-gray-700">{t('sales.amountPaidLabel')}</label>
               <input
                 value={paymentAmount}
                 onChange={(event) => {
@@ -1731,7 +1733,7 @@ export default function SalesPage() {
                   if (digitsOnly) setConfirmPending(false);
                 }}
                 className="w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none"
-                placeholder={`Bill is Rs ${payable} - enter cash received`}
+                placeholder={t('sales.billPlaceholder', { payable })}
               />
             </div>
             {/* Change-Return Calculation: dynamically computed the moment
@@ -1740,7 +1742,7 @@ export default function SalesPage() {
                 as a supermarket/fast-food till display. */}
             {changeReturn > 0 ? (
               <div className="rounded-[24px] bg-emerald-50 px-4 py-4 text-center shadow-inner">
-                <p className="text-xs font-black uppercase tracking-wide text-emerald-600">Change Return / Balance Due Back</p>
+                <p className="text-xs font-black uppercase tracking-wide text-emerald-600">{t('sales.changeReturnLabel')}</p>
                 <p className="mt-1 text-4xl font-black text-emerald-700">Rs {changeReturn}</p>
               </div>
             ) : null}
@@ -1752,11 +1754,11 @@ export default function SalesPage() {
                   onChange={(event) => setConfirmPending(event.target.checked)}
                   className="mt-0.5"
                 />
-                Put in Pending - confirm with no payment collected right now (this leaves the full ₨{payable} as a due).
+                {t('sales.putInPending', { payable })}
               </label>
             ) : null}
             <div ref={paymentButtonsRef} className="grid gap-2 sm:grid-cols-2">
-              <button type="button" onClick={() => void completePayment(false)} className="glass-dark rounded-[20px] px-4 py-3 text-sm font-black transition hover:brightness-110">Confirm Payment</button>
+              <button type="button" onClick={() => void completePayment(false)} className="glass-dark rounded-[20px] px-4 py-3 text-sm font-black transition hover:brightness-110">{t('sales.confirmPaymentButton')}</button>
               <button
                 type="button"
                 onClick={() => void completePayment(true)}
@@ -1773,7 +1775,7 @@ export default function SalesPage() {
                 disabled={(Boolean(paymentAmount) && Number(paymentAmount) < payable) || confirmPending}
                 className="rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-4 py-3 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Pay Full
+                {t('sales.payFull')}
               </button>
             </div>
           </div>
@@ -1782,8 +1784,8 @@ export default function SalesPage() {
 
       {showCancel && selectedOrder ? <CancelOrderModal order={selectedOrder} onClose={() => setShowCancel(false)} onCancelled={handleOrderCancelled} /> : null}
 
-      {showAddItems && selectedOrder ? <Modal title="Add Items To Order" onClose={() => setShowAddItems(false)} wide><AddItemsManager products={products} onSaveItems={addItems} onProductsChanged={refreshProducts} /></Modal> : null}
-      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
+      {showAddItems && selectedOrder ? <Modal title={t('sales.addItemsToOrderTitle')} onClose={() => setShowAddItems(false)} wide><AddItemsManager products={products} onSaveItems={addItems} onProductsChanged={refreshProducts} /></Modal> : null}
+      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title={t('sales.autoPrintFrameTitle')} /> : null}
     </div>
   );
 }
@@ -1803,28 +1805,58 @@ export default function SalesPage() {
 // shown elsewhere for Dine-In (see the dedicated Waiter Box below), so
 // nothing is lost for a walk-in table order that only ever had a waiter
 // assigned.
-function label(order: SavedOrder) {
+// Shared shape of the `t()` translator handed down from useLanguage() -
+// every module-scope helper below that renders its own user-facing text
+// takes it as a parameter (rather than calling useLanguage() itself, which
+// only works inside a component) since every call site already has it in
+// scope from the SalesPage component closure.
+type Translate = (key: string, vars?: Record<string, string | number>) => string;
+
+function label(order: SavedOrder, t: Translate) {
   const name = order.customer?.name?.trim();
   if (name) return name;
-  return order.orderType === 'DineIn' ? 'Dine-In Customer' : 'Walk-in Customer';
+  return order.orderType === 'DineIn' ? t('sales.customer.dineInCustomer') : t('sales.customer.walkInCustomer');
 }
-function phoneLabel(order: SavedOrder) {
+function phoneLabel(order: SavedOrder, t: Translate) {
   if (hasCustomerPhone(order)) return order.customer.phone;
-  if (order.orderType === 'DineIn') return order.waiter ? `Waiter: ${order.waiter}` : 'Dine In';
-  return 'No phone';
+  if (order.orderType === 'DineIn') return order.waiter ? t('sales.customer.waiterPrefix', { name: order.waiter }) : t('sales.filters.dineIn');
+  return t('sales.customer.noPhone');
 }
-function prettyType(order: SavedOrder) { return order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery'; }
+function prettyType(order: SavedOrder, t: Translate) { return order.orderType === 'DineIn' ? t('sales.filters.dineIn') : order.orderType === 'TakeAway' ? t('sales.filters.takeAway') : t('sales.filters.delivery'); }
+// BASE_FILTERS/order.waiter identifiers themselves are never translated
+// (see BASE_FILTERS' own comment) - this only maps a filter pill's
+// identifier to its on-screen label; a waiter's name passes through as-is.
+function filterDisplayLabel(item: string, t: Translate) {
+  if (item === 'All') return t('common.all');
+  if (item === 'Dine In') return t('sales.filters.dineIn');
+  if (item === 'Take Away') return t('sales.filters.takeAway');
+  if (item === 'Delivery') return t('sales.filters.delivery');
+  return item;
+}
+// order.status is one of the fixed pending/completed/paid/cancelled
+// literals the backend/state machine uses (see STATUS_BADGE etc. above) -
+// this only translates how it's displayed on the card badge, never the
+// value itself.
+function orderStatusLabel(status: string, t: Translate) {
+  const map: Record<string, string> = {
+    pending: t('sales.orderStatus.pending'),
+    completed: t('sales.orderStatus.completed'),
+    paid: t('sales.orderStatus.paid'),
+    cancelled: t('sales.orderStatus.cancelled'),
+  };
+  return map[status] ?? status;
+}
 // Dynamic Days-Based Order Duration Format: past 24 hours (1440 minutes),
 // switch from a growing "hr min" figure (which got unreadable past a day -
 // "26 hr 12 min ago", "72 hr 0 min ago") to whole Days - "1 Day ago",
 // "3 Days ago" - since once an order's been sitting that long, the exact
 // minute no longer matters, only roughly how many days it's been.
-function age(createdAt: string) {
+function age(createdAt: string, t: Translate) {
   const mins = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000);
-  if (mins < 60) return `${mins} min ago`;
-  if (mins < 1440) return `${Math.floor(mins / 60)} hr ${mins % 60} min ago`;
+  if (mins < 60) return t('sales.minAgo', { mins });
+  if (mins < 1440) return t('sales.hrMinAgo', { hr: Math.floor(mins / 60), min: mins % 60 });
   const days = Math.floor(mins / 1440);
-  return `${days} Day${days === 1 ? '' : 's'} ago`;
+  return days === 1 ? t('sales.dayAgo', { days }) : t('sales.daysAgo', { days });
 }
 function orderNumber(order: SavedOrder) { return String(order.dailyOrderNumber ?? order.id.slice(-4)).padStart(3, '0'); }
 function hasCustomerPhone(order: SavedOrder) { return Boolean(order.customer.phone && order.customer.phone !== '03000000000'); }
@@ -1850,10 +1882,11 @@ function Line({ icon, text }: { icon: React.ReactNode; text: string }) { return 
 // loaded - falls back to the neutral "Simple" look rather than rendering
 // nothing.
 function TableTypeBadge({ tableName, isFamily }: { tableName: string; isFamily: boolean | undefined }) {
+  const { t } = useLanguage();
   const familyMode = Boolean(isFamily);
   return (
     <span
-      title={`Table ${tableName} - ${familyMode ? 'Family Table' : 'Simple Table'}`}
+      title={t('sales.tableTypeTitle', { table: tableName, type: familyMode ? t('sales.familyTable') : t('sales.simpleTable') })}
       className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[7px] font-black uppercase tracking-wide shadow-inner ${familyMode ? 'bg-pink-100/80 text-pink-700' : 'bg-sky-100/80 text-sky-700'}`}
     >
       {familyMode ? <Heart size={8} fill="currentColor" /> : <Star size={8} fill="currentColor" />}
@@ -1869,13 +1902,16 @@ function Modal({ title, onClose, wide, children }: { title: string; onClose: () 
   return <div className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"><div className={`glass-strong flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)] flex-col rounded-[32px] transition-all ${wide ? 'max-w-5xl' : 'max-w-xl'}`}><div className="flex shrink-0 items-center justify-between border-b border-white/40 p-6 sm:px-8 sm:py-6"><h2 className="text-2xl font-black text-gray-900">{title}</h2><button type="button" onClick={onClose} className="glass-pill rounded-full p-3 text-gray-500 transition hover:bg-white/70"><XCircle size={18} /></button></div><div className="overflow-y-auto p-6 sm:p-8">{children}</div></div></div>;
 }
 
-const TRACKING_STEP_LABEL: Record<string, string> = {
-  awaiting_confirmation: 'Waiting for confirmation',
-  confirmed: 'Confirmed',
-  preparing: 'Preparing',
-  ready: 'Ready',
-  cancelled: 'Cancelled',
-};
+function trackingStepLabel(status: string, t: Translate) {
+  const map: Record<string, string> = {
+    awaiting_confirmation: t('sales.tracking.awaitingConfirmation'),
+    confirmed: t('sales.tracking.confirmed'),
+    preparing: t('sales.tracking.preparing'),
+    ready: t('sales.tracking.ready'),
+    cancelled: t('sales.tracking.cancelled'),
+  };
+  return map[status] ?? status;
+}
 
 // The staff-side half of the QR ordering feature (see
 // orderController.exports.updateTrackingStatus and
@@ -1903,6 +1939,7 @@ function OnlineOrderControls({
   respondingToChangeRequest: boolean;
   onRespondToChangeRequest: (order: SavedOrder, action: 'approve' | 'reject') => void;
 }) {
+  const { t } = useLanguage();
   const current = order.trackingStatus || 'awaiting_confirmation';
   const [selectedRiderId, setSelectedRiderId] = useState('');
   const changeRequest = order.customerChangeRequest;
@@ -1923,10 +1960,10 @@ function OnlineOrderControls({
     <div className="rounded-[20px] border border-indigo-100 bg-indigo-50/60 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">Online Order</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">{t('sales.online.orderLabel')}</p>
           <p className="mt-1 text-sm font-black text-indigo-900">
-            {TRACKING_STEP_LABEL[current] || current}
-            {order.paymentStatus ? ` · Payment: ${order.paymentStatus.replace('_', ' ')}` : ''}
+            {trackingStepLabel(current, t)}
+            {order.paymentStatus ? ` · ${t('sales.online.paymentStatusLabel', { status: order.paymentStatus.replace('_', ' ') })}` : ''}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1938,7 +1975,7 @@ function OnlineOrderControls({
               onClick={() => onChange(order, step)}
               className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Mark {TRACKING_STEP_LABEL[step]}
+              {t('sales.online.markStatus', { status: trackingStepLabel(step, t) })}
             </button>
           ))}
           <button
@@ -1947,21 +1984,21 @@ function OnlineOrderControls({
             onClick={() => onChange(order, 'cancelled')}
             className="rounded-2xl bg-rose-100 px-4 py-2 text-xs font-black text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Decline
+            {t('sales.online.decline')}
           </button>
         </div>
       </div>
 
       {showRiderPicker ? (
         <div className="mt-3 border-t border-indigo-100 pt-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">Delivery Rider</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-400">{t('sales.online.deliveryRider')}</p>
           {order.assignedRider?.phone ? (
             <p className="mt-1 text-sm font-bold text-indigo-900">
-              Assigned to {order.assignedRider.name || order.assignedRider.phone}
+              {t('sales.online.assignedTo', { name: order.assignedRider.name || order.assignedRider.phone })}
               {order.assignedRider.phone ? ` (${order.assignedRider.phone})` : ''}
             </p>
           ) : (
-            <p className="mt-1 text-xs text-indigo-700">Not assigned yet.</p>
+            <p className="mt-1 text-xs text-indigo-700">{t('sales.online.notAssignedYet')}</p>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <select
@@ -1970,7 +2007,7 @@ function OnlineOrderControls({
               disabled={assigningRider || riders.length === 0}
               className="rounded-2xl border border-indigo-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <option value="">{riders.length === 0 ? 'No riders on staff' : 'Choose a rider…'}</option>
+              <option value="">{riders.length === 0 ? t('sales.online.noRidersOnStaff') : t('sales.online.chooseRider')}</option>
               {riders.map((rider) => (
                 <option key={rider.id} value={rider.id}>
                   {rider.name}
@@ -1987,7 +2024,7 @@ function OnlineOrderControls({
               }}
               className="rounded-2xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {order.assignedRider?.phone ? 'Reassign & Notify' : 'Assign & Notify'}
+              {order.assignedRider?.phone ? t('sales.online.reassignNotify') : t('sales.online.assignNotify')}
             </button>
           </div>
         </div>
@@ -1995,7 +2032,7 @@ function OnlineOrderControls({
 
       {hasPendingChangeRequest ? (
         <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-600">Customer Requested a Change</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-600">{t('sales.online.customerRequestedChange')}</p>
           <ul className="mt-1.5 space-y-0.5 text-xs font-bold text-amber-900">
             {changeRequest!.addItems.map((item, index) => (
               <li key={`add-${index}`}>+ {item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''} · Rs {item.price * item.quantity}</li>
@@ -2012,7 +2049,7 @@ function OnlineOrderControls({
               onClick={() => onRespondToChangeRequest(order, 'approve')}
               className="rounded-2xl bg-emerald-600 px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Approve
+              {t('sales.online.approve')}
             </button>
             <button
               type="button"
@@ -2020,7 +2057,7 @@ function OnlineOrderControls({
               onClick={() => onRespondToChangeRequest(order, 'reject')}
               className="rounded-2xl bg-rose-100 px-4 py-2 text-xs font-black text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Decline
+              {t('sales.online.decline')}
             </button>
           </div>
         </div>

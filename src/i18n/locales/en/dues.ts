@@ -1,0 +1,66 @@
+// Customer Dues page (customer outstanding-balance list, add-customer
+// form, per-customer add/pay/clear dues card and its history dropdown) -
+// see src/pages/dashboard/DuesPage.tsx.
+export const dues = {
+  title: "Customer Dues",
+  subtitle: "Manage customer outstanding balances and send reminders.",
+  addCustomer: "Add Customer",
+  searchPlaceholder: "Search customers by name or phone...",
+  clearSearch: "Clear search",
+  whatsappNotConnectedBanner: "WhatsApp is not connected. Reminders cannot be sent until you link your WhatsApp in the WhatsApp menu.",
+  failedToLoadCustomers: "Failed to load customers.",
+
+  newCustomer: "New Customer",
+  fullNamePlaceholder: "Full Name",
+  phoneNumberPlaceholder: "Phone Number (e.g. 923...)",
+  initialDuesPlaceholder: "Initial Dues",
+  saveCustomer: "Save Customer",
+
+  loadingCustomers: "Loading customers...",
+  pendingDues: "Pending Dues ({{count}})",
+  noMatchingPendingDues: "No matching customers with pending dues.",
+  noPendingDues: "No customers have pending dues. Great!",
+  loadMore: "Load More ({{count}} more)",
+  allOtherCustomers: "All Other Customers",
+
+  toasts: {
+    nameAndPhoneRequired: "Name and phone are required.",
+    couldNotAddCustomer: "Could not add customer.",
+    customerAdded: "\"{{name}}\" added.",
+    couldNotUpdateDues: "Could not update dues.",
+    duesUpdated: "Dues updated.",
+    couldNotRecordPayment: "Could not record payment.",
+    paymentRecorded: "₨{{amount}} recorded.",
+    whatsappNotConnected: "WhatsApp is not connected. Please connect it in the WhatsApp settings first.",
+    customerHasNoDues: "Customer has no dues.",
+    reminderSent: "Reminder sent successfully!",
+    reminderFailed: "Failed to send reminder.",
+  },
+
+  reminderMessage: "Hello {{name}},\nThis is a gentle reminder that you have pending dues of ₨{{amount}}. Please clear them at your earliest convenience.\nThank you!",
+
+  card: {
+    currentDues: "Current Dues",
+    fromUnpaidOrders: "₨{{amount}} from unpaid orders",
+    plusManual: " + ₨{{amount}} manual",
+    remind: "Remind",
+    helperText: "\"+ Add Dues\" charges something new. \"- Pay Dues\" / \"Clear\" record an actual payment - it settles the manual balance first, then any unpaid orders, and marks an order paid off if it covers one fully.",
+    amountPlaceholder: "Enter amount...",
+    notePlaceholder: "Note (e.g. damaged item, cash payment...)",
+    addDues: "+ Add Dues",
+    payDues: "- Pay Dues",
+    cantExceedOwed: "Can't exceed the ₨{{amount}} owed",
+    recordPaymentAgainstOwed: "Record a payment against everything owed",
+    clearDuesConfirmTitle: "Clear dues",
+    clearDuesConfirmMessage: "Record a full payment of ₨{{amount}} for this customer?",
+    clearFullPaymentTitle: "Record a full payment, clearing everything this customer owes",
+    history: "History ({{count}})",
+    noNote: "No note",
+    addedAmount: "+ Rs {{amount}} added",
+    paidAmount: "- Rs {{amount}} paid",
+    orderLine: "Order #{{number}} - Rs {{total}}",
+    stillDue: "Rs {{amount}} still due (paid Rs {{paid}})",
+    fullyPaid: "Fully paid",
+    by: "by {{name}}",
+  },
+} as const;

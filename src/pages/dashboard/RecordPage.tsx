@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
@@ -75,13 +76,22 @@ type SearchField = 'all' | 'name' | 'phone' | 'orderId';
 // fast without removing the ability to look up or export any past date.
 const RECENT_ORDERS_WINDOW_DAYS = 14;
 
-const STATUS_TABS: { key: StatusFilter; label: string }[] = [
-  { key: 'All', label: 'All' },
-  { key: 'pending', label: 'Pending' },
-  { key: 'completed', label: 'Completed' },
-  { key: 'paid', label: 'Paid' },
-  { key: 'cancelled', label: 'Cancelled' },
+const STATUS_TABS: { key: StatusFilter }[] = [
+  { key: 'All' },
+  { key: 'pending' },
+  { key: 'completed' },
+  { key: 'paid' },
+  { key: 'cancelled' },
 ];
+
+// Maps a status/tab key to its translation key - 'All' is the one tab that
+// isn't itself an order status, so it borrows common.all instead of its own
+// record.statusTab.* entry. Kept at module scope (no `t` call here, just the
+// dotted path) so it's usable both from the STATUS_TABS render below and
+// from StatusBadge, which is its own component with its own useLanguage().
+function statusLabelKey(status: StatusFilter): string {
+  return status === 'All' ? 'common.all' : `record.statusTab.${status}`;
+}
 
 // The "day" here is exactly the current/most recent shop shift - the same
 // shared definition used on the Dashboard and Sales page (see
@@ -92,6 +102,7 @@ const STATUS_TABS: { key: StatusFilter; label: string }[] = [
 // closedAt], so this stays "today's record" until the next Open Shop
 // starts a new one.
 export default function RecordPage() {
+  const { t } = useLanguage();
   const { toast } = useToast();
   const { isOnline } = useNetworkStatus();
   // The shared, cached shop-open state (see shop-session.tsx) - used as the
@@ -181,8 +192,8 @@ export default function RecordPage() {
       setLoadError('');
     } catch {
       const diagnostics = await getLocalHubStartDiagnostics();
-      const reason = diagnostics && !diagnostics.started ? ` (${diagnostics.error || 'failed to start'})` : '';
-      setLoadError(`Couldn't reach this till's own Local Hub${reason} - restart the app to enable offline record history.`);
+      const reason = diagnostics && !diagnostics.started ? ` (${diagnostics.error || t('record.loadError.failedToStart')})` : '';
+      setLoadError(t('record.loadError.localHubUnreachable', { reason }));
     }
   }
 
@@ -379,10 +390,21 @@ export default function RecordPage() {
   }
 
   function exportCsv() {
-    const header = ['Order ID', 'Date', 'Time', 'Customer', 'Phone', 'Type', 'Status', 'Total', 'Paid', 'Remaining'];
+    const header = [
+      t('record.orderIdLabel'),
+      t('common.date'),
+      t('common.time'),
+      t('record.tableHeaders.customer'),
+      t('common.phone'),
+      t('record.tableHeaders.type'),
+      t('common.status'),
+      t('common.total'),
+      t('record.paid'),
+      t('record.remaining'),
+    ];
     const rows = filteredOrders.map((order) => {
       const createdAt = new Date(order.createdAt);
-      const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
+      const customerName = order.orderType === 'DineIn' ? (order.table ? t('record.tableLabel', { table: order.table }) : t('record.dineInCustomer')) : order.customer?.name || t('record.walkInCustomer');
       return [
         `#${order.dailyOrderNumber ?? order.id.slice(-4)}`,
         createdAt.toLocaleDateString('en-CA'),
@@ -417,7 +439,7 @@ export default function RecordPage() {
   // exporter in @/lib/excel-export (see that file's header comment for why
   // this doesn't just use a library like exceljs).
   function exportExcel() {
-    const rangeLabel = isCustomRange ? `${rangeFrom} to ${rangeTo}` : 'Current Shift';
+    const rangeLabel = isCustomRange ? t('record.export.dateRangeValue', { from: rangeFrom, to: rangeTo }) : t('record.export.currentShift');
     const MONEY_FORMAT = '"Rs "#,##0';
 
     const titleStyle: ExcelCellStyle = { bold: true, fontSize: 14 };
@@ -455,14 +477,14 @@ export default function RecordPage() {
     const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
     const totalCategoryRevenue = categorySales.reduce((sum, c) => sum + c.revenue, 0);
     const summaryRows: ExcelCell[][] = [
-      [{ value: 'Sales Record', style: titleStyle }],
+      [{ value: t('record.export.salesRecordTitle'), style: titleStyle }],
       [{ value: rangeLabel, style: subtitleStyle }],
       [],
       [
-        { value: 'Total Orders', style: statLabelStyle },
-        { value: 'Total Sales', style: statLabelStyle },
-        { value: 'Paid', style: statLabelStyle },
-        { value: 'Remaining', style: statLabelStyle },
+        { value: t('record.stats.totalOrders'), style: statLabelStyle },
+        { value: t('record.export.totalSales'), style: statLabelStyle },
+        { value: t('record.paid'), style: statLabelStyle },
+        { value: t('record.remaining'), style: statLabelStyle },
       ],
       [
         { value: orderStats.totalOrders },
@@ -471,11 +493,11 @@ export default function RecordPage() {
         { value: orderStats.remainingAmount, style: moneyStyle },
       ],
       [],
-      [{ value: 'Category-wise Sale', style: titleStyle }],
+      [{ value: t('record.export.categoryWiseSale'), style: titleStyle }],
       [
-        { value: 'Category', style: headerStyle },
-        { value: 'Qty Sold', style: headerStyle },
-        { value: 'Revenue', style: headerStyle },
+        { value: t('common.category'), style: headerStyle },
+        { value: t('record.qtySold'), style: headerStyle },
+        { value: t('record.revenue'), style: headerStyle },
       ],
       ...categorySales.map((c): ExcelCell[] => [
         { value: c.category, style: plainStyle },
@@ -483,18 +505,18 @@ export default function RecordPage() {
         { value: c.revenue, style: moneyStyle },
       ]),
       [
-        { value: 'Grand Total', style: subtotalStyle },
+        { value: t('record.export.grandTotal'), style: subtotalStyle },
         { value: totalCategoryQty, style: subtotalStyle },
         { value: totalCategoryRevenue, style: moneyBoldStyle },
       ],
       [],
-      [{ value: 'Item-wise Sale', style: titleStyle }],
+      [{ value: t('record.export.itemWiseSale'), style: titleStyle }],
       [
-        { value: 'Category', style: headerStyle },
-        { value: 'Item', style: headerStyle },
-        { value: 'Variation', style: headerStyle },
-        { value: 'Qty Sold', style: headerStyle },
-        { value: 'Revenue', style: headerStyle },
+        { value: t('common.category'), style: headerStyle },
+        { value: t('record.item'), style: headerStyle },
+        { value: t('record.variation'), style: headerStyle },
+        { value: t('record.qtySold'), style: headerStyle },
+        { value: t('record.revenue'), style: headerStyle },
       ],
       ...categorySales.flatMap((catSummary): ExcelCell[][] =>
         (itemsByCategory.get(catSummary.category) || []).map((item): ExcelCell[] => [
@@ -506,14 +528,14 @@ export default function RecordPage() {
         ]),
       ),
       [
-        { value: 'Grand Total', style: subtotalStyle },
+        { value: t('record.export.grandTotal'), style: subtotalStyle },
         { value: '', style: subtotalStyle },
         { value: '', style: subtotalStyle },
         { value: totalCategoryQty, style: subtotalStyle },
         { value: totalCategoryRevenue, style: moneyBoldStyle },
       ],
     ];
-    sheets.push({ name: 'Summary', columnWidths: [140, 180, 100, 80, 100], rows: summaryRows });
+    sheets.push({ name: t('record.export.summarySheetName'), columnWidths: [140, 180, 100, 80, 100], rows: summaryRows });
 
     // --- One sheet per category: the combined category total sits at the
     // top (so it reads as one figure for the whole category, e.g. Pizza),
@@ -524,8 +546,8 @@ export default function RecordPage() {
         [{ value: catSummary.category, style: titleStyle }],
         [],
         [
-          { value: 'Total Qty Sold', style: statLabelStyle },
-          { value: 'Total Revenue', style: statLabelStyle },
+          { value: t('record.export.totalQtySold'), style: statLabelStyle },
+          { value: t('record.export.totalRevenue'), style: statLabelStyle },
         ],
         [
           { value: catSummary.qty, style: moneyBoldStyle },
@@ -533,10 +555,10 @@ export default function RecordPage() {
         ],
         [],
         [
-          { value: 'Item', style: headerStyle },
-          { value: 'Variation', style: headerStyle },
-          { value: 'Qty Sold', style: headerStyle },
-          { value: 'Revenue', style: headerStyle },
+          { value: t('record.item'), style: headerStyle },
+          { value: t('record.variation'), style: headerStyle },
+          { value: t('record.qtySold'), style: headerStyle },
+          { value: t('record.revenue'), style: headerStyle },
         ],
         ...items.map((item): ExcelCell[] => [
           { value: item.name, style: plainStyle },
@@ -550,17 +572,18 @@ export default function RecordPage() {
 
     // --- All Orders sheet (mirrors Export CSV's columns) ---
     const orderRows: ExcelCell[][] = [
-      ['Order ID', 'Date', 'Time', 'Customer', 'Phone', 'Type', 'Status', 'Total', 'Paid', 'Remaining'].map(
-        (h): ExcelCell => ({ value: h, style: headerStyle }),
-      ),
+      [
+        t('record.orderIdLabel'), t('common.date'), t('common.time'), t('record.tableHeaders.customer'), t('common.phone'),
+        t('record.tableHeaders.type'), t('common.status'), t('common.total'), t('record.paid'), t('record.remaining'),
+      ].map((h): ExcelCell => ({ value: h, style: headerStyle })),
       ...filteredOrders.map((order): ExcelCell[] => {
         const createdAt = new Date(order.createdAt);
         const customerName =
           order.orderType === 'DineIn'
             ? order.table
-              ? `Table ${order.table}`
-              : 'Dine-In Customer'
-            : order.customer?.name || 'Walk-in Customer';
+              ? t('record.tableLabel', { table: order.table })
+              : t('record.dineInCustomer')
+            : order.customer?.name || t('record.walkInCustomer');
         return [
           { value: `#${order.dailyOrderNumber ?? order.id.slice(-4)}`, style: plainStyle },
           { value: createdAt.toLocaleDateString('en-CA'), style: plainStyle },
@@ -576,7 +599,7 @@ export default function RecordPage() {
       }),
     ];
     sheets.push({
-      name: 'All Orders',
+      name: t('record.export.allOrders'),
       columnWidths: [70, 80, 70, 140, 100, 80, 80, 80, 80, 80],
       rows: orderRows,
     });
@@ -592,7 +615,7 @@ export default function RecordPage() {
   // needs.
   async function exportPdf() {
     const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
-    const rangeLabel = isCustomRange ? `${rangeFrom} to ${rangeTo}` : 'Current Shift';
+    const rangeLabel = isCustomRange ? t('record.export.dateRangeValue', { from: rangeFrom, to: rangeTo }) : t('record.export.currentShift');
     const formatMoney = (value: number) => `Rs ${Math.round(value).toLocaleString()}`;
 
     const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
@@ -608,36 +631,39 @@ export default function RecordPage() {
       itemsByCategory.get(category)!.push(item);
     });
 
+    const orderCountText = filteredOrders.length === 1
+      ? t('record.export.orderCountSingular', { count: filteredOrders.length })
+      : t('record.export.orderCountPlural', { count: filteredOrders.length });
     const doc = (
       <ReportPdfDocument
-        title="Sales Record"
-        subtitle={`${rangeLabel} · ${filteredOrders.length} order${filteredOrders.length === 1 ? '' : 's'}${statusFilter !== 'All' ? ` · ${statusFilter}` : ''}`}
+        title={t('record.export.salesRecordTitle')}
+        subtitle={`${rangeLabel} · ${orderCountText}${statusFilter !== 'All' ? ` · ${t(statusLabelKey(statusFilter))}` : ''}`}
         stats={[
-          { label: 'Total Orders', value: String(orderStats.totalOrders) },
-          { label: 'Total Amount', value: formatMoney(orderStats.totalAmount) },
-          { label: 'Paid Amount', value: formatMoney(orderStats.paidAmount) },
-          { label: 'Remaining Amount', value: formatMoney(orderStats.remainingAmount) },
+          { label: t('record.stats.totalOrders'), value: String(orderStats.totalOrders) },
+          { label: t('record.stats.totalAmount'), value: formatMoney(orderStats.totalAmount) },
+          { label: t('record.stats.paidAmount'), value: formatMoney(orderStats.paidAmount) },
+          { label: t('record.stats.remainingAmount'), value: formatMoney(orderStats.remainingAmount) },
         ]}
         tables={[
           {
-            title: 'Category-wise Sale',
+            title: t('record.export.categoryWiseSale'),
             columns: [
-              { label: 'Category', width: 2 },
-              { label: 'Qty Sold', width: 1, align: 'right' },
-              { label: 'Revenue', width: 1.3, align: 'right' },
+              { label: t('common.category'), width: 2 },
+              { label: t('record.qtySold'), width: 1, align: 'right' },
+              { label: t('record.revenue'), width: 1.3, align: 'right' },
             ],
             rows: categorySales.map((c) => [c.category, String(c.qty), formatMoney(c.revenue)]),
-            footer: ['Grand Total', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
-            emptyMessage: 'No items sold in this selection.',
+            footer: [t('record.export.grandTotal'), String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            emptyMessage: t('record.export.noItemsInSelection'),
           },
           {
-            title: 'Item-wise Sale',
+            title: t('record.export.itemWiseSale'),
             columns: [
-              { label: 'Category', width: 1.5 },
-              { label: 'Item', width: 2 },
-              { label: 'Variation', width: 1.3 },
-              { label: 'Qty Sold', width: 1, align: 'right' },
-              { label: 'Revenue', width: 1.3, align: 'right' },
+              { label: t('common.category'), width: 1.5 },
+              { label: t('record.item'), width: 2 },
+              { label: t('record.variation'), width: 1.3 },
+              { label: t('record.qtySold'), width: 1, align: 'right' },
+              { label: t('record.revenue'), width: 1.3, align: 'right' },
             ],
             rows: categorySales.flatMap((catSummary) =>
               (itemsByCategory.get(catSummary.category) || []).map((item) => [
@@ -648,28 +674,28 @@ export default function RecordPage() {
                 formatMoney(item.revenue),
               ]),
             ),
-            footer: ['Grand Total', '', '', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
-            emptyMessage: 'No items sold in this selection.',
+            footer: [t('record.export.grandTotal'), '', '', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            emptyMessage: t('record.export.noItemsInSelection'),
           },
           {
-            title: 'All Orders',
+            title: t('record.export.allOrders'),
             columns: [
-              { label: 'Order ID', width: 1 },
-              { label: 'Date', width: 1 },
-              { label: 'Time', width: 0.9 },
-              { label: 'Customer', width: 1.8 },
-              { label: 'Phone', width: 1.3 },
-              { label: 'Type', width: 1 },
-              { label: 'Status', width: 1 },
-              { label: 'Total', width: 1, align: 'right' },
-              { label: 'Paid', width: 1, align: 'right' },
-              { label: 'Remaining', width: 1.1, align: 'right' },
+              { label: t('record.orderIdLabel'), width: 1 },
+              { label: t('common.date'), width: 1 },
+              { label: t('common.time'), width: 0.9 },
+              { label: t('record.tableHeaders.customer'), width: 1.8 },
+              { label: t('common.phone'), width: 1.3 },
+              { label: t('record.tableHeaders.type'), width: 1 },
+              { label: t('common.status'), width: 1 },
+              { label: t('common.total'), width: 1, align: 'right' },
+              { label: t('record.paid'), width: 1, align: 'right' },
+              { label: t('record.remaining'), width: 1.1, align: 'right' },
             ],
             rows: filteredOrders.map((order) => {
               const createdAt = new Date(order.createdAt);
               const customerName = order.orderType === 'DineIn'
-                ? (order.table ? `Table ${order.table}` : 'Dine-In Customer')
-                : order.customer?.name || 'Walk-in Customer';
+                ? (order.table ? t('record.tableLabel', { table: order.table }) : t('record.dineInCustomer'))
+                : order.customer?.name || t('record.walkInCustomer');
               return [
                 `#${order.dailyOrderNumber ?? order.id.slice(-4)}`,
                 createdAt.toLocaleDateString('en-CA'),
@@ -683,7 +709,7 @@ export default function RecordPage() {
                 formatMoney(order.remainingAmount ?? 0),
               ];
             }),
-            emptyMessage: 'No orders match this selection.',
+            emptyMessage: t('record.export.noOrdersInSelection'),
           },
         ]}
       />
@@ -819,13 +845,13 @@ export default function RecordPage() {
       ) : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold">Record</h1>
+          <h1 className="text-xl font-bold">{t('record.title')}</h1>
           <p className="text-xs text-gray-400">
             {isCustomRange
-              ? `Showing orders from ${rangeFrom} to ${rangeTo}`
+              ? t('record.subtitle.customRange', { from: rangeFrom, to: rangeTo })
               : shopSession
-                ? `Every order for ${shopSession.status === 'open' ? 'the current open shift' : "this shop's last shift"} - pending, completed, paid, and cancelled.`
-                : 'No shift recorded yet. Open the shop to start today\'s record.'}
+                ? t('record.subtitle.shiftOrders', { shift: shopSession.status === 'open' ? t('record.subtitle.currentOpenShift') : t('record.subtitle.lastShift') })
+                : t('record.subtitle.noShift')}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -835,7 +861,7 @@ export default function RecordPage() {
             disabled={filteredOrders.length === 0}
             className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Download size={14} /> Export Excel
+            <Download size={14} /> {t('record.actions.exportExcel')}
           </button>
           <button
             type="button"
@@ -843,7 +869,7 @@ export default function RecordPage() {
             disabled={filteredOrders.length === 0}
             className="flex items-center gap-2 rounded-full bg-[#D6E332] px-4 py-2 text-xs font-black text-gray-900 shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Download size={14} /> Export CSV
+            <Download size={14} /> {t('record.actions.exportCsv')}
           </button>
           <button
             type="button"
@@ -851,16 +877,16 @@ export default function RecordPage() {
             disabled={filteredOrders.length === 0}
             className="flex items-center gap-2 rounded-full bg-rose-600 px-4 py-2 text-xs font-black text-white shadow-sm transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Download size={14} /> Download PDF
+            <Download size={14} /> {t('record.actions.downloadPdf')}
           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <StatCard label="Total Orders" value={String(orderStats.totalOrders)} />
-        <StatCard label="Total Amount" value={`Rs ${orderStats.totalAmount}`} tone="text-sky-600" />
-        <StatCard label="Paid Amount" value={`Rs ${orderStats.paidAmount}`} tone="text-emerald-600" />
-        <StatCard label="Remaining Amount" value={`Rs ${orderStats.remainingAmount}`} tone="text-rose-600" />
+        <StatCard label={t('record.stats.totalOrders')} value={String(orderStats.totalOrders)} />
+        <StatCard label={t('record.stats.totalAmount')} value={`Rs ${orderStats.totalAmount}`} tone="text-sky-600" />
+        <StatCard label={t('record.stats.paidAmount')} value={`Rs ${orderStats.paidAmount}`} tone="text-emerald-600" />
+        <StatCard label={t('record.stats.remainingAmount')} value={`Rs ${orderStats.remainingAmount}`} tone="text-rose-600" />
       </div>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
@@ -869,9 +895,9 @@ export default function RecordPage() {
             key={tab.key}
             type="button"
             onClick={() => setStatusFilter(tab.key)}
-            className={`rounded-[16px] p-2.5 text-left transition ${statusFilter === tab.key ? 'glass-dark' : 'glass text-gray-700 hover:bg-white/70'}`}
+            className={`rounded-[16px] p-2.5 text-left rtl:text-right transition ${statusFilter === tab.key ? 'glass-dark' : 'glass text-gray-700 hover:bg-white/70'}`}
           >
-            <p className={`text-[9px] font-black uppercase tracking-[0.14em] ${statusFilter === tab.key ? 'text-gray-300' : 'text-gray-400'}`}>{tab.label}</p>
+            <p className={`text-[9px] font-black uppercase tracking-[0.14em] ${statusFilter === tab.key ? 'text-gray-300' : 'text-gray-400'}`}>{t(statusLabelKey(tab.key))}</p>
             <p className="text-lg font-black">{counts[tab.key]}</p>
           </button>
         ))}
@@ -879,23 +905,27 @@ export default function RecordPage() {
 
       <div className="rounded-[16px] bg-rose-50/60 p-3 shadow-inner backdrop-blur-xl sm:flex sm:items-center sm:justify-between">
         <div>
-          <p className="text-[9px] font-black uppercase tracking-[0.14em] text-rose-500">Total Discount Today</p>
+          <p className="text-[9px] font-black uppercase tracking-[0.14em] text-rose-500">{t('record.discount.totalToday')}</p>
           <p className="text-lg font-black text-rose-700">Rs {totalDiscountToday}</p>
         </div>
-        <p className="mt-1 text-xs font-semibold text-rose-500 sm:mt-0">{discountedOrderCount} order{discountedOrderCount === 1 ? '' : 's'} discounted this shift</p>
+        <p className="mt-1 text-xs font-semibold text-rose-500 sm:mt-0">
+          {discountedOrderCount === 1
+            ? t('record.discount.orderSingular', { count: discountedOrderCount })
+            : t('record.discount.orderPlural', { count: discountedOrderCount })}
+        </p>
       </div>
 
       <div className="glass grid grid-cols-1 gap-3 rounded-[28px] p-4 sm:grid-cols-2 lg:grid-cols-6">
         <div className="lg:col-span-2">
           <div className="mb-1.5 flex items-center justify-between">
-            <label className="block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Date Range</label>
+            <label className="block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">{t('record.filters.dateRange')}</label>
             {isCustomRange ? (
               <button
                 type="button"
                 onClick={clearRange}
                 className="flex items-center gap-1 text-[10px] font-black uppercase tracking-[0.1em] text-gray-400 transition hover:text-gray-700"
               >
-                <X size={11} /> Back to shift
+                <X size={11} /> {t('record.filters.backToShift')}
               </button>
             ) : null}
           </div>
@@ -918,28 +948,28 @@ export default function RecordPage() {
         </div>
 
         <div className="lg:col-span-1">
-          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Search By</label>
+          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">{t('record.filters.searchBy')}</label>
           <select
             value={searchField}
             onChange={(event) => setSearchField(event.target.value as SearchField)}
             className="w-full rounded-full border border-white/60 bg-white/50 px-3 py-2 text-xs font-semibold shadow-inner outline-none transition focus:border-[#D6E332]"
           >
-            <option value="all">All Fields</option>
-            <option value="name">Customer Name</option>
-            <option value="phone">Phone</option>
-            <option value="orderId">Order ID</option>
+            <option value="all">{t('record.filters.allFields')}</option>
+            <option value="name">{t('record.filters.customerName')}</option>
+            <option value="phone">{t('common.phone')}</option>
+            <option value="orderId">{t('record.orderIdLabel')}</option>
           </select>
         </div>
 
         <div className="sm:col-span-2 lg:col-span-3">
-          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">Search</label>
+          <label className="mb-1.5 block text-[10px] font-black uppercase tracking-[0.14em] text-gray-400">{t('common.search')}</label>
           <div className="relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+            <Search className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search order #, customer, phone, table, waiter"
-              className="w-full rounded-full border border-white/60 bg-white/50 py-2 pl-11 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
+              placeholder={t('record.filters.searchPlaceholder')}
+              className="w-full rounded-full border border-white/60 bg-white/50 py-2 pl-11 pr-4 rtl:pl-4 rtl:pr-11 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
             />
           </div>
         </div>
@@ -947,20 +977,19 @@ export default function RecordPage() {
 
       <div className="overflow-hidden rounded-[20px] bg-white shadow-sm">
         <div className="border-b border-gray-100 px-5 py-3">
-          <h2 className="text-sm font-black text-gray-900">Category Sales</h2>
+          <h2 className="text-sm font-black text-gray-900">{t('record.categorySales.title')}</h2>
           <p className="text-[11px] font-semibold text-gray-400">
-            Combined quantity and revenue per category (e.g. every Pizza item counted as one Pizza total) for{' '}
-            {isCustomRange ? 'the selected range' : 'this shift'}.
+            {t('record.categorySales.description', { scope: isCustomRange ? t('record.scope.selectedRange') : t('record.scope.thisShift') })}
           </p>
         </div>
         {categorySales.length === 0 ? (
-          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
+          <div className="p-6 text-center text-sm font-bold text-gray-400">{t('record.noItemsSold')}</div>
         ) : (
           <div>
             <div className="hidden grid-cols-[1.5fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
-              <span>Category</span>
-              <span>Qty Sold</span>
-              <span>Revenue</span>
+              <span>{t('common.category')}</span>
+              <span>{t('record.qtySold')}</span>
+              <span>{t('record.revenue')}</span>
             </div>
             <div className="divide-y divide-gray-100">
               {visibleCategorySales.map((entry) => (
@@ -983,27 +1012,26 @@ export default function RecordPage() {
               onClick={() => setVisibleCategorySalesCount((previous) => previous + 10)}
               className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
             >
-              Load More ({categorySales.length - visibleCategorySales.length} more)
+              {t('record.loadMore', { count: categorySales.length - visibleCategorySales.length })}
             </button>
           </div>
         ) : null}
 
         <div className="border-t border-gray-100 px-5 py-3">
-          <h2 className="text-sm font-black text-gray-900">Item Sales</h2>
+          <h2 className="text-sm font-black text-gray-900">{t('record.itemSales.title')}</h2>
           <p className="text-[11px] font-semibold text-gray-400">
-            Quantity sold and revenue per item (the breakdown behind each category total above) for{' '}
-            {isCustomRange ? 'the selected range' : 'this shift'}.
+            {t('record.itemSales.description', { scope: isCustomRange ? t('record.scope.selectedRange') : t('record.scope.thisShift') })}
           </p>
         </div>
         {itemSales.length === 0 ? (
-          <div className="p-6 text-center text-sm font-bold text-gray-400">No items sold yet.</div>
+          <div className="p-6 text-center text-sm font-bold text-gray-400">{t('record.noItemsSold')}</div>
         ) : (
           <div className="max-h-[420px] overflow-y-auto">
             <div className="hidden grid-cols-[1.5fr_0.8fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
-              <span>Item</span>
-              <span>Variation</span>
-              <span>Qty Sold</span>
-              <span>Revenue</span>
+              <span>{t('record.item')}</span>
+              <span>{t('record.variation')}</span>
+              <span>{t('record.qtySold')}</span>
+              <span>{t('record.revenue')}</span>
             </div>
             <div className="divide-y divide-gray-100">
               {visibleItemSales.map((item) => (
@@ -1027,7 +1055,7 @@ export default function RecordPage() {
               onClick={() => setVisibleItemSalesCount((previous) => previous + 10)}
               className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
             >
-              Load More ({itemSales.length - visibleItemSales.length} more)
+              {t('record.loadMore', { count: itemSales.length - visibleItemSales.length })}
             </button>
           </div>
         ) : null}
@@ -1035,21 +1063,21 @@ export default function RecordPage() {
 
       <div className="glass overflow-hidden rounded-[28px]">
         <div className="hidden grid-cols-[90px_70px_1.1fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_110px] gap-2 border-b border-white/40 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
-          <span>Order</span>
-          <span>Table</span>
-          <span>Customer</span>
-          <span>Type</span>
-          <span>Total</span>
-          <span>Paid</span>
-          <span>Remaining</span>
-          <span>Status</span>
-          <span className="text-right">Actions</span>
+          <span>{t('record.tableHeaders.order')}</span>
+          <span>{t('record.tableHeaders.table')}</span>
+          <span>{t('record.tableHeaders.customer')}</span>
+          <span>{t('record.tableHeaders.type')}</span>
+          <span>{t('common.total')}</span>
+          <span>{t('record.paid')}</span>
+          <span>{t('record.remaining')}</span>
+          <span>{t('common.status')}</span>
+          <span className="text-right rtl:text-left">{t('common.actions')}</span>
         </div>
 
         {loading ? (
-          <div className="p-10 text-center text-sm font-bold text-gray-400">Loading record...</div>
+          <div className="p-10 text-center text-sm font-bold text-gray-400">{t('record.loadingRecord')}</div>
         ) : filteredOrders.length === 0 ? (
-          <div className="p-10 text-center text-sm font-bold text-gray-400">No orders found in the selected range.</div>
+          <div className="p-10 text-center text-sm font-bold text-gray-400">{t('record.noOrdersFound')}</div>
         ) : (
           <div className="divide-y divide-white/40">
             {visibleOrders.map((order) => (
@@ -1071,7 +1099,7 @@ export default function RecordPage() {
               onClick={() => setVisibleOrdersCount((previous) => previous + 10)}
               className="rounded-full bg-[#F6F7FB] px-5 py-2 text-xs font-black text-gray-700 transition hover:bg-gray-100"
             >
-              Load More ({filteredOrders.length - visibleOrders.length} more)
+              {t('record.loadMore', { count: filteredOrders.length - visibleOrders.length })}
             </button>
           </div>
         ) : null}
@@ -1101,7 +1129,7 @@ export default function RecordPage() {
           setPrintReadyUrl={setPrintReadyUrl}
         />
       ) : null}
-      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
+      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title={t('record.autoPrintFrameTitle')} /> : null}
     </div>
   );
 }
@@ -1119,14 +1147,15 @@ function RecordRow({
   toast: ToastLike;
   setPrintReadyUrl: (url: string | null) => void;
 }) {
+  const { t } = useLanguage();
   const time = new Date(order.createdAt).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' });
   // A shift can run past midnight, so a bare time ("11:42 PM") is ambiguous
   // once a date range spans more than one day - the date underneath makes
   // it unambiguous which day each order actually belongs to.
   const date = new Date(order.createdAt).toLocaleDateString('en-PK', { day: '2-digit', month: 'short' });
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
-  const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
-  const orderType = order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery';
+  const customerName = order.orderType === 'DineIn' ? (order.table ? t('record.tableLabel', { table: order.table }) : t('record.dineInCustomer')) : order.customer?.name || t('record.walkInCustomer');
+  const orderType = order.orderType === 'DineIn' ? t('record.orderType.dineIn') : order.orderType === 'TakeAway' ? t('record.orderType.takeAway') : t('record.orderType.delivery');
 
   return (
     <div className="grid grid-cols-2 gap-2 px-6 py-4 text-sm lg:grid-cols-[90px_70px_1.1fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_110px] lg:items-center">
@@ -1150,7 +1179,7 @@ function RecordRow({
       <div>
         <span className="font-black text-gray-900">Rs {order.total}</span>
         {order.discount && order.discount.amount > 0 ? (
-          <p className="text-[10px] font-bold text-rose-500">-Rs {order.discount.amount} off</p>
+          <p className="text-[10px] font-bold text-rose-500">{t('record.discount.off', { amount: order.discount.amount })}</p>
         ) : null}
       </div>
       <span className="font-semibold text-emerald-600">Rs {order.paidAmount ?? 0}</span>
@@ -1163,7 +1192,7 @@ function RecordRow({
           <button
             type="button"
             onClick={onComplete}
-            title="Complete order"
+            title={t('record.actions.completeOrderTitle')}
             className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-2 text-[11px] font-black text-emerald-700 transition hover:bg-emerald-100"
           >
             <CheckCircle2 size={13} />
@@ -1172,7 +1201,7 @@ function RecordRow({
         <button
           type="button"
           onClick={onView}
-          title="View order"
+          title={t('record.actions.viewOrderTitle')}
           className="glass-pill flex items-center gap-1.5 rounded-full px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-white/70"
         >
           <Eye size={13} />
@@ -1186,7 +1215,7 @@ function RecordRow({
           // Print Center is still what opens as the fallback when there's
           // no configured printer / this isn't the Electron app.
           onClick={() => printCustomerReceipt(order, 0, toast, setPrintReadyUrl)}
-          title="Print receipt"
+          title={t('record.actions.printReceiptTitle')}
           className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
         >
           <Printer size={13} />
@@ -1206,13 +1235,14 @@ function StatCard({ label, value, tone = 'text-gray-900' }: { label: string; val
 }
 
 function StatusBadge({ status }: { status: SavedOrder['status'] }) {
+  const { t } = useLanguage();
   const styles: Record<string, string> = {
     pending: 'bg-gradient-to-b from-amber-300 to-amber-500 text-amber-950',
     completed: 'bg-gradient-to-b from-emerald-400 to-emerald-600 text-white',
     paid: 'bg-gradient-to-b from-sky-400 to-sky-600 text-white',
     cancelled: 'bg-gradient-to-b from-rose-400 to-rose-600 text-white',
   };
-  return <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-2px_5px_rgba(0,0,0,0.15)] ${styles[status] || 'bg-gray-100 text-gray-600'}`}>{status}</span>;
+  return <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-2px_5px_rgba(0,0,0,0.15)] ${styles[status] || 'bg-gray-100 text-gray-600'}`}>{t(statusLabelKey(status))}</span>;
 }
 
 function OrderDetailModal({
@@ -1228,9 +1258,10 @@ function OrderDetailModal({
   onCancelRequested: () => void;
   onCompleteRequested: () => void;
 }) {
+  const { t } = useLanguage();
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
-  const customerName = order.orderType === 'DineIn' ? (order.table ? `Table ${order.table}` : 'Dine-In Customer') : order.customer?.name || 'Walk-in Customer';
-  const orderType = order.orderType === 'DineIn' ? 'Dine In' : order.orderType === 'TakeAway' ? 'Take Away' : 'Delivery';
+  const customerName = order.orderType === 'DineIn' ? (order.table ? t('record.tableLabel', { table: order.table }) : t('record.dineInCustomer')) : order.customer?.name || t('record.walkInCustomer');
+  const orderType = order.orderType === 'DineIn' ? t('record.orderType.dineIn') : order.orderType === 'TakeAway' ? t('record.orderType.takeAway') : t('record.orderType.delivery');
   const createdAt = new Date(order.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
@@ -1241,8 +1272,8 @@ function OrderDetailModal({
       <div className="glass-strong flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col rounded-[32px]">
         <div className="flex shrink-0 items-start justify-between border-b border-white/40 p-6">
           <div>
-            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Order Detail</p>
-            <h2 className="mt-1 text-2xl font-black text-gray-900">Order #{orderLabel}</h2>
+            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">{t('record.orderDetail.kicker')}</p>
+            <h2 className="mt-1 text-2xl font-black text-gray-900">{t('record.orderHeading', { label: orderLabel })}</h2>
             <p className="mt-1 text-sm text-gray-500">{createdAt}</p>
           </div>
           <div className="flex items-center gap-2">
@@ -1255,28 +1286,28 @@ function OrderDetailModal({
 
         <div className="space-y-5 overflow-y-auto p-6">
           <div className="grid gap-3 sm:grid-cols-2">
-            <DetailBox label="Customer" value={customerName} />
-            <DetailBox label={order.orderType === 'DineIn' ? 'Waiter' : 'Phone'} value={order.orderType === 'DineIn' ? (order.waiter || 'Dine In') : (order.customer?.phone || 'No phone')} />
-            {order.orderType === 'DineIn' ? <DetailBox label="Table" value={order.table || '—'} /> : null}
-            <DetailBox label="Order Type" value={orderType} />
-            <DetailBox label="Payment Method" value={order.paymentMethod} />
-            <DetailBox label="Paid" value={`Rs ${order.paidAmount ?? 0}`} />
-            <DetailBox label="Remaining" value={`Rs ${order.remainingAmount ?? 0}`} />
+            <DetailBox label={t('record.tableHeaders.customer')} value={customerName} />
+            <DetailBox label={order.orderType === 'DineIn' ? t('record.orderDetail.waiter') : t('common.phone')} value={order.orderType === 'DineIn' ? (order.waiter || t('record.orderType.dineIn')) : (order.customer?.phone || t('record.orderDetail.noPhone'))} />
+            {order.orderType === 'DineIn' ? <DetailBox label={t('record.tableHeaders.table')} value={order.table || '—'} /> : null}
+            <DetailBox label={t('record.orderDetail.orderTypeLabel')} value={orderType} />
+            <DetailBox label={t('record.orderDetail.paymentMethod')} value={order.paymentMethod} />
+            <DetailBox label={t('record.paid')} value={`Rs ${order.paidAmount ?? 0}`} />
+            <DetailBox label={t('record.remaining')} value={`Rs ${order.remainingAmount ?? 0}`} />
           </div>
 
           {order.status === 'cancelled' ? (
             <div className="space-y-1.5 rounded-[20px] bg-rose-50/60 p-4 text-sm font-bold text-rose-700 shadow-inner">
               <div className="flex items-center gap-2">
                 <AlertCircle size={16} />
-                <span>This order was cancelled.</span>
+                <span>{t('record.orderDetail.cancelledNotice')}</span>
               </div>
-              {order.cancelledBy ? <p className="text-xs font-semibold text-rose-500">Cancelled by {order.cancelledBy}{order.cancelledAt ? ` · ${new Date(order.cancelledAt).toLocaleString('en-PK', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}` : ''}</p> : null}
-              {order.cancelReason ? <p className="text-xs font-semibold text-rose-500">Reason: {order.cancelReason}</p> : null}
+              {order.cancelledBy ? <p className="text-xs font-semibold text-rose-500">{t('record.orderDetail.cancelledByLabel', { name: order.cancelledBy })}{order.cancelledAt ? ` · ${new Date(order.cancelledAt).toLocaleString('en-PK', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}` : ''}</p> : null}
+              {order.cancelReason ? <p className="text-xs font-semibold text-rose-500">{t('record.orderDetail.cancelReasonLabel', { reason: order.cancelReason })}</p> : null}
             </div>
           ) : null}
 
           <div>
-            <h3 className="mb-3 text-sm font-black uppercase tracking-[0.18em] text-gray-400">Items</h3>
+            <h3 className="mb-3 text-sm font-black uppercase tracking-[0.18em] text-gray-400">{t('record.orderDetail.itemsHeading')}</h3>
             <div className="space-y-2">
               {order.items.map((item, index) => (
                 <div key={`${item.name}-${index}`} className="flex items-center gap-3 rounded-[18px] bg-white/45 px-4 py-3 shadow-inner">
@@ -1284,9 +1315,9 @@ function OrderDetailModal({
                     <img src={resolveProductImage({ image: item.image, name: item.name })} alt={item.name} loading="lazy" className="h-full w-full object-cover" />
                   </div>
                   <div className="min-w-0 flex-1"><p className="truncate font-bold text-gray-900">{item.name}</p><p className="text-xs text-gray-400">{item.variation}</p></div>
-                  <div className="shrink-0 text-right">
+                  <div className="shrink-0 text-right rtl:text-left">
                     <p className="text-sm font-black text-gray-900">Rs {item.price * item.quantity}</p>
-                    <p className="text-xs text-gray-400">Qty {item.quantity}</p>
+                    <p className="text-xs text-gray-400">{t('record.orderDetail.qtyLabel', { qty: item.quantity })}</p>
                   </div>
                 </div>
               ))}
@@ -1294,15 +1325,15 @@ function OrderDetailModal({
           </div>
 
           <div className="rounded-[20px] bg-white/50 p-4 text-sm shadow-inner">
-            <DetailRow label="Subtotal" value={`Rs ${order.subtotal}`} />
-            <DetailRow label="Tax" value={`Rs ${order.tax}`} />
+            <DetailRow label={t('record.orderDetail.subtotal')} value={`Rs ${order.subtotal}`} />
+            <DetailRow label={t('record.orderDetail.tax')} value={`Rs ${order.tax}`} />
             {order.discount && order.discount.amount > 0 ? (
-              <DetailRow label={`Discount ${order.discount.type === 'percent' ? `(${order.discount.value}%)` : ''}`} value={`-Rs ${order.discount.amount}`} />
+              <DetailRow label={order.discount.type === 'percent' ? t('record.discount.percentLabel', { value: order.discount.value }) : t('record.discount.label')} value={`-Rs ${order.discount.amount}`} />
             ) : null}
-            <DetailRow label="Total" value={`Rs ${order.total}`} strong />
+            <DetailRow label={t('common.total')} value={`Rs ${order.total}`} strong />
           </div>
 
-          {order.note ? <DetailBox label="Note" value={order.note} /> : null}
+          {order.note ? <DetailBox label={t('record.orderDetail.note')} value={order.note} /> : null}
         </div>
 
         {order.status === 'pending' ? (
@@ -1312,7 +1343,7 @@ function OrderDetailModal({
               onClick={onCompleteRequested}
               className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-emerald-500 to-emerald-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(6,78,59,0.45)] transition hover:brightness-105"
             >
-              <CheckCircle2 size={16} /> Complete Order
+              <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
             </button>
             {canCancel ? (
               <button
@@ -1320,7 +1351,7 @@ function OrderDetailModal({
                 onClick={onCancelRequested}
                 className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105"
               >
-                <Lock size={16} /> Cancel Order
+                <Lock size={16} /> {t('record.actions.cancelOrder')}
               </button>
             ) : null}
           </div>
@@ -1369,6 +1400,7 @@ function CompleteOrderModal({
   onCompleted: (updated: SavedOrder) => void;
   setPrintReadyUrl: (url: string | null) => void;
 }) {
+  const { t } = useLanguage();
   const [paymentAmount, setPaymentAmount] = useState('');
   const [customerDue, setCustomerDue] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -1413,7 +1445,7 @@ function CompleteOrderModal({
   async function settle(full: boolean) {
     const paid = full ? payable : Number(paymentAmount || 0);
     if (!full && (paid < 0 || paid > payable)) {
-      setError('Enter a valid payment amount.');
+      setError(t('record.errors.invalidAmount'));
       return;
     }
     // Same reasoning as SalesPage.tsx's completeOrder - nothing typed in
@@ -1421,7 +1453,7 @@ function CompleteOrderModal({
     // ticked, so a stray Confirm Payment click can't silently complete the
     // order with paid=0. Typing any real amount never needs the tick.
     if (!full && paid === 0 && !confirmPending) {
-      setError('Enter a payment amount, or check "Put in Pending" to confirm this order with no payment collected.');
+      setError(t('record.errors.noAmountNoPending'));
       return;
     }
     // Same reasoning as SalesPage.tsx's completeOrder - a due left on the
@@ -1432,7 +1464,7 @@ function CompleteOrderModal({
     // before allowing anything less than full payment; a full payment
     // never leaves a due, so that's still unrestricted.
     if (paid < payable && (!order.customer?.phone || order.customer.phone === '03000000000' || !order.customer?.name?.trim())) {
-      setError("Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against.");
+      setError(t('record.errors.needCustomerInfo'));
       return;
     }
     setSaving(true);
@@ -1454,7 +1486,7 @@ function CompleteOrderModal({
         // SalesPage.tsx's completeOrder for the full reasoning. Printing a
         // customer receipt is now always a deliberate, on-demand action via
         // the printer icon/button.
-        toast.success(`Order completed. ${trulyOffline ? 'Will sync once back online.' : 'Syncing to the cloud...'}`);
+        toast.success(trulyOffline ? t('record.toast.orderCompletedOffline') : t('record.toast.orderCompletedSyncing'));
         onCompleted(updated);
         return;
       }
@@ -1462,24 +1494,24 @@ function CompleteOrderModal({
       // Only ever reached from a plain browser tab now (no Local Hub to
       // queue into).
       const updated = await updateOrder(order.id, payload);
-      toast.success('Order completed.');
+      toast.success(t('record.toast.orderCompleted'));
       onCompleted(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not complete this order.');
+      setError(err instanceof Error ? err.message : t('record.errors.completeFailed'));
     } finally {
       setSaving(false);
     }
   }
 
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
-  const heading = order.orderType === 'DineIn' && order.table ? `Table ${order.table}` : `Order #${orderLabel}`;
+  const heading = order.orderType === 'DineIn' && order.table ? t('record.tableLabel', { table: order.table }) : t('record.orderHeading', { label: orderLabel });
 
   return (
     <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
       <div className="w-full max-w-md rounded-[32px] bg-white p-6 shadow-2xl">
         <div className="flex items-start justify-between">
           <div>
-            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">Complete Order</p>
+            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">{t('record.actions.completeOrder')}</p>
             <h2 className="mt-1 text-xl font-black text-gray-900">{heading}</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
@@ -1489,19 +1521,19 @@ function CompleteOrderModal({
 
         {trulyOffline ? (
           <div className="mt-3 flex items-center gap-2 rounded-[14px] bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-            <WifiOff size={14} className="shrink-0" /> Offline - will sync to the cloud once back online.
+            <WifiOff size={14} className="shrink-0" /> {t('record.completeOrder.offlineNotice')}
           </div>
         ) : null}
 
         <div className="mt-4 rounded-[20px] bg-[#F8F9FB] p-4 text-sm">
-          <DetailRow label="Order Total" value={`Rs ${order.total}`} />
-          <DetailRow label="Already Paid" value={`Rs ${order.paidAmount ?? 0}`} />
-          {customerDue > 0 ? <DetailRow label="Other Outstanding Dues" value={`Rs ${customerDue}`} /> : null}
-          <DetailRow label="Payable Now" value={`Rs ${payable}`} strong />
+          <DetailRow label={t('record.completeOrder.orderTotal')} value={`Rs ${order.total}`} />
+          <DetailRow label={t('record.completeOrder.alreadyPaid')} value={`Rs ${order.paidAmount ?? 0}`} />
+          {customerDue > 0 ? <DetailRow label={t('record.completeOrder.otherOutstandingDues')} value={`Rs ${customerDue}`} /> : null}
+          <DetailRow label={t('record.completeOrder.payableNow')} value={`Rs ${payable}`} strong />
         </div>
 
         <div className="mt-4">
-          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Partial Payment Amount</label>
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.partialPaymentAmount')}</label>
           <input
             value={paymentAmount}
             onChange={(event) => {
@@ -1514,7 +1546,7 @@ function CompleteOrderModal({
               setPaymentAmount(clamped);
               if (clamped) setConfirmPending(false);
             }}
-            placeholder={`Up to Rs ${payable}`}
+            placeholder={t('record.completeOrder.upToAmount', { amount: payable })}
             className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
           />
         </div>
@@ -1527,7 +1559,7 @@ function CompleteOrderModal({
               onChange={(event) => setConfirmPending(event.target.checked)}
               className="mt-0.5"
             />
-            Put in Pending - confirm with no payment collected right now (this leaves the full Rs {payable} as a due).
+            {t('record.completeOrder.putInPending', { amount: payable })}
           </label>
         ) : null}
 
@@ -1540,7 +1572,7 @@ function CompleteOrderModal({
             onClick={() => void settle(false)}
             className="rounded-[20px] bg-black px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Confirm Payment
+            {t('record.actions.confirmPayment')}
           </button>
           <button
             type="button"
@@ -1548,7 +1580,7 @@ function CompleteOrderModal({
             onClick={() => void settle(true)}
             className="rounded-[20px] bg-[#E2F33C] px-4 py-3 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Pay Full
+            {t('record.actions.payFull')}
           </button>
         </div>
       </div>

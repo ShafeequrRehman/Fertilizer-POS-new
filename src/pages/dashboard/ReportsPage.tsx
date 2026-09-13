@@ -7,6 +7,7 @@ import { fetchDayEndReport, fetchExpenses, createExpense, deleteExpense, fetchMy
 import { DayEndReport, Expense, InventoryReport, MySalesReport } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
 import { hasPermission } from '@/lib/auth';
+import { useLanguage } from '@/i18n';
 
 function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
@@ -181,13 +182,14 @@ function CategoryComboBox({ value, onChange, options, placeholder }: {
 // never changes mid-session (it's fixed at login), so which branch renders
 // never changes after the first render either.
 export default function ReportsPage() {
+  const { t } = useLanguage();
   if (hasPermission('reports.view')) return <DayEndReportView />;
   if (hasPermission('reports.view.own_sales')) return <MySalesReportView />;
   if (hasPermission('reports.view.inventory')) return <InventoryReportView />;
   return (
     <div className="min-h-screen bg-[#F4F7FA] p-4 lg:p-8 flex items-center justify-center">
       <div className="rounded-[32px] bg-white p-8 text-center text-sm font-bold text-slate-500 shadow-sm">
-        You don't have access to any report view yet.
+        {t('reports.noAccessMessage')}
       </div>
     </div>
   );
@@ -200,6 +202,7 @@ export default function ReportsPage() {
 // KPI cards, a chart placeholder, fake export buttons) with the real
 // backend-aggregated report from reportController.getDayEndReport.
 function DayEndReportView() {
+  const { t } = useLanguage();
   const { popup, confirm } = useToast();
   const [preset, setPreset] = useState<Preset>('daily');
   const initial = computePresetRange('daily');
@@ -246,7 +249,7 @@ function DayEndReportView() {
       if (reportData) setReport(reportData);
       setExpenses(expenseData || []);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load the report.');
+      setErrorMessage(error instanceof Error ? error.message : t('reports.dayEnd.loadError'));
     } finally {
       setIsLoading(false);
     }
@@ -304,12 +307,12 @@ function DayEndReportView() {
 
   async function handleLogExpense() {
     if (!expenseCategory.trim()) {
-      popup({ tone: 'error', title: 'Missing information', message: 'Pick or type a category.' });
+      popup({ tone: 'error', title: t('reports.expense.missingInfoTitle'), message: t('reports.expense.pickCategoryMessage') });
       return;
     }
     const amount = Number(expenseAmount);
     if (!amount || amount <= 0) {
-      popup({ tone: 'error', title: 'Missing information', message: 'Enter an amount greater than 0.' });
+      popup({ tone: 'error', title: t('reports.expense.missingInfoTitle'), message: t('reports.expense.enterAmountMessage') });
       return;
     }
     try {
@@ -330,16 +333,16 @@ function DayEndReportView() {
         void loadReport();
       }
     } catch (error) {
-      popup({ tone: 'error', title: "Couldn't log expense", message: error instanceof Error ? error.message : 'Failed to log expense.' });
+      popup({ tone: 'error', title: t('reports.expense.logErrorTitle'), message: error instanceof Error ? error.message : t('reports.expense.logErrorMessage') });
     } finally {
       setIsSavingExpense(false);
     }
   }
 
   async function handleDeleteExpense(expense: Expense) {
-    const confirmed = await confirm(`Delete this ${expense.category} expense of ${formatMoney(expense.amount)}?`, {
-      title: 'Delete expense',
-      confirmText: 'Delete',
+    const confirmed = await confirm(t('reports.expense.deleteConfirmMessage', { category: expense.category, amount: formatMoney(expense.amount) }), {
+      title: t('reports.expense.deleteConfirmTitle'),
+      confirmText: t('common.delete'),
       tone: 'danger',
     });
     if (!confirmed) return;
@@ -348,7 +351,7 @@ function DayEndReportView() {
       setExpenses((prev) => prev.filter((e) => e.id !== expense.id));
       void loadReport();
     } catch (error) {
-      popup({ tone: 'error', title: "Couldn't delete", message: error instanceof Error ? error.message : 'Failed to delete expense.' });
+      popup({ tone: 'error', title: t('reports.expense.deleteErrorTitle'), message: error instanceof Error ? error.message : t('reports.expense.deleteErrorMessage') });
     }
   }
 
@@ -362,9 +365,9 @@ function DayEndReportView() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
           <h1 className="text-3xl font-black tracking-tight flex items-center gap-3">
-            Day-End Profit Report <BarChart3 className="text-indigo-600" size={32} />
+            {t('reports.dayEnd.title')} <BarChart3 className="text-indigo-600" size={32} />
           </h1>
-          <p className="text-slate-500 font-bold">Revenue, ingredient cost, and expenses - net profit for the period you pick.</p>
+          <p className="text-slate-500 font-bold">{t('reports.dayEnd.subtitle')}</p>
         </div>
 
         <div className="flex flex-col items-end gap-3">
@@ -377,7 +380,7 @@ function DayEndReportView() {
                   preset === item ? 'bg-slate-900 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),inset_0_-2px_5px_rgba(0,0,0,0.4)]' : 'text-slate-400 hover:text-slate-600'
                 }`}
               >
-                {item}
+                {t(`reports.presets.${item}`)}
               </button>
             ))}
           </div>
@@ -389,7 +392,7 @@ function DayEndReportView() {
               onChange={(e) => { setPreset('custom'); setRangeFrom(e.target.value); }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold outline-none focus:border-indigo-400"
             />
-            <span className="text-xs font-black text-slate-400">to</span>
+            <span className="text-xs font-black text-slate-400">{t('reports.to')}</span>
             <input
               type="date"
               value={rangeTo}
@@ -410,16 +413,16 @@ function DayEndReportView() {
 
       {/* Net Profit Matrix */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <KPICard icon={<Wallet size={24} />} iconClass="bg-blue-50 text-blue-600" label="Total Revenue" value={formatMoney(report?.revenue ?? 0)} sub={`${report?.orderCount ?? 0} order${(report?.orderCount ?? 0) === 1 ? '' : 's'}`} />
-        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label="Product Cost (COGS)" value={formatMoney(report?.costOfGoods ?? 0)} sub="Ingredients consumed" />
-        <KPICard icon={<Receipt size={24} />} iconClass="bg-rose-50 text-rose-600" label="Other Expenses" value={formatMoney(report?.otherExpenses ?? 0)} sub={`${report?.expenseCount ?? 0} logged`} />
+        <KPICard icon={<Wallet size={24} />} iconClass="bg-blue-50 text-blue-600" label={t('reports.dayEnd.totalRevenue')} value={formatMoney(report?.revenue ?? 0)} sub={t((report?.orderCount ?? 0) === 1 ? 'reports.orderCount' : 'reports.orderCountPlural', { count: report?.orderCount ?? 0 })} />
+        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label={t('reports.dayEnd.productCost')} value={formatMoney(report?.costOfGoods ?? 0)} sub={t('reports.dayEnd.ingredientsConsumed')} />
+        <KPICard icon={<Receipt size={24} />} iconClass="bg-rose-50 text-rose-600" label={t('reports.dayEnd.otherExpenses')} value={formatMoney(report?.otherExpenses ?? 0)} sub={t('reports.dayEnd.expenseCountLogged', { count: report?.expenseCount ?? 0 })} />
         <div className={`p-8 rounded-[32px] border shadow-sm relative overflow-hidden ${isProfitable ? 'bg-emerald-600 border-emerald-600' : 'bg-rose-600 border-rose-600'}`}>
           <div className="flex justify-between items-center mb-6">
             <div className="p-3 bg-white/15 text-white rounded-2xl">{isProfitable ? <TrendingUp size={24} /> : <TrendingDown size={24} />}</div>
-            <span className="text-[10px] font-black uppercase tracking-widest text-white/80">Net Profit</span>
+            <span className="text-[10px] font-black uppercase tracking-widest text-white/80">{t('reports.dayEnd.netProfit')}</span>
           </div>
           <h2 className="text-3xl font-black text-white">{formatMoney(netProfit)}</h2>
-          <p className="text-white/80 text-xs font-bold mt-2">Revenue - COGS - Expenses</p>
+          <p className="text-white/80 text-xs font-bold mt-2">{t('reports.dayEnd.netProfitFormula')}</p>
         </div>
       </div>
 
@@ -427,13 +430,13 @@ function DayEndReportView() {
 
         {/* Expense Breakdown */}
         <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-          <h3 className="font-black text-xl mb-1">Expense Breakdown</h3>
-          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">By category, this period</p>
+          <h3 className="font-black text-xl mb-1">{t('reports.dayEnd.expenseBreakdownTitle')}</h3>
+          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">{t('reports.dayEnd.expenseBreakdownSubtitle')}</p>
 
           {isLoading ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">Loading...</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">{t('common.loading')}</div>
           ) : !report?.expenseBreakdown || report.expenseBreakdown.length === 0 ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">No expenses logged in this period.</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">{t('reports.dayEnd.noExpenses')}</div>
           ) : (
             <div className="space-y-2">
               {report.expenseBreakdown.map((row) => {
@@ -446,13 +449,13 @@ function DayEndReportView() {
                           {row.category}
                           {row.excludedFromNetProfit ? (
                             <span className="inline-flex items-center bg-amber-100 text-amber-700 px-2 py-0.5 rounded-lg text-[9px] uppercase font-black tracking-wider">
-                              Not in Net Profit
+                              {t('reports.dayEnd.notInNetProfitBadge')}
                             </span>
                           ) : null}
                         </p>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          {row.count} entr{row.count === 1 ? 'y' : 'ies'}
-                          {row.excludedFromNetProfit ? ' · raw stock already costed via COGS when sold' : ''}
+                          {t(row.count === 1 ? 'reports.entryCount' : 'reports.entryCountPlural', { count: row.count })}
+                          {row.excludedFromNetProfit ? ` · ${t('reports.dayEnd.rawStockCostedNote')}` : ''}
                         </p>
                       </div>
                       <div className="flex items-center gap-3">
@@ -470,15 +473,15 @@ function DayEndReportView() {
                         that makes up this Kitchen Stock total. */}
                     {row.excludedFromNetProfit && report.kitchenStockDetails.length > 0 ? (
                       <div className="mt-2 mb-1 overflow-x-auto rounded-2xl border border-amber-100">
-                        <table className="w-full text-left text-xs">
+                        <table className="w-full text-left rtl:text-right text-xs">
                           <thead className="bg-amber-50/60 text-[9px] font-black uppercase tracking-widest text-amber-700">
                             <tr>
-                              <th className="px-4 py-2.5">Company</th>
-                              <th className="px-4 py-2.5">Product</th>
-                              <th className="px-4 py-2.5 text-right">Quantity</th>
-                              <th className="px-4 py-2.5 text-right">Total</th>
-                              <th className="px-4 py-2.5 text-right">Paid</th>
-                              <th className="px-4 py-2.5 text-right">Due</th>
+                              <th className="px-4 py-2.5">{t('reports.tableHeaders.company')}</th>
+                              <th className="px-4 py-2.5">{t('reports.tableHeaders.product')}</th>
+                              <th className="px-4 py-2.5 text-right rtl:text-left">{t('common.quantity')}</th>
+                              <th className="px-4 py-2.5 text-right rtl:text-left">{t('common.total')}</th>
+                              <th className="px-4 py-2.5 text-right rtl:text-left">{t('reports.tableHeaders.paid')}</th>
+                              <th className="px-4 py-2.5 text-right rtl:text-left">{t('reports.tableHeaders.due')}</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-amber-50">
@@ -512,46 +515,46 @@ function DayEndReportView() {
           {employeeExpenseTotals.total > 0 || salaryPaymentsTotal > 0 ? (
             <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Employee Meals</p>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{t('reports.dayEnd.employeeMeals')}</p>
                 <p className="text-sm font-black text-slate-900">{formatMoney(employeeExpenseTotals.meals)}</p>
               </div>
               <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Salary Payments/Advances</p>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{t('reports.dayEnd.salaryPaymentsAdvances')}</p>
                 <p className="text-sm font-black text-slate-900">{formatMoney(salaryPaymentsTotal)}</p>
               </div>
               <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Total Employee Expenses</p>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{t('reports.dayEnd.totalEmployeeExpenses')}</p>
                 <p className="text-sm font-black text-slate-900">{formatMoney(employeeExpenseTotals.total)}</p>
               </div>
               <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Overall Expenses</p>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{t('reports.dayEnd.overallExpenses')}</p>
                 <p className="text-sm font-black text-slate-900">{formatMoney(report?.otherExpenses ?? 0)}</p>
               </div>
             </div>
           ) : null}
 
           <div className="mt-8 mb-3 flex flex-wrap items-center justify-between gap-3">
-            <h4 className="font-black text-sm uppercase tracking-widest text-slate-400">Entries in this period</h4>
+            <h4 className="font-black text-sm uppercase tracking-widest text-slate-400">{t('reports.dayEnd.entriesInPeriod')}</h4>
             <div className="flex flex-wrap gap-2">
               <InlineDropdown
                 className="w-40"
                 value={employeeFilter}
                 onChange={setEmployeeFilter}
-                placeholder="All employees"
-                options={[{ value: '', label: 'All employees' }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
+                placeholder={t('reports.allEmployees')}
+                options={[{ value: '', label: t('reports.allEmployees') }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
               />
               <InlineDropdown
                 className="w-40"
                 value={categoryFilter}
                 onChange={setCategoryFilter}
-                placeholder="All categories"
-                options={[{ value: '', label: 'All categories' }, ...EXPENSE_CATEGORIES.map((c) => ({ value: c, label: c }))]}
+                placeholder={t('reports.allCategories')}
+                options={[{ value: '', label: t('reports.allCategories') }, ...EXPENSE_CATEGORIES.map((c) => ({ value: c, label: c }))]}
               />
             </div>
           </div>
           <div className="space-y-2 max-h-[280px] overflow-y-auto">
             {expensesInRange.length === 0 ? (
-              <p className="text-sm font-bold text-slate-400">Nothing logged yet.</p>
+              <p className="text-sm font-bold text-slate-400">{t('reports.dayEnd.nothingLoggedYet')}</p>
             ) : (
               expensesInRange.map((expense) => {
                 const emp = typeof expense.employeeId === 'object' ? expense.employeeId : null;
@@ -560,7 +563,7 @@ function DayEndReportView() {
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-slate-800">
                       {expense.category}
-                      {emp ? <span className="ml-2 rounded-full bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase text-indigo-600">{emp.name}</span> : null}
+                      {emp ? <span className="ml-2 rtl:ml-0 rtl:mr-2 rounded-full bg-indigo-50 px-2 py-0.5 text-[9px] font-black uppercase text-indigo-600">{emp.name}</span> : null}
                     </p>
                     <p className="text-[10px] font-bold text-slate-400">{new Date(expense.date).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}{expense.note ? ` · ${expense.note}` : ''}</p>
                   </div>
@@ -581,16 +584,16 @@ function DayEndReportView() {
         <div className="space-y-6">
           <div className="bg-white rounded-[40px] p-8 border border-slate-100 shadow-sm">
             <h3 className="font-black text-lg text-slate-900 mb-1 flex items-center gap-2">
-              <Plus className="text-indigo-600" size={20} /> Log an Expense
+              <Plus className="text-indigo-600" size={20} /> {t('reports.dayEnd.logExpenseTitle')}
             </h3>
-            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">Gas, electricity, wages, damage/waste, employee meals...</p>
+            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">{t('reports.dayEnd.logExpenseSubtitle')}</p>
 
             <div className="space-y-3">
               <CategoryComboBox
                 value={expenseCategory}
                 onChange={setExpenseCategory}
                 options={EXPENSE_CATEGORIES}
-                placeholder="Category"
+                placeholder={t('common.category')}
               />
               {/* Employee Expenses - optional. Left on "No specific
                   employee" for every ordinary shop-wide expense; only
@@ -601,24 +604,24 @@ function DayEndReportView() {
               <InlineDropdown
                 value={expenseEmployeeId}
                 onChange={setExpenseEmployeeId}
-                placeholder="No specific employee"
-                options={[{ value: '', label: 'No specific employee' }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
+                placeholder={t('reports.noSpecificEmployee')}
+                options={[{ value: '', label: t('reports.noSpecificEmployee') }, ...employees.map((emp) => ({ value: emp._id, label: emp.name }))]}
               />
               <input
                 type="number"
                 value={expenseAmount}
                 onChange={(e) => setExpenseAmount(e.target.value)}
-                placeholder="Amount"
+                placeholder={t('reports.amountPlaceholder')}
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
               <input
                 type="text"
                 value={expenseNote}
                 onChange={(e) => setExpenseNote(e.target.value)}
-                placeholder="Note (optional)"
+                placeholder={t('reports.notePlaceholder')}
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
-              <p className="text-[10px] font-bold text-slate-400 ml-1">Logged against {new Date(`${rangeTo}T12:00:00.000Z`).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}.</p>
+              <p className="text-[10px] font-bold text-slate-400 ml-1">{t('reports.dayEnd.loggedAgainst', { date: new Date(`${rangeTo}T12:00:00.000Z`).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }) })}</p>
             </div>
 
             <button
@@ -627,7 +630,7 @@ function DayEndReportView() {
               disabled={isSavingExpense}
               className="w-full mt-6 py-4 border-[0.5px] border-white/30 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-[24px] text-sm font-black transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)]"
             >
-              {isSavingExpense ? 'Saving...' : 'Log Expense'}
+              {isSavingExpense ? t('common.saving') : t('reports.dayEnd.logExpenseButton')}
             </button>
           </div>
         </div>
@@ -645,6 +648,7 @@ function DayEndReportView() {
 // profit figures anywhere - reportController.getMySalesReport never sends
 // them in the first place.
 function MySalesReportView() {
+  const { t } = useLanguage();
   const [date, setDate] = useState(() => toDateKey(new Date()));
   const [report, setReport] = useState<MySalesReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -659,7 +663,7 @@ function MySalesReportView() {
         const data = await fetchMySalesReport(date);
         if (data) setReport(data);
       } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : 'Failed to load your sales report.');
+        setErrorMessage(error instanceof Error ? error.message : t('reports.mySales.loadError'));
       } finally {
         setIsLoading(false);
       }
@@ -671,9 +675,9 @@ function MySalesReportView() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
           <h1 className="text-3xl font-black tracking-tight flex items-center gap-3">
-            My Daily Sales <UserRound className="text-indigo-600" size={32} />
+            {t('reports.mySales.title')} <UserRound className="text-indigo-600" size={32} />
           </h1>
-          <p className="text-slate-500 font-bold">Only the orders you personally placed, one day at a time.</p>
+          <p className="text-slate-500 font-bold">{t('reports.mySales.subtitle')}</p>
         </div>
         <input
           type="date"
@@ -691,31 +695,31 @@ function MySalesReportView() {
       ) : null}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <KPICard icon={<Wallet size={24} />} iconClass="bg-blue-50 text-blue-600" label="My Revenue" value={formatMoney(report?.revenue ?? 0)} sub={`${report?.orderCount ?? 0} order${(report?.orderCount ?? 0) === 1 ? '' : 's'}`} />
-        <KPICard icon={<Receipt size={24} />} iconClass="bg-emerald-50 text-emerald-600" label="Collected" value={formatMoney(report?.totalCollected ?? 0)} sub="Cash received" />
-        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label="Still Due" value={formatMoney(report?.totalDue ?? 0)} sub="Across your orders" />
-        <KPICard icon={<TrendingDown size={24} />} iconClass="bg-rose-50 text-rose-600" label="Cancelled" value={String(report?.cancelledCount ?? 0)} sub="Not counted above" />
+        <KPICard icon={<Wallet size={24} />} iconClass="bg-blue-50 text-blue-600" label={t('reports.mySales.myRevenue')} value={formatMoney(report?.revenue ?? 0)} sub={t((report?.orderCount ?? 0) === 1 ? 'reports.orderCount' : 'reports.orderCountPlural', { count: report?.orderCount ?? 0 })} />
+        <KPICard icon={<Receipt size={24} />} iconClass="bg-emerald-50 text-emerald-600" label={t('reports.mySales.collected')} value={formatMoney(report?.totalCollected ?? 0)} sub={t('reports.mySales.cashReceived')} />
+        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label={t('reports.mySales.stillDue')} value={formatMoney(report?.totalDue ?? 0)} sub={t('reports.mySales.acrossYourOrders')} />
+        <KPICard icon={<TrendingDown size={24} />} iconClass="bg-rose-50 text-rose-600" label={t('reports.mySales.cancelled')} value={String(report?.cancelledCount ?? 0)} sub={t('reports.mySales.notCountedAbove')} />
       </div>
 
       <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-        <h3 className="font-black text-xl mb-1">Your Orders</h3>
+        <h3 className="font-black text-xl mb-1">{t('reports.mySales.yourOrdersTitle')}</h3>
         <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">{new Date(`${date}T12:00:00.000Z`).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}</p>
 
         {isLoading ? (
-          <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">Loading...</div>
+          <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">{t('common.loading')}</div>
         ) : !report || report.orders.length === 0 ? (
-          <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">No orders on this day.</div>
+          <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">{t('reports.mySales.noOrders')}</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
+            <table className="w-full text-left rtl:text-right text-sm">
               <thead>
                 <tr className="text-[10px] font-black uppercase tracking-wider text-slate-400">
-                  <th className="py-2 pr-4">Order</th>
-                  <th className="py-2 pr-4">Type</th>
-                  <th className="py-2 pr-4">Status</th>
-                  <th className="py-2 pr-4 text-right">Total</th>
-                  <th className="py-2 pr-4 text-right">Paid</th>
-                  <th className="py-2 pr-4 text-right">Due</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4">{t('reports.tableHeaders.order')}</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4">{t('reports.tableHeaders.type')}</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4">{t('common.status')}</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4 text-right rtl:text-left">{t('common.total')}</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4 text-right rtl:text-left">{t('reports.tableHeaders.paid')}</th>
+                  <th className="py-2 pr-4 rtl:pr-0 rtl:pl-4 text-right rtl:text-left">{t('reports.tableHeaders.due')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -751,6 +755,7 @@ function MySalesReportView() {
 // revenue/COGS/net-profit anywhere - reportController.getInventoryReport
 // never sends them in the first place.
 function InventoryReportView() {
+  const { t } = useLanguage();
   const [preset, setPreset] = useState<Preset>('daily');
   const initial = computePresetRange('daily');
   const [rangeFrom, setRangeFrom] = useState(initial.from);
@@ -777,7 +782,7 @@ function InventoryReportView() {
         const data = await fetchInventoryReport(rangeFrom, rangeTo);
         if (data) setReport(data);
       } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : 'Failed to load the inventory report.');
+        setErrorMessage(error instanceof Error ? error.message : t('reports.inventory.loadError'));
       } finally {
         setIsLoading(false);
       }
@@ -789,9 +794,9 @@ function InventoryReportView() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
           <h1 className="text-3xl font-black tracking-tight flex items-center gap-3">
-            Stock &amp; Supplier Report <Boxes className="text-indigo-600" size={32} />
+            {t('reports.inventory.title')} <Boxes className="text-indigo-600" size={32} />
           </h1>
-          <p className="text-slate-500 font-bold">Kitchen stock purchase logs and supplier dues for the period you pick.</p>
+          <p className="text-slate-500 font-bold">{t('reports.inventory.subtitle')}</p>
         </div>
         <div className="flex flex-col items-end gap-3">
           <div className="flex bg-white p-1.5 rounded-[20px] shadow-sm border border-slate-100">
@@ -803,7 +808,7 @@ function InventoryReportView() {
                   preset === item ? 'bg-slate-900 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),inset_0_-2px_5px_rgba(0,0,0,0.4)]' : 'text-slate-400 hover:text-slate-600'
                 }`}
               >
-                {item}
+                {t(`reports.presets.${item}`)}
               </button>
             ))}
           </div>
@@ -815,7 +820,7 @@ function InventoryReportView() {
               onChange={(e) => { setPreset('custom'); setRangeFrom(e.target.value); }}
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold outline-none focus:border-indigo-400"
             />
-            <span className="text-xs font-black text-slate-400">to</span>
+            <span className="text-xs font-black text-slate-400">{t('reports.to')}</span>
             <input
               type="date"
               value={rangeTo}
@@ -835,19 +840,19 @@ function InventoryReportView() {
       ) : null}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label="Kitchen Stock Purchased" value={formatMoney(report?.kitchenStockPurchases ?? 0)} sub={`${report?.kitchenStockPurchaseCount ?? 0} batches logged`} />
-        <KPICard icon={<Truck size={24} />} iconClass="bg-indigo-50 text-indigo-600" label="Total Supplier Due" value={formatMoney(report?.totalSupplierDue ?? 0)} sub="All-time, every company" />
-        <KPICard icon={<ClipboardList size={24} />} iconClass="bg-blue-50 text-blue-600" label="Companies Owed" value={String(report?.supplierDues.length ?? 0)} sub="With an outstanding balance" />
+        <KPICard icon={<ShoppingBag size={24} />} iconClass="bg-amber-50 text-amber-600" label={t('reports.inventory.kitchenStockPurchased')} value={formatMoney(report?.kitchenStockPurchases ?? 0)} sub={t('reports.inventory.batchesLogged', { count: report?.kitchenStockPurchaseCount ?? 0 })} />
+        <KPICard icon={<Truck size={24} />} iconClass="bg-indigo-50 text-indigo-600" label={t('reports.inventory.totalSupplierDue')} value={formatMoney(report?.totalSupplierDue ?? 0)} sub={t('reports.inventory.allTimeEveryCompany')} />
+        <KPICard icon={<ClipboardList size={24} />} iconClass="bg-blue-50 text-blue-600" label={t('reports.inventory.companiesOwed')} value={String(report?.supplierDues.length ?? 0)} sub={t('reports.inventory.withOutstandingBalance')} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-          <h3 className="font-black text-xl mb-1">Supplier Dues</h3>
-          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">All-time balance owed, every company</p>
+          <h3 className="font-black text-xl mb-1">{t('reports.inventory.supplierDuesTitle')}</h3>
+          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">{t('reports.inventory.supplierDuesSubtitle')}</p>
           {isLoading ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">Loading...</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">{t('common.loading')}</div>
           ) : !report || report.supplierDues.length === 0 ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">Nothing due to any company.</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">{t('reports.inventory.nothingDue')}</div>
           ) : (
             <div className="space-y-2">
               {report.supplierDues.map((row) => (
@@ -861,14 +866,14 @@ function InventoryReportView() {
         </div>
 
         <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-          <h3 className="font-black text-xl mb-1">Kitchen Stock Log</h3>
-          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">Every batch logged this period</p>
+          <h3 className="font-black text-xl mb-1">{t('reports.inventory.kitchenStockLogTitle')}</h3>
+          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-6">{t('reports.inventory.kitchenStockLogSubtitle')}</p>
           {isLoading ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">Loading...</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">{t('common.loading')}</div>
           ) : !report || report.kitchenStockDetails.length === 0 ? (
-            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">No purchases logged in this period.</div>
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500">{t('reports.inventory.noPurchases')}</div>
           ) : (
-            <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+            <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1 rtl:pr-0 rtl:pl-1">
               {report.kitchenStockDetails.map((detail) => (
                 <div key={detail.id} className="rounded-2xl bg-slate-50 px-5 py-4">
                   <div className="flex items-center justify-between gap-4">
@@ -877,7 +882,7 @@ function InventoryReportView() {
                   </div>
                   <p className="text-xs font-bold text-slate-400 mt-1">
                     {detail.ingredientName}{detail.productDetails ? ` · ${detail.productDetails}` : ''} · {detail.quantity}{detail.unit}
-                    {detail.remainingAmount > 0 ? <span className="text-rose-500"> · {formatMoney(detail.remainingAmount)} due</span> : ''}
+                    {detail.remainingAmount > 0 ? <span className="text-rose-500"> · {formatMoney(detail.remainingAmount)} {t('reports.inventory.dueSuffix')}</span> : ''}
                   </p>
                 </div>
               ))}
@@ -896,7 +901,7 @@ function KPICard({ icon, iconClass, label, value, sub }: { icon: ReactNode; icon
     <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-sm">
       <div className="flex justify-between items-center mb-6">
         <div className={`p-3 rounded-2xl ${iconClass}`}>{icon}</div>
-        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">{label}</span>
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-right rtl:text-left">{label}</span>
       </div>
       <h2 className="text-3xl font-black text-slate-900">{value}</h2>
       <p className="text-slate-400 text-xs font-bold mt-2">{sub}</p>

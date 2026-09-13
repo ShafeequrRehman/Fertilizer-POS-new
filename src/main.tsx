@@ -5,6 +5,7 @@ import { Provider } from 'react-redux';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ToastProvider } from '@/lib/toast';
 import { NotificationProvider } from '@/lib/notifications';
+import { LanguageProvider } from '@/i18n';
 import { installGlobalClickSound } from '@/lib/audio-feedback';
 import './index.css';
 
@@ -74,13 +75,15 @@ Promise.all([import('@/store'), import('./App')])
       <React.StrictMode>
         <ErrorBoundary>
           <Provider store={store}>
-            <HashRouter>
-              <ToastProvider>
-                <NotificationProvider>
-                  <App />
-                </NotificationProvider>
-              </ToastProvider>
-            </HashRouter>
+            <LanguageProvider>
+              <HashRouter>
+                <ToastProvider>
+                  <NotificationProvider>
+                    <App />
+                  </NotificationProvider>
+                </ToastProvider>
+              </HashRouter>
+            </LanguageProvider>
           </Provider>
         </ErrorBoundary>
       </React.StrictMode>,

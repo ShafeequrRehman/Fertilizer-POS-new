@@ -21,6 +21,8 @@ import { getIpcRenderer } from '@/lib/electron-bridge';
 import { reportPrintOutcome } from '@/lib/print-notify';
 import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
 import ShopClosingSummaryModal from '@/pages/dashboard/components/ShopClosingSummaryModal';
+import { useLanguage } from '@/i18n';
+import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 
 // Icons keyed by DASHBOARD_PAGES's `key` - kept separate from that shared
 // list since it lives in lib/ and can't hold JSX.
@@ -60,6 +62,7 @@ export default function DashboardShell() {
   const pathname = useLocation().pathname;
   const navigate = useNavigate();
   const role = getAuthRole();
+  const { t } = useLanguage();
   // Off-canvas sidebar on phone/tablet widths (<lg) - the sidebar used to
   // be a fixed, always-visible 224px column with zero responsive
   // breakpoints, which left literally no room for page content on a phone
@@ -196,8 +199,8 @@ export default function DashboardShell() {
         ) : null}
 
         <aside
-          className={`glass dashboard-sidebar print:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col gap-6 overflow-y-auto p-4 transition-transform duration-200 ease-out lg:static lg:z-auto lg:top-4 lg:m-4 lg:h-[calc(100vh-2rem)] lg:w-56 lg:translate-x-0 lg:rounded-[28px] ${
-            sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          className={`glass dashboard-sidebar print:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col gap-6 overflow-y-auto p-4 transition-transform duration-200 ease-out rtl:left-auto rtl:right-0 lg:static lg:z-auto lg:top-4 lg:m-4 lg:h-[calc(100vh-2rem)] lg:w-56 lg:translate-x-0 lg:rounded-[28px] ${
+            sidebarOpen ? 'translate-x-0' : '-translate-x-full rtl:translate-x-full'
           }`}
         >
           <div className="flex items-center justify-between gap-2 px-2">
@@ -229,7 +232,7 @@ export default function DashboardShell() {
               <NavItem
                 key={item.label}
                 icon={item.icon}
-                label={item.label}
+                label={t(`sidebar.${item.key}`)}
                 href={item.href}
                 hotkey={item.hotkey}
                 active={pathname === item.href}
@@ -288,6 +291,7 @@ export default function DashboardShell() {
               <TopAction icon={<Cloud size={15} />} className="hidden sm:flex" />
               <TopAction icon={<MessageCircle size={15} />} />
               <NotificationBellButton />
+              <LanguageSwitcher />
               <button
                 type="button"
                 onClick={async () => {
@@ -298,7 +302,7 @@ export default function DashboardShell() {
                 className="glass-pill flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-white/70 sm:px-3"
               >
                 <LogOut size={13} />
-                <span className="hidden sm:inline">Logout</span>
+                <span className="hidden sm:inline">{t('dashboardShell.logout')}</span>
               </button>
             </div>
           </div>

@@ -16,6 +16,7 @@ import { reportPrintOutcome, listenForPrintSentMessages } from '@/lib/print-noti
 import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabled } from '@/lib/kitchen-print-routing';
 import { Store } from 'lucide-react';
 import { isTypingTarget, useBackspaceToClose } from '@/lib/keyboard-shortcuts';
+import { useLanguage } from '@/i18n';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -52,6 +53,7 @@ type ProductGroup = {
 const PENDING_ITEMS_POLL_MS = 5000;
 
 export default function POSPage() {
+  const { t } = useLanguage();
   const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
   const { toast: shopToast, popup } = useToast();
   const { notify } = useNotifications();
@@ -202,9 +204,9 @@ export default function POSPage() {
       if (silent) return;
       const diagnostics = await getLocalHubStartDiagnostics();
       const reason = diagnostics && !diagnostics.started
-        ? ` (${diagnostics.error || 'failed to start'})`
+        ? ` (${diagnostics.error || t('pos.status.failedToStart')})`
         : '';
-      setStatusMessage({ tone: 'error', text: `Offline, and the Local Hub isn't reachable either${reason} - restart the app to enable offline mode.` });
+      setStatusMessage({ tone: 'error', text: t('pos.status.localHubUnreachable', { reason }) });
       return;
     }
     const snapshot = await getReferenceData();
@@ -216,9 +218,10 @@ export default function POSPage() {
     setWaiters(offlineWaiters.filter((waiter) => waiter.isActive));
     if (silent) return;
     if (offlineProducts.length === 0) {
-      setStatusMessage({ tone: 'error', text: "Offline - no cached product data yet. Connect to the internet at least once so this till can build an offline copy." });
+      setStatusMessage({ tone: 'error', text: t('pos.status.noCachedProducts') });
     } else {
-      setStatusMessage({ tone: 'info', text: `Offline - showing the product list as of the last sync${snapshot.updatedAt ? ` (${new Date(snapshot.updatedAt).toLocaleTimeString()})` : ''}.` });
+      const time = snapshot.updatedAt ? ` (${new Date(snapshot.updatedAt).toLocaleTimeString()})` : '';
+      setStatusMessage({ tone: 'info', text: t('pos.status.offlineShowingCache', { time }) });
     }
   }
 
@@ -287,7 +290,7 @@ export default function POSPage() {
       } catch (error) {
         setCategories(['All']);
         setProducts([]);
-        setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to load products from database.' });
+        setStatusMessage({ tone: 'error', text: error instanceof Error ? error.message : t('pos.status.loadProductsFailed') });
       } finally {
         setIsLoadingProducts(false);
       }
@@ -379,7 +382,7 @@ export default function POSPage() {
   useEffect(() => {
     setTaxRate(getStoreSettings().taxRate || 0);
     if (!isAuthenticated()) {
-      setStatusMessage({ tone: 'info', text: 'Login token not found. Orders will not sync to MongoDB until you log in again.' });
+      setStatusMessage({ tone: 'info', text: t('pos.status.loginTokenMissing') });
     }
   }, []);
 
@@ -523,7 +526,8 @@ export default function POSPage() {
       const match = productCodeLookup.get(trimmed.toLowerCase());
       if (match) {
         addToCart(match);
-        shopToast.success(`Added "${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}" via code ${match.productCode}.`);
+        const displayName = `${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}`;
+        shopToast.success(t('pos.addedProductViaCode', { name: displayName, code: match.productCode ?? '' }));
         setProductCodeInput('');
       }
     }, 350);
@@ -546,7 +550,8 @@ export default function POSPage() {
       const match = productCodeLookup.get(trimmed.toLowerCase());
       if (match) {
         addToCart(match);
-        shopToast.success(`Added "${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}" via code ${match.productCode}.`);
+        const displayName = `${match.name}${match.variation && match.variation !== 'Standard' ? ` (${match.variation})` : ''}`;
+        shopToast.success(t('pos.addedProductViaCode', { name: displayName, code: match.productCode ?? '' }));
         setProductCodeInput('');
       } else {
         // Visual Product Code Tracing: keep the typed/scanned text visible
@@ -554,7 +559,7 @@ export default function POSPage() {
         // see what was entered to spot a typo or a bad scan, rather than
         // the field silently going blank. It only clears once the item is
         // successfully added (above) or the cashier clears it themselves.
-        shopToast.error(`No product/deal found with code "${trimmed}".`);
+        shopToast.error(t('pos.noProductCodeMatch', { code: trimmed }));
       }
       return;
     }
@@ -766,7 +771,7 @@ export default function POSPage() {
     setShowNewCustomerPrompt(false);
     setSearchQuery('');
     setShowSuggestions(false);
-    shopToast.success(`Customer "${customer.name}" loaded into the order form.`);
+    shopToast.success(t('pos.customerLoaded', { name: customer.name }));
   }
 
   function formatPhoneToDigits(value: string) {
@@ -818,7 +823,7 @@ export default function POSPage() {
     setShowSuggestions(false);
     if (isPhoneSearch) nameInputRef.current?.focus();
     else phoneInputRef.current?.focus();
-    shopToast.info('No saved customer matched. Fill the remaining fields to create one during checkout.');
+    shopToast.info(t('pos.noCustomerMatched'));
   }
 
   async function updateExistingCustomerIfNeeded() {
@@ -831,12 +836,12 @@ export default function POSPage() {
   // Requirements for Dynamic Popups #1, whose own example is exactly this:
   // trying to save a dine-in order without picking a table.
   function showValidationError(message: string) {
-    popup({ tone: 'error', title: "Can't Save Order", message });
+    popup({ tone: 'error', title: t("pos.cantSaveOrderTitle"), message });
     return false;
   }
 
   function validateOrderForm() {
-    if (cart.length === 0) return showValidationError('Add at least one product before saving the order.');
+    if (cart.length === 0) return showValidationError(t('pos.addProductBeforeSaving'));
 
     // Strict Delivery Field Validation: unlike TakeAway (name/phone/
     // address optional below), a Delivery order can't be handed to a rider
@@ -865,8 +870,8 @@ export default function POSPage() {
     // (or an invalid one) is more
     // likely a typo than a deliberate walk-in, and a due left on a
     // phone-but-no-name order can't reliably be found again later.
-    if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError('Use phone format 03XXXXXXXXX, or leave it empty.');
-    if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError('Customer name is required when a phone number is entered.');
+    if (orderFormData.phone && !/^03\d{9}$/.test(orderFormData.phone)) return showValidationError(t('pos.invalidPhoneFormat'));
+    if (orderFormData.phone && !orderFormData.customer.trim()) return showValidationError(t('pos.nameRequiredWithPhone'));
     return true;
   }
 
@@ -914,7 +919,7 @@ export default function POSPage() {
           void checkPendingOrder(orderFormData.phone)
             .then((pendingOrder) => {
               if (pendingOrder?.exists && !orderFinalized) {
-                shopToast.info('Note: this customer has an earlier pending bill. It will be added to their next payment.');
+                shopToast.info(t('pos.pendingBillNote'));
               }
             })
             .catch(() => {
@@ -1141,8 +1146,8 @@ export default function POSPage() {
       // A customer-sync failure gets its own warning-toned popup instead of
       // pretending everything went perfectly - the order itself is still
       // saved fine either way.
-      const savedOrderLabel = `Order #${savedOrder.dailyOrderNumber || savedOrder.id}`;
-      const contextLine = 'Kitchen receipt is printing now.';
+      const savedOrderLabel = t('pos.orderSavedLabel', { number: savedOrder.dailyOrderNumber || savedOrder.id });
+      const contextLine = t('pos.kitchenReceiptPrinting');
 
       // No blocking pop-ups here by design - the notification bar/bell
       // (see lib/notifications.tsx) is now the sole confirmation surface
@@ -1154,10 +1159,10 @@ export default function POSPage() {
       // can start the next order immediately - a no-op here since we're
       // already on it, kept for a consistent notify() call shape.
       const confirmationMessage = isOfflineOrder
-        ? `Offline order #${savedOrder.dailyOrderNumber} queued. It'll sync to the cloud automatically once you're back online.`
+        ? t('pos.offlineOrderQueued', { number: savedOrder.dailyOrderNumber ?? '' })
         : savedOrder.customerSyncWarning
-        ? `${savedOrderLabel} saved, but: ${savedOrder.customerSyncWarning}`
-        : `${savedOrderLabel} saved! ${contextLine}`;
+        ? t('pos.orderSavedWithWarning', { label: savedOrderLabel, warning: savedOrder.customerSyncWarning })
+        : t('pos.orderSaved', { label: savedOrderLabel, context: contextLine });
       notify('order_saved', confirmationMessage, { orderId: savedOrder.id, navigateToPos: true });
 
       const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
@@ -1242,7 +1247,7 @@ export default function POSPage() {
         void sendOrderPlacedMessage(savedOrder, getStoreSettings());
       }
     } catch (error) {
-      popup({ tone: 'error', title: "Order Wasn't Saved", message: error instanceof Error ? error.message : 'Failed to save the order. Check your internet connection and try again.' });
+      popup({ tone: 'error', title: t("pos.orderNotSavedTitle"), message: error instanceof Error ? error.message : t('pos.orderSaveFailedFallback') });
     } finally {
       isSavingOrderRef.current = false;
       setIsSavingOrder(false);
@@ -1257,14 +1262,14 @@ export default function POSPage() {
         // this into a real ShopSession the moment the till is back online
         // (see offline-sync.ts's reconciliation step).
         openShopLocally();
-        shopToast.success('Shop opened offline. Will sync once back online.');
+        shopToast.success(t('pos.shopOpenedOffline'));
         return;
       }
       await openShopSession();
       await refreshShopSession();
-      shopToast.success('Shop opened. Orders can now be taken.');
+      shopToast.success(t('pos.shopOpened'));
     } catch (error) {
-      shopToast.error(error instanceof Error ? error.message : 'Failed to open shop.');
+      shopToast.error(error instanceof Error ? error.message : t('pos.openShopFailed'));
     } finally {
       setIsOpeningShop(false);
     }
@@ -1284,9 +1289,9 @@ export default function POSPage() {
         <div className="glass-pill mb-5 flex h-16 w-16 items-center justify-center rounded-full text-gray-400">
           <Store size={28} />
         </div>
-        <h2 className="text-xl font-black text-gray-900">The shop is closed</h2>
+        <h2 className="text-xl font-black text-gray-900">{t('pos.shopClosedTitle')}</h2>
         <p className="mt-2 max-w-sm text-sm font-bold text-gray-400">
-          Open the shop to start taking orders. Once open, every order rung up here counts toward this shift's totals until it's closed.
+          {t('pos.shopClosedMessage')}
         </p>
         {canManage ? (
           <button
@@ -1296,10 +1301,10 @@ export default function POSPage() {
             className="mt-6 flex items-center gap-2 rounded-full border-[0.5px] border-white/40 bg-gradient-to-b from-emerald-400 to-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.4),inset_0_-3px_8px_rgba(6,95,70,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Store size={16} />
-            {isOpeningShop ? 'Opening...' : 'Open Shop'}
+            {isOpeningShop ? t('pos.openingShop') : t('pos.openShop')}
           </button>
         ) : (
-          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">Ask a Manager or the Shop Owner to open the shop.</p>
+          <p className="mt-6 text-xs font-bold uppercase tracking-widest text-gray-400">{t('pos.askManagerToOpen')}</p>
         )}
       </div>
     );
@@ -1328,8 +1333,8 @@ export default function POSPage() {
                 tighter, and no more orphaned toggle row. */}
             <div className="flex items-center gap-2 sm:gap-4">
               <div className="relative min-w-0 flex-1 lg:max-w-md">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input ref={productSearchInputRef} type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder="Search products by name" className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
+                <Search className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+                <input ref={productSearchInputRef} type="text" value={productSearchQuery} onChange={(event) => setProductSearchQuery(event.target.value)} placeholder={t('pos.searchPlaceholder')} className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 rtl:pl-4 rtl:pr-12 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
               </div>
               <div className="glass-pill flex shrink-0 items-center gap-2 rounded-full p-1.5">
                 <IconToggleButton active={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid size={18} /></IconToggleButton>
@@ -1344,15 +1349,15 @@ export default function POSPage() {
                 type dropdown (Dine-In/Takeaway/Delivery) in the checkout
                 panel, per the Hotkey Navigation Order Flow. */}
             <div className="relative mt-3 lg:max-w-xs">
-              <Barcode className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+              <Barcode className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
               <input
                 ref={productCodeInputRef}
                 type="text"
                 value={productCodeInput}
                 onChange={(event) => handleProductCodeChange(event.target.value)}
                 onKeyDown={handleProductCodeKeyDown}
-                placeholder="Scan or type Product Code..."
-                className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
+                placeholder={t('pos.productCodePlaceholder')}
+                className="w-full rounded-full border border-white/60 bg-white/50 py-3 pl-12 pr-4 rtl:pl-4 rtl:pr-12 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
               />
             </div>
             {/* Wraps onto as many lines as needed instead of scrolling
@@ -1362,7 +1367,7 @@ export default function POSPage() {
             <div className="mt-4 flex flex-wrap gap-1.5">
               {categories.map((category) => (
                 <button key={category} type="button" onClick={() => setActiveCategory(category)} className={`whitespace-nowrap rounded-full px-5 py-2.5 text-sm font-bold transition ${activeCategory === category ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}>
-                  {category}
+                  {category === 'All' ? t('common.all') : category}
                 </button>
               ))}
             </div>
@@ -1383,8 +1388,8 @@ export default function POSPage() {
               instead, the narrowest that still keeps each card legible and
               tappable, rather than reusing the desktop-only fixed count. */}
           <div className={viewMode === 'grid' ? 'grid grid-cols-2 gap-2 sm:grid-cols-4' : 'space-y-2'}>
-            {isLoadingProducts ? <SurfaceMessage text="Loading products..." /> : null}
-            {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text="No products matched your filters." /> : null}
+            {isLoadingProducts ? <SurfaceMessage text={t('pos.loadingProducts')} /> : null}
+            {!isLoadingProducts && filteredGroups.length === 0 ? <SurfaceMessage text={t('pos.noProductsMatched')} /> : null}
             {!isLoadingProducts && visibleGroups.length > 0 ? visibleGroups.map((group, groupIndex) => {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
@@ -1399,7 +1404,7 @@ export default function POSPage() {
               // card to the cart.
               const isKeyboardFocused = viewMode === 'grid' && groupIndex === focusedProductIndex;
               return (
-                <button key={group.key} type="button" onClick={() => { handleGroupClick(group); setFocusedProductIndex(groupIndex); }} className={`group overflow-hidden rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-2.5 text-left backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:border-[#E2F33C]/70 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.35)] ${isKeyboardFocused ? 'ring-2 ring-[#D6E332] ring-offset-2' : ''} ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex h-[266px] flex-col'}`}>
+                <button key={group.key} type="button" onClick={() => { handleGroupClick(group); setFocusedProductIndex(groupIndex); }} className={`group overflow-hidden rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-2.5 text-left rtl:text-right backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:border-[#E2F33C]/70 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-4px_10px_rgba(214,227,50,0.35)] ${isKeyboardFocused ? 'ring-2 ring-[#D6E332] ring-offset-2' : ''} ${viewMode === 'list' ? 'flex items-center gap-3' : 'flex h-[266px] flex-col'}`}>
                   <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 h-[110px] w-full'}`}>
                     <img src={resolveProductImage(group)} alt={group.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-110" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent" />
@@ -1412,8 +1417,8 @@ export default function POSPage() {
                         instant that count reaches 0 - see
                         pendingItemQuantities/loadPendingItemQuantities. */}
                     {pendingQty > 0 ? (
-                      <span className="absolute left-1 top-1 rounded-full bg-emerald-500/90 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={`${pendingQty} unit${pendingQty === 1 ? '' : 's'} of ${group.name} in pending orders right now`}>
-                        {pendingQty} Pending
+                      <span className="absolute left-1 top-1 rounded-full bg-emerald-500/90 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={t(pendingQty === 1 ? 'pos.pendingTooltipOne' : 'pos.pendingTooltipMany', { count: pendingQty, name: group.name })}>
+                        {t('pos.pendingBadge', { count: pendingQty })}
                       </span>
                     ) : null}
                     {/* Product Code badge - same small-pill-in-the-corner
@@ -1434,8 +1439,8 @@ export default function POSPage() {
                           {group.variations[0].productCode}
                         </span>
                       ) : (
-                        <span className="absolute right-1 top-1 rounded-full bg-slate-500/80 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title="No product code assigned yet">
-                          null
+                        <span className="absolute right-1 top-1 rounded-full bg-slate-500/80 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={t('pos.noCodeAssignedYet')}>
+                          {t('pos.noCodeBadge')}
                         </span>
                       )
                     ) : (
@@ -1449,13 +1454,13 @@ export default function POSPage() {
                       (() => {
                         const codedCount = group.variations.filter((v) => v.productCode).length;
                         const totalCount = group.variations.length;
-                        const codeList = group.variations.map((v) => v.productCode || 'null').join(',');
+                        const codeList = group.variations.map((v) => v.productCode || t('pos.noCodeBadge')).join(',');
                         const colorClass =
                           codedCount === totalCount ? 'bg-pink-500/90' : codedCount === 0 ? 'bg-slate-500/80' : 'bg-amber-500/90';
                         return (
                           <span
                             className={`absolute right-1 top-1 max-w-[80%] truncate rounded-full ${colorClass} px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm`}
-                            title={group.variations.map((v) => `${v.variation}: ${v.productCode || 'no code assigned'}`).join(' · ')}
+                            title={group.variations.map((v) => `${v.variation}: ${v.productCode || t('pos.noCodeAssigned')}`).join(' · ')}
                           >
                             {codeList}
                           </span>
@@ -1469,7 +1474,7 @@ export default function POSPage() {
                         <div className="min-w-0">
                           <h3 className="truncate text-[13px] leading-tight font-black text-gray-800">{group.name}</h3>
                           <p className="truncate text-[9px] font-bold text-gray-400">
-                            {hasVariations ? `${group.variations.length} sizes/options` : group.variations[0].variation}
+                            {hasVariations ? t('pos.sizesOptions', { count: group.variations.length }) : group.variations[0].variation}
                           </p>
                         </div>
                         <span className="shrink-0 rounded-full bg-[#EEF4C4] px-1.5 py-0.5 text-[8px] font-black uppercase text-gray-700">{totalStock}</span>
@@ -1502,8 +1507,8 @@ export default function POSPage() {
                         were fighting for width and the price (the important
                         part) was the one getting truncated ("From PKR ..."). */}
                     <div className={`${viewMode === 'list' ? '' : 'mt-3 pt-2 border-t border-gray-50'}`}>
-                      <p className="truncate text-[12px] font-black text-gray-900">{hasVariations ? `From PKR ${cheapestPrice}` : `PKR ${group.variations[0].price}`}</p>
-                      <span className="mt-1.5 inline-flex w-fit shrink-0 items-center justify-center rounded-[8px] bg-black h-[22px] px-2.5 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? 'Select' : 'Add'}</span>
+                      <p className="truncate text-[12px] font-black text-gray-900">{hasVariations ? t('pos.fromPrice', { price: cheapestPrice }) : `PKR ${group.variations[0].price}`}</p>
+                      <span className="mt-1.5 inline-flex w-fit shrink-0 items-center justify-center rounded-[8px] bg-black h-[22px] px-2.5 text-[9px] font-bold text-white transition group-hover:bg-[#E2F33C] group-hover:text-black">{hasVariations ? t('pos.select') : t('common.add')}</span>
                     </div>
                   </div>
                 </button>
@@ -1518,7 +1523,7 @@ export default function POSPage() {
                 onClick={() => setVisibleProductCount((previous) => previous + 10)}
                 className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-gray-700 shadow-sm transition hover:bg-gray-50"
               >
-                Load More ({filteredGroups.length - visibleGroups.length} more)
+                {t('pos.loadMore', { count: filteredGroups.length - visibleGroups.length })}
               </button>
             </div>
           ) : null}
@@ -1528,8 +1533,8 @@ export default function POSPage() {
           <div className="border-b border-white/40 p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-gray-400">Current Order</p>
-                <h2 className="text-xl font-black text-gray-900">POS Checkout</h2>
+                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-gray-400">{t('pos.currentOrder')}</p>
+                <h2 className="text-xl font-black text-gray-900">{t('pos.posCheckout')}</h2>
               </div>
               <button type="button" onClick={clearCart} disabled={cart.length === 0} className="glass-pill rounded-xl p-2.5 text-gray-400 transition hover:bg-rose-50/70 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-50">
                 <Trash2 size={16} />
@@ -1539,39 +1544,39 @@ export default function POSPage() {
 
           <div className="space-y-3 border-b border-white/40 bg-white/25 p-4">
             <select ref={orderTypeSelectRef} name="orderType" value={orderFormData.orderType} onChange={handleFormChange} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none">
-              <option value="TakeAway">Take Away</option>
-              <option value="Delivery">Delivery</option>
+              <option value="TakeAway">{t('pos.orderType.takeAway')}</option>
+              <option value="Delivery">{t('pos.orderType.delivery')}</option>
             </select>
 
             <div className="relative space-y-3">
-              <FormField label="Phone Number">
-                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Phone * (03XXXXXXXXX)" className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('phone')}`} />
+              <FormField label={t('pos.phoneNumberLabel')}>
+                <input ref={phoneInputRef} name="phone" value={orderFormData.phone} onChange={handlePhoneChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={t('pos.phonePlaceholder')} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('phone')}`} />
               </FormField>
-              <FormField label="Customer Name">
-                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder="Customer name *" className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('customer')}`} />
+              <FormField label={t('pos.customerNameLabel')}>
+                <input ref={nameInputRef} name="customer" value={orderFormData.customer} onChange={handleNameChange} onFocus={() => (suggestions.length > 0 || showNewCustomerPrompt) && setShowSuggestions(true)} placeholder={t('pos.customerNamePlaceholder')} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('customer')}`} />
               </FormField>
 
               {showSuggestions && (suggestions.length > 0 || showNewCustomerPrompt) ? (
                 <div ref={suggestionRef} className="glass-strong absolute left-0 right-0 top-[124px] z-20 overflow-hidden rounded-2xl">
-                  {isSearching ? <div className="p-3 text-xs text-gray-500">Searching customers...</div> : null}
+                  {isSearching ? <div className="p-3 text-xs text-gray-500">{t('pos.searchingCustomers')}</div> : null}
                   {!isSearching ? suggestions.map((customer) => (
-                    <button key={customer.id} type="button" onClick={() => handleSelectCustomer(customer)} className="block w-full border-b border-white/40 px-3 py-2 text-left transition hover:bg-white/50">
+                    <button key={customer.id} type="button" onClick={() => handleSelectCustomer(customer)} className="block w-full border-b border-white/40 px-3 py-2 text-left rtl:text-right transition hover:bg-white/50">
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <p className="text-sm font-bold text-gray-900">{customer.name}</p>
                           <p className="text-[11px] text-gray-500">{customer.phone}</p>
                           <p className="text-[10px] text-gray-400">{customer.address}</p>
                         </div>
-                        {customer.previousDues > 0 ? <span className="rounded-full bg-rose-50 px-2.5 py-1 text-[10px] font-bold text-rose-600">Due PKR {customer.previousDues}</span> : null}
+                        {customer.previousDues > 0 ? <span className="rounded-full bg-rose-50 px-2.5 py-1 text-[10px] font-bold text-rose-600">{t('pos.dueAmount', { amount: customer.previousDues })}</span> : null}
                       </div>
                     </button>
                   )) : null}
                   {!isSearching && showNewCustomerPrompt ? (
-                    <button type="button" onClick={handleCreateNewCustomer} className="flex w-full items-center gap-2 bg-emerald-50/60 px-3 py-2 text-left text-emerald-700 transition hover:bg-emerald-100/70">
+                    <button type="button" onClick={handleCreateNewCustomer} className="flex w-full items-center gap-2 bg-emerald-50/60 px-3 py-2 text-left rtl:text-right text-emerald-700 transition hover:bg-emerald-100/70">
                       <UserPlus size={16} />
                       <div>
-                        <p className="text-sm font-bold">Add New Customer</p>
-                        <p className="text-[10px]">{searchQuery.replace(/\D/g, '').length >= 3 ? `Use phone: ${formatPhoneToDigits(searchQuery)}` : `Use name: ${searchQuery}`}</p>
+                        <p className="text-sm font-bold">{t('pos.addNewCustomer')}</p>
+                        <p className="text-[10px]">{searchQuery.replace(/\D/g, '').length >= 3 ? t('pos.usePhone', { phone: formatPhoneToDigits(searchQuery) }) : t('pos.useName', { name: searchQuery })}</p>
                       </div>
                     </button>
                   ) : null}
@@ -1579,17 +1584,17 @@ export default function POSPage() {
               ) : null}
             </div>
 
-            <FormField label="Address">
-              <input ref={addressInputRef} name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? 'Customer address *' : 'Customer address'} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('address')}`} />
+            <FormField label={t('common.address')}>
+              <input ref={addressInputRef} name="address" value={orderFormData.address} onChange={handleAddressChange} placeholder={orderFormData.orderType === 'Delivery' ? t('pos.addressPlaceholderDelivery') : t('pos.addressPlaceholder')} className={`w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none transition-colors duration-300${deliveryFlashClass('address')}`} />
             </FormField>
 
             {orderFormData.orderType === 'Delivery' ? (
-              <FormField label="Delivery Fee">
+              <FormField label={t('pos.deliveryFeeLabel')}>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <DeliveryFeeButton label="Free" active={!isCustomDeliveryFee && deliveryFee === 0} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(0); }} />
+                  <DeliveryFeeButton label={t('pos.free')} active={!isCustomDeliveryFee && deliveryFee === 0} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(0); }} />
                   <DeliveryFeeButton label="30" active={!isCustomDeliveryFee && deliveryFee === 30} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(30); }} />
                   <DeliveryFeeButton label="50" active={!isCustomDeliveryFee && deliveryFee === 50} onClick={() => { setIsCustomDeliveryFee(false); setDeliveryFee(50); }} />
-                  <DeliveryFeeButton label="Custom" active={isCustomDeliveryFee} onClick={() => setIsCustomDeliveryFee(true)} />
+                  <DeliveryFeeButton label={t('pos.custom')} active={isCustomDeliveryFee} onClick={() => setIsCustomDeliveryFee(true)} />
                 </div>
                 {isCustomDeliveryFee ? (
                   <input
@@ -1598,21 +1603,21 @@ export default function POSPage() {
                     autoFocus
                     value={deliveryFee === 0 ? '' : deliveryFee}
                     onChange={(event) => setDeliveryFee(Math.max(Number(event.target.value) || 0, 0))}
-                    placeholder="Enter custom delivery fee"
+                    placeholder={t('pos.customDeliveryFeePlaceholder')}
                     className="mt-1.5 w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none"
                   />
                 ) : null}
               </FormField>
             ) : null}
 
-            <FormField label="Order Note">
-              <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder="Any special instructions..." className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
+            <FormField label={t('pos.orderNoteLabel')}>
+              <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder={t('pos.orderNotePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
             {selectedCustomerId ? (
               <div className="rounded-xl border border-sky-200/70 bg-sky-50/60 p-2.5 text-[11px] text-sky-700 shadow-inner">
                 <div className="flex items-start gap-1.5">
                   <AlertCircle size={14} className="mt-0.5" />
-                  <span>{isManualEntry ? 'Editing an existing customer. Saving the order will also update that customer record.' : 'Customer details were loaded from saved records.'}</span>
+                  <span>{isManualEntry ? t('pos.editingExistingCustomer') : t('pos.customerLoadedFromRecords')}</span>
                 </div>
               </div>
             ) : null}
@@ -1623,8 +1628,8 @@ export default function POSPage() {
               <div className="flex min-h-[160px] flex-col items-center justify-center gap-2 rounded-[20px] border border-dashed border-white/60 bg-white/30 text-center text-gray-400">
                 <ShoppingBag size={40} strokeWidth={1.4} />
                 <div>
-                  <p className="text-sm font-bold text-gray-500">Your cart is empty</p>
-                  <p className="text-[11px]">Select a product card to start the order.</p>
+                  <p className="text-sm font-bold text-gray-500">{t('pos.emptyCartTitle')}</p>
+                  <p className="text-[11px]">{t('pos.emptyCartMessage')}</p>
                 </div>
               </div>
             ) : cart.map((item, index) => (
@@ -1635,16 +1640,16 @@ export default function POSPage() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
                   <p className="truncate text-[10px] text-gray-400">{item.variation}</p>
-                  <p className="text-[10px] font-semibold text-gray-500">PKR {item.price} each</p>
+                  <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
                 </div>
                 <div className="glass-pill flex items-center gap-1 rounded-full p-1">
                   <button type="button" onClick={() => handleDecreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Minus size={10} /></button>
                   <span className="min-w-5 text-center text-xs font-black">{item.quantity}</span>
                   <button type="button" onClick={() => handleIncreaseQty(index)} className="rounded-full p-1.5 text-gray-500 transition hover:bg-white/70"><Plus size={10} /></button>
                 </div>
-                <div className="min-w-[60px] text-right">
+                <div className="min-w-[60px] text-right rtl:text-left">
                   <p className="text-sm font-black text-gray-900">PKR {item.price * item.quantity}</p>
-                  <button type="button" onClick={() => handleRemoveItem(index)} className="mt-1 text-[10px] font-semibold text-rose-500 transition hover:text-rose-700">Remove</button>
+                  <button type="button" onClick={() => handleRemoveItem(index)} className="mt-1 text-[10px] font-semibold text-rose-500 transition hover:text-rose-700">{t('pos.remove')}</button>
                 </div>
               </div>
             ))}
@@ -1652,27 +1657,27 @@ export default function POSPage() {
 
           <div className="space-y-3 rounded-b-[24px] border-t border-white/40 bg-white/25 p-4">
             <div className="grid grid-cols-3 gap-2">
-              <PaymentButton icon={<Banknote size={16} />} label="Cash" active={selectedPaymentMethod === 'Cash'} onClick={() => setSelectedPaymentMethod('Cash')} />
-              <PaymentButton icon={<CreditCard size={16} />} label="Card" active={selectedPaymentMethod === 'Card'} onClick={() => setSelectedPaymentMethod('Card')} />
-              <PaymentButton icon={<Wallet size={16} />} label="E-Wallet" active={selectedPaymentMethod === 'E-Wallet'} onClick={() => setSelectedPaymentMethod('E-Wallet')} />
+              <PaymentButton icon={<Banknote size={16} />} label={t('pos.paymentCash')} active={selectedPaymentMethod === 'Cash'} onClick={() => setSelectedPaymentMethod('Cash')} />
+              <PaymentButton icon={<CreditCard size={16} />} label={t('pos.paymentCard')} active={selectedPaymentMethod === 'Card'} onClick={() => setSelectedPaymentMethod('Card')} />
+              <PaymentButton icon={<Wallet size={16} />} label={t('pos.paymentEWallet')} active={selectedPaymentMethod === 'E-Wallet'} onClick={() => setSelectedPaymentMethod('E-Wallet')} />
             </div>
             <div className="space-y-1.5 rounded-[20px] bg-white/50 p-3 shadow-inner">
-              <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Items Total</span><span>PKR {subtotal}</span></div>
-              <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Tax ({taxRate}%)</span><span>PKR {Math.round(tax)}</span></div>
+              <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.itemsTotal')}</span><span>PKR {subtotal}</span></div>
+              <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.taxLabel', { rate: taxRate })}</span><span>PKR {Math.round(tax)}</span></div>
               {orderFormData.orderType === 'Delivery' ? (
-                <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>Delivery Fee</span><span>{effectiveDeliveryFee > 0 ? `PKR ${effectiveDeliveryFee}` : 'Free'}</span></div>
+                <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.deliveryFeeLabel')}</span><span>{effectiveDeliveryFee > 0 ? `PKR ${effectiveDeliveryFee}` : t('pos.free')}</span></div>
               ) : null}
-              <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>Total Payable</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
+              <div className="flex items-center justify-between pt-1.5 text-base font-black text-gray-900"><span>{t('pos.totalPayable')}</span><span className="text-emerald-600">PKR {Math.round(total)}</span></div>
             </div>
             <button type="button" onClick={() => void handleSaveOrder()} disabled={isSavingOrder || cart.length === 0 || getMissingDeliveryField() !== null} className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] px-5 py-3 text-base font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50">
-              {isSavingOrder ? 'Saving Order...' : 'Save Order'}
+              {isSavingOrder ? t('pos.savingOrder') : t('pos.saveOrder')}
             </button>
           </div>
         </aside>
       </div>
 
       {/* Hidden iframe that loads the receipt and triggers browser window.print() */}
-      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" /> : null}
+      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title={t('pos.autoPrintFrameTitle')} /> : null}
 
       {variationPickerGroup ? (
         <VariationPickerModal
@@ -1714,6 +1719,7 @@ function FormField({ label, children }: { label: string; children: React.ReactNo
 }
 
 function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGroup; onSelect: (variation: Product) => void; onClose: () => void }) {
+  const { t } = useLanguage();
   // Keyboard Shortcuts: Esc closes this popup instantly, same as the shared
   // toast.tsx confirm/popup dialogs - this one's local since the picker
   // isn't part of that shared system.
@@ -1736,7 +1742,7 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
           </div>
           <div className="min-w-0">
             <h3 className="truncate text-lg font-black text-gray-900">{group.name}</h3>
-            <p className="text-xs font-bold text-gray-400">Choose a size / variation</p>
+            <p className="text-xs font-bold text-gray-400">{t('pos.chooseVariation')}</p>
           </div>
         </div>
         <div className="max-h-[320px] space-y-2 overflow-y-auto">
@@ -1745,18 +1751,18 @@ function VariationPickerModal({ group, onSelect, onClose }: { group: ProductGrou
               key={variation.id}
               type="button"
               onClick={() => onSelect(variation)}
-              className="flex w-full items-center justify-between rounded-2xl border border-white/50 bg-white/50 px-4 py-3 text-left shadow-inner transition hover:border-[#E2F33C]/70 hover:bg-[#FBFDEB]/70"
+              className="flex w-full items-center justify-between rounded-2xl border border-white/50 bg-white/50 px-4 py-3 text-left rtl:text-right shadow-inner transition hover:border-[#E2F33C]/70 hover:bg-[#FBFDEB]/70"
             >
               <div className="min-w-0">
-                <p className="truncate text-sm font-black text-gray-900">{variation.variation || 'Standard'}</p>
-                <p className="text-[10px] font-bold text-gray-400">{variation.stock > 0 ? `${variation.stock} in stock` : 'Unlimited stock'}</p>
+                <p className="truncate text-sm font-black text-gray-900">{variation.variation || t('pos.standardVariation')}</p>
+                <p className="text-[10px] font-bold text-gray-400">{variation.stock > 0 ? t('pos.inStock', { count: variation.stock }) : t('pos.unlimitedStock')}</p>
               </div>
               <span className="shrink-0 text-sm font-black text-gray-900">PKR {variation.price}</span>
             </button>
           ))}
         </div>
         <button type="button" onClick={onClose} className="glass-pill mt-4 w-full rounded-2xl py-3 text-sm font-black text-gray-600 transition hover:bg-white/70">
-          Cancel
+          {t('common.cancel')}
         </button>
       </div>
     </div>

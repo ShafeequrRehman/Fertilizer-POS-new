@@ -5,6 +5,7 @@ import { createProduct, deleteProduct, fetchProducts, updateProduct } from "@/li
 import { Product } from "@/lib/pos-types";
 import { useToast } from "@/lib/toast";
 import { resolveProductImage } from "@/lib/food-images";
+import { useLanguage } from "@/i18n";
 
 // Products that share the same name+category are different "variations" of
 // the same menu item (e.g. Pizza Small/Medium/Large are 3 separate Product
@@ -36,18 +37,18 @@ const MAX_UPLOAD_DIMENSION = 480;
 // existing save/display path (see resolveProductImage in food-images.ts,
 // which treats a data: URI as a highest-priority custom image and falls
 // back to a generic placeholder when `image` is empty).
-function resizeImageToDataUrl(file: File): Promise<string> {
+function resizeImageToDataUrl(file: File, t: (key: string, vars?: Record<string, string | number>) => string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!file.type.startsWith("image/")) {
-      reject(new Error("Please choose an image file (JPG, PNG, etc.)."));
+      reject(new Error(t("productManagement.imageErrors.invalidFileType")));
       return;
     }
 
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Couldn't read that file."));
+    reader.onerror = () => reject(new Error(t("productManagement.imageErrors.readFailed")));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => reject(new Error("That file doesn't look like a valid image."));
+      img.onerror = () => reject(new Error(t("productManagement.imageErrors.invalidImage")));
       img.onload = () => {
         const scale = Math.min(1, MAX_UPLOAD_DIMENSION / Math.max(img.width, img.height));
         const width = Math.max(1, Math.round(img.width * scale));
@@ -58,7 +59,7 @@ function resizeImageToDataUrl(file: File): Promise<string> {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         if (!ctx) {
-          reject(new Error("Couldn't process that image."));
+          reject(new Error(t("productManagement.imageErrors.processFailed")));
           return;
         }
         ctx.drawImage(img, 0, 0, width, height);
@@ -71,8 +72,8 @@ function resizeImageToDataUrl(file: File): Promise<string> {
 }
 
 export function ProductManagementSection({
-  title = "Manage Products",
-  description = "Add or update products, deals, categories, icons, prices, and quantities.",
+  title,
+  description,
   cardClassName = "rounded-[28px] border border-slate-200 bg-white p-6",
 }: {
   title?: string;
@@ -80,6 +81,12 @@ export function ProductManagementSection({
   cardClassName?: string;
 }) {
   const { confirm, popup } = useToast();
+  const { t } = useLanguage();
+  // Falls back to the translated defaults when the caller doesn't pass its
+  // own title/description - see the same pattern used for every other
+  // translated section.
+  const resolvedTitle = title ?? t("productManagement.title");
+  const resolvedDescription = description ?? t("productManagement.description");
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -167,7 +174,7 @@ export function ProductManagementSection({
         setCategories(result?.categories || ["Burgers", "Drinks", "Deals", "Sides", "Pizzas"]);
       }
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't load products", message: error instanceof Error ? error.message : "Failed to load products." });
+      popup({ tone: "error", title: t("productManagement.toasts.loadFailedTitle"), message: error instanceof Error ? error.message : t("productManagement.toasts.loadFailedFallback") });
     } finally {
       setIsLoading(false);
     }
@@ -221,37 +228,37 @@ export function ProductManagementSection({
 
   async function handleSaveProduct() {
     if (!name.trim()) {
-      popup({ tone: "error", title: "Missing information", message: "Name is required." });
+      popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.nameRequired") });
       return;
     }
 
     if (!category.trim()) {
-      popup({ tone: "error", title: "Missing information", message: "Category is required." });
+      popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.categoryRequired") });
       return;
     }
 
     if (!editingId && !hasVariations && !price) {
-      popup({ tone: "error", title: "Missing information", message: "Price is required." });
+      popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequired") });
       return;
     }
 
     if (editingId && !price) {
-      popup({ tone: "error", title: "Missing information", message: "Price is required." });
+      popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequired") });
       return;
     }
 
     if (!editingId && hasVariations) {
       if (variationsData.length === 0) {
-        popup({ tone: "error", title: "Missing information", message: "Please add at least one variation, or uncheck the variations option." });
+        popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.variationRequired") });
         return;
       }
       for (const v of variationsData) {
         if (!v.name.trim()) {
-           popup({ tone: "error", title: "Missing information", message: "Variation name is required for all variations." });
+           popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.variationNameRequired") });
            return;
         }
         if (!v.price) {
-           popup({ tone: "error", title: "Missing information", message: `Price is required for variation "${v.name}".` });
+           popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequiredForVariation", { name: v.name }) });
            return;
         }
       }
@@ -302,7 +309,7 @@ export function ProductManagementSection({
           ...prev.filter((p) => !originalGroupVariationIds.has(String(p.id))),
           ...savedProducts,
         ]);
-        setStatusMessage({ tone: "success", text: `"${name}" updated successfully.` });
+        setStatusMessage({ tone: "success", text: t("productManagement.toasts.groupUpdated", { name }) });
         resetForm();
       } else if (editingId) {
         const payload = {
@@ -315,7 +322,7 @@ export function ProductManagementSection({
         const updated = await updateProduct(editingId, payload);
         if (updated) {
           setProducts((prev) => prev.map((p) => (p.id === editingId ? updated : p)));
-          setStatusMessage({ tone: "success", text: `Product "${updated.name}" updated successfully.` });
+          setStatusMessage({ tone: "success", text: t("productManagement.toasts.productUpdated", { name: updated.name }) });
           resetForm();
         }
       } else {
@@ -336,7 +343,7 @@ export function ProductManagementSection({
           }
           
           setProducts((prev) => [...prev, ...newProducts]);
-          setStatusMessage({ tone: "success", text: `${newProducts.length} variants of "${name}" added successfully.` });
+          setStatusMessage({ tone: "success", text: t("productManagement.toasts.variantsAdded", { count: newProducts.length, name }) });
           resetForm();
         } else {
           const payload = {
@@ -349,13 +356,13 @@ export function ProductManagementSection({
           const created = await createProduct(payload);
           if (created) {
             setProducts((prev) => [...prev, created]);
-            setStatusMessage({ tone: "success", text: `Product "${created.name}" added successfully.` });
+            setStatusMessage({ tone: "success", text: t("productManagement.toasts.productAdded", { name: created.name }) });
             resetForm();
           }
         }
       }
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't save", message: error instanceof Error ? error.message : "Failed to save product." });
+      popup({ tone: "error", title: t("productManagement.toasts.saveFailedTitle"), message: error instanceof Error ? error.message : t("productManagement.toasts.saveFailedFallback") });
     } finally {
       setIsSaving(false);
     }
@@ -387,9 +394,9 @@ export function ProductManagementSection({
 
   async function handleDeleteVariation(product: Product) {
     const label = product.variation && product.variation !== "Standard" ? `${product.name} (${product.variation})` : product.name;
-    const confirmed = await confirm(`Delete "${label}"? This cannot be undone.`, {
-      title: "Delete product",
-      confirmText: "Delete",
+    const confirmed = await confirm(t("productManagement.toasts.deleteConfirmMessage", { label }), {
+      title: t("productManagement.toasts.deleteConfirmTitle"),
+      confirmText: t("common.delete"),
       tone: "danger",
     });
     if (!confirmed) {
@@ -398,12 +405,12 @@ export function ProductManagementSection({
     try {
       await deleteProduct(product.id);
       setProducts((prev) => prev.filter((p) => p.id !== product.id));
-      setStatusMessage({ tone: "success", text: `"${label}" deleted.` });
+      setStatusMessage({ tone: "success", text: t("productManagement.toasts.deletedMessage", { label }) });
       if (editingId === product.id) {
         resetForm();
       }
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't delete", message: error instanceof Error ? error.message : "Failed to delete product." });
+      popup({ tone: "error", title: t("productManagement.toasts.deleteFailedTitle"), message: error instanceof Error ? error.message : t("productManagement.toasts.deleteFailedFallback") });
     }
   }
 
@@ -473,10 +480,10 @@ export function ProductManagementSection({
     if (!file) return;
     try {
       setIsUploadingImage(true);
-      const dataUrl = await resizeImageToDataUrl(file);
+      const dataUrl = await resizeImageToDataUrl(file, t);
       setImage(dataUrl);
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't use that photo", message: error instanceof Error ? error.message : "Failed to process that image." });
+      popup({ tone: "error", title: t("productManagement.toasts.photoFailedTitle"), message: error instanceof Error ? error.message : t("productManagement.toasts.photoFailedFallback") });
     } finally {
       setIsUploadingImage(false);
       if (imageFileInputRef.current) imageFileInputRef.current.value = "";
@@ -521,9 +528,9 @@ export function ProductManagementSection({
     <div className={cardClassName}>
       <div className="flex items-center gap-2 mb-4">
         <Package size={18} className="text-indigo-600" />
-        <h3 className="text-lg font-black text-slate-900">{title}</h3>
+        <h3 className="text-lg font-black text-slate-900">{resolvedTitle}</h3>
       </div>
-      <p className="max-w-2xl text-sm text-slate-500 mb-6">{description}</p>
+      <p className="max-w-2xl text-sm text-slate-500 mb-6">{resolvedDescription}</p>
 
       {statusMessage ? (
         <div className="mb-5 flex items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
@@ -536,7 +543,7 @@ export function ProductManagementSection({
 
         {(editingId || isEditingGroup) && (
           <h4 className="text-sm font-black uppercase text-indigo-600 tracking-wider flex items-center gap-2 border-b border-indigo-100 pb-3">
-            <Edit size={16} /> {isEditingGroup ? "Edit Product (all variations)" : "Edit Product"}
+            <Edit size={16} /> {isEditingGroup ? t("productManagement.editHeading.group") : t("productManagement.editHeading.single")}
           </h4>
         )}
 
@@ -546,13 +553,13 @@ export function ProductManagementSection({
             categories are one tap away as chips so building out a menu
             doesn't mean retyping "Pizza" for every single item. */}
         <div className="space-y-2">
-          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
+          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("common.category")}</label>
           <input
             type="text"
             value={category}
             onChange={(e) => setCategory(e.target.value)}
             list="categories-list"
-            placeholder="e.g. Khad, Spray, Seed"
+            placeholder={t("productManagement.fields.categoryPlaceholder")}
             className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
           />
           <datalist id="categories-list">
@@ -579,28 +586,28 @@ export function ProductManagementSection({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-2">
             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">
-              Company (Optional)
+              {t("productManagement.fields.company")}
             </label>
             <input
               type="text"
               value={company}
               onChange={(e) => setCompany(e.target.value)}
-              placeholder="e.g. Engro, Fauji, FFC"
+              placeholder={t("productManagement.fields.companyPlaceholder")}
               className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
             />
           </div>
           <div className="space-y-2">
             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">
-              Product Name
+              {t("productManagement.fields.productName")}
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Urea, DAP, Antracool, Poma"
+              placeholder={t("productManagement.fields.productNamePlaceholder")}
               className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
             />
-            <p className="text-[10px] font-bold text-slate-400 ml-1">This is what shows as its own card under "{category || "Category"}" - add its sizes/flavours below.</p>
+            <p className="text-[10px] font-bold text-slate-400 ml-1">{t("productManagement.fields.productNameHint", { category: category || t("common.category") })}</p>
           </div>
         </div>
 
@@ -608,59 +615,59 @@ export function ProductManagementSection({
         {(!hasVariations || editingId) && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-2">
             <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Price</label>
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("common.price")}</label>
               <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 font-black text-[14px]">PKR</span>
+                <span className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-slate-300 font-black text-[14px]">PKR</span>
                 <input
                   type="number"
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
                   placeholder="0.00"
-                  className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white pl-12 pr-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+                  className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white pl-12 pr-4 rtl:pl-4 rtl:pr-12 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Quantity / Stock (Optional)</label>
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.quantity")}</label>
               <input
                 type="number"
                 value={qty}
                 onChange={(e) => setQty(e.target.value)}
-                placeholder="Unlimited if empty"
+                placeholder={t("productManagement.fields.quantityPlaceholder")}
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
             <div className="space-y-2 md:col-span-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Product Code / SKU (Optional)</label>
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.productCode")}</label>
               <input
                 type="text"
                 value={productCode}
                 onChange={(e) => setProductCode(e.target.value)}
-                placeholder="Type or scan a barcode - lets staff add this instantly on the POS screen"
+                placeholder={t("productManagement.fields.productCodePlaceholder")}
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
             {editingId && (
               <div className="space-y-2 md:col-span-2">
-                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Variation Name</label>
+                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.variationName")}</label>
                 <div className="flex flex-wrap items-center gap-3">
                   <input
                     type="text"
                     value={variation}
                     onChange={(e) => setVariation(e.target.value)}
-                    placeholder="e.g. Small, Medium, Large (or Standard for a single-size item)"
+                    placeholder={t("productManagement.fields.variationNamePlaceholder")}
                     className="flex-1 min-w-[200px] rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
                   />
                   <button
                     type="button"
                     onClick={handleAddVariationFromEdit}
-                    title="Add another variation to this product"
+                    title={t("productManagement.fields.addPatternTitle")}
                     className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-5 py-3.5 rounded-2xl transition-colors shadow-sm shrink-0"
                   >
-                    <Plus size={14} /> Add Pattern
+                    <Plus size={14} /> {t("productManagement.variations.addPattern")}
                   </button>
                 </div>
-                <p className="text-[10px] font-bold text-slate-400 ml-1">Adds a brand new size/variation to this same product (e.g. add "Large" to an existing Pizza).</p>
+                <p className="text-[10px] font-bold text-slate-400 ml-1">{t("productManagement.fields.addPatternHint")}</p>
               </div>
             )}
           </div>
@@ -680,23 +687,23 @@ export function ProductManagementSection({
                 className="w-5 h-5 text-indigo-600 rounded accent-indigo-600"
               />
               <div className="flex flex-col">
-                <span className="text-sm font-black text-slate-800">Add sizes / flavours</span>
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">e.g. Small, Medium, Large - each with its own price</span>
+                <span className="text-sm font-black text-slate-800">{t("productManagement.variations.addToggleLabel")}</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">{t("productManagement.variations.addToggleHint")}</span>
               </div>
             </label>
 
             {hasVariations && (
-              <div className="space-y-3 pl-6 border-l-2 border-indigo-100 py-2">
+              <div className="space-y-3 pl-6 rtl:pl-0 rtl:pr-6 border-l-2 rtl:border-l-0 rtl:border-r-2 border-indigo-100 py-2">
                 <div className="flex flex-wrap items-center gap-2 pb-1">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Quick fill:</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1 rtl:mr-0 rtl:ml-1">{t("productManagement.variations.quickFill")}</span>
                   <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    Small / Medium / Large
+                    {t("productManagement.variations.presetSmallMediumLarge")}
                   </button>
                   <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large", "X-Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    + X-Large
+                    {t("productManagement.variations.presetXLarge")}
                   </button>
                   <button type="button" onClick={() => applySizePreset(["Half", "Full"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    Half / Full
+                    {t("productManagement.variations.presetHalfFull")}
                   </button>
                 </div>
                 {variationsData.map((v, i) => (
@@ -704,7 +711,7 @@ export function ProductManagementSection({
                     <div className="flex-1 min-w-[150px]">
                       <input 
                         type="text" 
-                        placeholder="Size / Flavour Name (e.g. Small)"
+                        placeholder={t("productManagement.variations.namePlaceholder")}
                         value={v.name} 
                         onChange={(e) => {
                           const newVars = [...variationsData];
@@ -715,23 +722,23 @@ export function ProductManagementSection({
                       />
                     </div>
                     <div className="relative w-28">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300 font-bold text-[10px]">PKR</span>
-                      <input 
-                        type="number" 
-                        placeholder="Price" 
-                        value={v.price} 
+                      <span className="absolute left-3 rtl:left-auto rtl:right-3 top-1/2 -translate-y-1/2 text-slate-300 font-bold text-[10px]">PKR</span>
+                      <input
+                        type="number"
+                        placeholder={t("productManagement.variations.pricePlaceholder")}
+                        value={v.price}
                         onChange={(e) => {
                           const newVars = [...variationsData];
                           newVars[i].price = e.target.value;
                           setVariationsData(newVars);
-                        }} 
-                        className="w-full rounded-[14px] border border-slate-200 pl-9 pr-2 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all" 
+                        }}
+                        className="w-full rounded-[14px] border border-slate-200 pl-9 pr-2 rtl:pl-2 rtl:pr-9 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
                       />
                     </div>
                     <div className="w-24">
                       <input
                         type="number"
-                        placeholder="Qty"
+                        placeholder={t("productManagement.variations.qtyPlaceholder")}
                         value={v.qty}
                         onChange={(e) => {
                           const newVars = [...variationsData];
@@ -744,7 +751,7 @@ export function ProductManagementSection({
                     <div className="w-36">
                       <input
                         type="text"
-                        placeholder="Product Code / SKU"
+                        placeholder={t("productManagement.variations.codePlaceholder")}
                         value={v.productCode}
                         onChange={(e) => {
                           const newVars = [...variationsData];
@@ -761,7 +768,7 @@ export function ProductManagementSection({
                           setVariationsData(variationsData.filter(item => item.id !== v.id));
                         }}
                         className="p-2.5 text-rose-400 hover:text-white hover:bg-rose-500 rounded-[12px] transition-colors shadow-sm"
-                        title="Remove Variation"
+                        title={t("productManagement.variations.removeTitle")}
                       >
                         <Trash2 size={16} />
                       </button>
@@ -776,7 +783,7 @@ export function ProductManagementSection({
                   }}
                   className="mt-3 inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-5 py-3 rounded-[16px] transition-colors shadow-sm"
                 >
-                  <Plus size={14} /> Add Pattern
+                  <Plus size={14} /> {t("productManagement.variations.addPattern")}
                 </button>
               </div>
             )}
@@ -788,12 +795,12 @@ export function ProductManagementSection({
             relevant to every business; resolveProductImage still falls back
             to a clean generic placeholder when a product has no photo). */}
         <div className="pt-2">
-          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 block mb-3">Product Photo</label>
+          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 block mb-3">{t("productManagement.photo.label")}</label>
           <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-dashed border-slate-300 bg-white p-4">
             <div className="h-16 w-16 shrink-0 overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
               <img
                 src={resolveProductImage({ image, name, category })}
-                alt="Product preview"
+                alt={t("productManagement.photo.previewAlt")}
                 className="h-full w-full object-cover"
               />
             </div>
@@ -805,7 +812,7 @@ export function ProductManagementSection({
                   disabled={isUploadingImage}
                   className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-4 py-2.5 rounded-xl transition-colors shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <Upload size={14} /> {isUploadingImage ? "Processing..." : "Upload Photo"}
+                  <Upload size={14} /> {isUploadingImage ? t("productManagement.photo.processing") : t("productManagement.photo.upload")}
                 </button>
                 {image ? (
                   <button
@@ -813,7 +820,7 @@ export function ProductManagementSection({
                     onClick={() => setImage("")}
                     className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-rose-600 bg-rose-50 hover:bg-rose-100 px-4 py-2.5 rounded-xl transition-colors shadow-sm"
                   >
-                    <X size={14} /> Remove Photo
+                    <X size={14} /> {t("productManagement.photo.remove")}
                   </button>
                 ) : null}
               </div>
@@ -824,7 +831,7 @@ export function ProductManagementSection({
                 className="hidden"
                 onChange={(e) => void handleImageFileSelected(e.target.files?.[0] ?? null)}
               />
-              <p className="text-[10px] font-bold text-slate-400">Upload a photo from your device (JPG/PNG) - it's resized automatically.</p>
+              <p className="text-[10px] font-bold text-slate-400">{t("productManagement.photo.hint")}</p>
             </div>
           </div>
         </div>
@@ -837,7 +844,7 @@ export function ProductManagementSection({
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/30 bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] transition-all hover:-translate-y-0.5"
           >
             {(editingId || isEditingGroup) ? <Edit size={16} /> : <Plus size={16} />}
-            {isSaving ? "Saving..." : ((editingId || isEditingGroup) ? "Update Product" : "Publish Product")}
+            {isSaving ? t("common.saving") : ((editingId || isEditingGroup) ? t("productManagement.actions.updateProduct") : t("productManagement.actions.publishProduct"))}
           </button>
 
           {(editingId || isEditingGroup) && (
@@ -847,7 +854,7 @@ export function ProductManagementSection({
               className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-200 px-6 py-4 text-sm font-black text-slate-700 hover:bg-slate-300 transition-all shadow-sm"
             >
               <X size={16} />
-              Cancel Edit
+              {t("common.cancelEdit")}
             </button>
           )}
         </div>
@@ -856,23 +863,23 @@ export function ProductManagementSection({
       <div className="mt-10 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-3">
           <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider flex items-center gap-2">
-             <Package size={14} /> Products Directory ({directoryGroups.length})
+             <Package size={14} /> {t("productManagement.directory.heading", { count: directoryGroups.length })}
           </h4>
           <div className="relative w-full sm:w-64">
-             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+             <span className="absolute left-3 rtl:left-auto rtl:right-3 top-1/2 -translate-y-1/2 text-slate-400">
                <Search size={16} />
              </span>
              <input
                type="text"
-               placeholder="Search products..."
+               placeholder={t("productManagement.directory.searchPlaceholder")}
                value={searchQuery}
                onChange={(e) => setSearchQuery(e.target.value)}
-               className="w-full rounded-[14px] border border-slate-200 bg-white pl-9 pr-4 py-2 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all shadow-sm"
+               className="w-full rounded-[14px] border border-slate-200 bg-white pl-9 pr-4 rtl:pl-4 rtl:pr-9 py-2 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all shadow-sm"
              />
           </div>
         </div>
-        {isLoading ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse border border-slate-100">Syncing products...</div> : null}
-        {!isLoading && directoryGroups.length === 0 ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 border border-slate-100">No products configured yet.</div> : null}
+        {isLoading ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse border border-slate-100">{t("productManagement.directory.syncing")}</div> : null}
+        {!isLoading && directoryGroups.length === 0 ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 border border-slate-100">{t("productManagement.directory.empty")}</div> : null}
 
         <div className="flex flex-col gap-3">
           {!isLoading ? directoryGroups.map((group) => {
@@ -920,12 +927,12 @@ export function ProductManagementSection({
                         {group.name}
                         {hasMultiple ? (
                           <span className="bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-lg text-[10px] uppercase font-black tracking-wider">
-                            {group.variations.length} variations
+                            {t("productManagement.directory.variationsCount", { count: group.variations.length })}
                           </span>
                         ) : (!group.isDeal && single.variation && single.variation !== "Standard" ? (
                           <span className="text-slate-400 font-bold">({single.variation})</span>
                         ) : null)}
-                        {group.isDeal && <span className="bg-rose-100 text-rose-600 px-2 py-0.5 rounded-lg text-[10px] uppercase font-black tracking-wider shadow-sm">Deal Bundle</span>}
+                        {group.isDeal && <span className="bg-rose-100 text-rose-600 px-2 py-0.5 rounded-lg text-[10px] uppercase font-black tracking-wider shadow-sm">{t("productManagement.directory.dealBundle")}</span>}
                       </div>
                       <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mt-1">
                         {group.category}{group.company ? ` · ${group.company}` : ""}
@@ -953,7 +960,7 @@ export function ProductManagementSection({
                       </div>
                       <div className="flex items-center gap-1 mt-1 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                         <Archive size={10} />
-                        <span>{totalStock > 0 ? `${totalStock} in stock` : "Unlimited"}</span>
+                        <span>{totalStock > 0 ? t("productManagement.directory.inStock", { count: totalStock }) : t("common.unlimited")}</span>
                       </div>
                     </div>
                     {hasMultiple ? (
@@ -962,7 +969,7 @@ export function ProductManagementSection({
                           <button
                             type="button"
                             onClick={() => handleEditGroupClick(group)}
-                            title="Edit this product (name, image, category, and all its variations)"
+                            title={t("productManagement.directory.editGroupTitle")}
                             className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-sm"
                           >
                             <Edit size={16} />
@@ -970,10 +977,10 @@ export function ProductManagementSection({
                           <button
                             type="button"
                             onClick={() => handleAddVariationClick(group)}
-                            title="Add another variation"
+                            title={t("productManagement.directory.addVariationTitle")}
                             className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm shrink-0"
                           >
-                            <Plus size={14} /> Add
+                            <Plus size={14} /> {t("common.add")}
                           </button>
                         </div>
                       )
@@ -999,14 +1006,14 @@ export function ProductManagementSection({
                 {hasMultiple && isExpanded && (
                   <div className="border-t border-slate-100 divide-y divide-slate-50 bg-slate-50/40">
                     {group.variations.map((v) => (
-                      <div key={v.id} className="flex items-center justify-between px-4 py-3 pl-[90px]">
+                      <div key={v.id} className="flex items-center justify-between px-4 py-3 pl-[90px] rtl:pl-4 rtl:pr-[90px]">
                         <div className="text-sm font-black text-slate-700">
-                          {v.variation && v.variation !== "Standard" ? v.variation : "Standard"}
+                          {v.variation && v.variation !== "Standard" ? v.variation : t("productManagement.directory.standardVariation")}
                         </div>
                         <div className="flex items-center gap-5">
                           <div className="text-sm font-black text-slate-900">PKR {v.price}</div>
-                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest w-24 text-right">
-                            {v.stock > 0 ? `${v.stock} in stock` : "Unlimited"}
+                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest w-24 text-right rtl:text-left">
+                            {v.stock > 0 ? t("productManagement.directory.inStock", { count: v.stock }) : t("common.unlimited")}
                           </div>
                           <div className="flex items-center gap-1">
                             <button

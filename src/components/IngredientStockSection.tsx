@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, Plus, Edit, Trash2, Search, PackagePlus, ShoppingCart, AlertTriangle, X, Tags, Building2, Download, FileSpreadsheet, MessageCircle, History, Clock, CheckCircle2 } from "lucide-react";
+import { Boxes, Plus, Edit, Trash2, Search, PackagePlus, ShoppingCart, AlertTriangle, X, Building2, Download, FileSpreadsheet, MessageCircle, History, Clock, CheckCircle2 } from "lucide-react";
 import {
-  fetchIngredientCategories,
-  createIngredientCategory,
-  deleteIngredientCategory,
   fetchIngredients,
   createIngredient,
   updateIngredient,
@@ -15,9 +12,10 @@ import {
   updateSupplier,
   deleteSupplier,
   fetchIngredientPurchases,
+  fetchProducts,
   sendWhatsappDocument,
 } from "@/lib/pos-api";
-import { Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Recipe, Supplier } from "@/lib/pos-types";
+import { Ingredient, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product, Recipe, Supplier } from "@/lib/pos-types";
 import { getAuthShop } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { ReportPdfDocument, downloadPdfDocument, pdfDocumentToBase64 } from "@/lib/pdf-export";
@@ -25,6 +23,7 @@ import { downloadExcelWorkbook, type ExcelCell, type ExcelSheet } from "@/lib/ex
 import { isDesktopApp } from "@/lib/api";
 import { getIngredientsCache } from "@/lib/local-hub-api";
 import { estimateOfflineIngredients } from "@/lib/offline-ingredient-helpers";
+import { useLanguage } from "@/i18n";
 
 function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
@@ -71,24 +70,39 @@ function isSameCalendarDay(value: string, reference: Date) {
 }
 
 // Task 1: "The Stock Manager should be able to add raw items/ingredients to
-// the inventory (Cheese, Chicken, Jalapeno, Beef) in grams or milliliters,
-// and categorize these ingredients (Pizza Items, Burger Items) so daily/
-// monthly incoming stock can be managed by category." Mirrors
-// ProductManagementSection.tsx's own layout (category chips, a form up top,
-// a searchable directory below) so this feels like the same app, just for
-// raw stock instead of finished menu items.
+// the inventory (Urea, DAP, Antracool) in grams, kilograms, or other units."
+// The Add/Edit form's "Product Name" field is a searchable picker over this
+// shop's own Manage Products catalog (see the Product Picker state/memo
+// below) rather than free text with a separate category system, so raw
+// stock stays tied to the same product names used at the POS. Mirrors
+// ProductManagementSection.tsx's own layout (a form up top, a searchable
+// directory below) so this feels like the same app, just for raw stock
+// instead of finished menu items.
 export function IngredientStockSection({
-  title = "Ingredient Stock",
-  description = "Add raw ingredients, group them into categories, and log incoming stock.",
+  title,
+  description,
   cardClassName = "rounded-[28px] border border-slate-200 bg-white p-6",
 }: {
   title?: string;
   description?: string;
   cardClassName?: string;
 }) {
+  const { t } = useLanguage();
+  // No caller currently passes `title`/`description` overrides - both fall
+  // back to this section's own translated defaults, resolved here (instead
+  // of as plain string parameter defaults) so they stay in the active
+  // language instead of being frozen to whatever they were at first render.
+  const resolvedTitle = title ?? t('ingredientStock.title');
+  const resolvedDescription = description ?? t('ingredientStock.description');
   const { confirm, popup } = useToast();
-  const [categories, setCategories] = useState<IngredientCategory[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  // Product Picker (Add/Edit Ingredient form): the "Product Name" field is
+  // now a searchable select over the shop's own Manage Products catalog
+  // (fetched once here, same `fetchProducts` ProductManagementSection.tsx
+  // uses) instead of free text - see the product-search dropdown below the
+  // name input and `productSuggestions` further down.
+  const [products, setProducts] = useState<Product[]>([]);
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string } | null>(null);
@@ -100,8 +114,6 @@ export function IngredientStockSection({
   // reasonable instead of a blank error state during an outage. Cleared
   // the moment a live load succeeds again.
   const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
-
-  const [newCategoryName, setNewCategoryName] = useState("");
 
   // Task 4/5 (Dynamic Company Tabs & Supplier Communication): the
   // registered Company/Supplier directory - every one of these gets its
@@ -139,7 +151,6 @@ export function IngredientStockSection({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [unit, setUnit] = useState<IngredientUnit>("g");
-  const [categoryId, setCategoryId] = useState("");
   const [currentStock, setCurrentStock] = useState("");
   const [lowStockThreshold, setLowStockThreshold] = useState("");
 
@@ -196,16 +207,16 @@ export function IngredientStockSection({
   async function loadAll() {
     try {
       setIsLoading(true);
-      const [cats, ings, sups, purs] = await Promise.all([
-        fetchIngredientCategories(),
+      const [ings, sups, purs, productsResult] = await Promise.all([
         fetchIngredients(),
         fetchSuppliers(),
         fetchIngredientPurchases(),
+        fetchProducts(),
       ]);
-      setCategories(cats || []);
       setIngredients(ings || []);
       setSuppliers(sups || []);
       setPurchases(purs || []);
+      setProducts(productsResult?.products || []);
       setOfflineSnapshotAt(null);
     } catch (error) {
       // Falls back to the Local Hub's cached snapshot (pushed down while
@@ -219,7 +230,7 @@ export function IngredientStockSection({
       // start) until back online.
       const fellBackOffline = isDesktopApp() && (await loadFromIngredientsCache());
       if (!fellBackOffline) {
-        popup({ tone: "error", title: "Couldn't load ingredient stock", message: error instanceof Error ? error.message : "Failed to load." });
+        popup({ tone: "error", title: t('ingredientStock.toasts.loadFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.loadFailedMessage') });
       }
     } finally {
       setIsLoading(false);
@@ -232,7 +243,6 @@ export function IngredientStockSection({
       if (!cache.updatedAt) return false;
       const cachedIngredients = (cache.ingredients || []) as Ingredient[];
       const cachedRecipes = (cache.recipes || []) as Recipe[];
-      setCategories((cache.categories || []) as IngredientCategory[]);
       setIngredients(await estimateOfflineIngredients(cachedIngredients, cachedRecipes));
       setOfflineSnapshotAt(cache.updatedAt);
       return true;
@@ -245,39 +255,9 @@ export function IngredientStockSection({
     setEditingId(null);
     setName("");
     setUnit("g");
-    setCategoryId("");
     setCurrentStock("");
     setLowStockThreshold("");
-  }
-
-  async function handleAddCategory() {
-    const trimmed = newCategoryName.trim();
-    if (!trimmed) return;
-    try {
-      const created = await createIngredientCategory(trimmed);
-      if (created) {
-        setCategories((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
-        setNewCategoryName("");
-      }
-    } catch (error) {
-      popup({ tone: "error", title: "Couldn't add category", message: error instanceof Error ? error.message : "Failed to add category." });
-    }
-  }
-
-  async function handleDeleteCategory(category: IngredientCategory) {
-    const confirmed = await confirm(`Delete category "${category.name}"? Ingredients in it become uncategorized.`, {
-      title: "Delete category",
-      confirmText: "Delete",
-      tone: "danger",
-    });
-    if (!confirmed) return;
-    try {
-      await deleteIngredientCategory(category.id);
-      setCategories((prev) => prev.filter((c) => c.id !== category.id));
-      setIngredients((prev) => prev.map((i) => (i.categoryId === category.id ? { ...i, categoryId: null } : i)));
-    } catch (error) {
-      popup({ tone: "error", title: "Couldn't delete category", message: error instanceof Error ? error.message : "Failed to delete category." });
-    }
+    setIsProductDropdownOpen(false);
   }
 
   function resetCompanyForm() {
@@ -294,7 +274,7 @@ export function IngredientStockSection({
   async function handleSaveCompany() {
     const trimmedName = newCompanyName.trim();
     if (!trimmedName) {
-      popup({ tone: "error", title: "Missing information", message: "Company name is required." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.missingInfoTitle'), message: t('ingredientStock.toasts.companyNameRequired') });
       return;
     }
     try {
@@ -308,7 +288,7 @@ export function IngredientStockSection({
           // suppliers state by id, so it picks up the new phone number
           // immediately, with no extra wiring needed.
           setSuppliers((prev) => prev.map((s) => (s.id === editingCompanyId ? updated : s)).sort((a, b) => a.name.localeCompare(b.name)));
-          setStatusMessage({ text: `"${updated.name}" updated.` });
+          setStatusMessage({ text: t('ingredientStock.statusMessages.companyUpdated', { name: updated.name }) });
           resetCompanyForm();
         }
       } else {
@@ -325,7 +305,7 @@ export function IngredientStockSection({
         }
       }
     } catch (error) {
-      popup({ tone: "error", title: editingCompanyId ? "Couldn't update company" : "Couldn't add company", message: error instanceof Error ? error.message : "Failed to save company." });
+      popup({ tone: "error", title: editingCompanyId ? t('ingredientStock.toasts.updateCompanyFailedTitle') : t('ingredientStock.toasts.addCompanyFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.saveCompanyFailedMessage') });
     }
   }
 
@@ -340,9 +320,9 @@ export function IngredientStockSection({
   }
 
   async function handleDeleteCompany(supplier: Supplier) {
-    const confirmed = await confirm(`Remove company "${supplier.name}"? Its purchase history is kept, but it loses its Filter Tab.`, {
-      title: "Remove company",
-      confirmText: "Remove",
+    const confirmed = await confirm(t('ingredientStock.confirmDialogs.removeCompanyMessage', { name: supplier.name }), {
+      title: t('ingredientStock.confirmDialogs.removeCompanyTitle'),
+      confirmText: t('ingredientStock.confirmDialogs.removeAction'),
       tone: "danger",
     });
     if (!confirmed) return;
@@ -352,13 +332,13 @@ export function IngredientStockSection({
       if (activeCompanyId === supplier.id) setActiveCompanyId(null);
       if (editingCompanyId === supplier.id) resetCompanyForm();
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't remove company", message: error instanceof Error ? error.message : "Failed to remove company." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.removeCompanyFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.removeCompanyFailedMessage') });
     }
   }
 
   async function handleSaveIngredient() {
     if (!name.trim()) {
-      popup({ tone: "error", title: "Missing information", message: "Ingredient name is required." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.missingInfoTitle'), message: t('ingredientStock.toasts.ingredientNameRequired') });
       return;
     }
     try {
@@ -366,7 +346,6 @@ export function IngredientStockSection({
       const payload = {
         name: name.trim(),
         unit,
-        categoryId: categoryId || null,
         currentStock: currentStock ? Number(currentStock) : 0,
         lowStockThreshold: lowStockThreshold ? Number(lowStockThreshold) : 0,
       };
@@ -374,19 +353,19 @@ export function IngredientStockSection({
         const updated = await updateIngredient(editingId, payload);
         if (updated) {
           setIngredients((prev) => prev.map((i) => (i.id === editingId ? updated : i)));
-          setStatusMessage({ text: `"${updated.name}" updated.` });
+          setStatusMessage({ text: t('ingredientStock.statusMessages.ingredientUpdated', { name: updated.name }) });
           resetForm();
         }
       } else {
         const created = await createIngredient(payload);
         if (created) {
           setIngredients((prev) => [...prev, created]);
-          setStatusMessage({ text: `"${created.name}" added to inventory.` });
+          setStatusMessage({ text: t('ingredientStock.statusMessages.ingredientAdded', { name: created.name }) });
           resetForm();
         }
       }
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't save", message: error instanceof Error ? error.message : "Failed to save ingredient." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.saveIngredientFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.saveIngredientFailedMessage') });
     } finally {
       setIsSaving(false);
     }
@@ -396,16 +375,15 @@ export function IngredientStockSection({
     setEditingId(ingredient.id);
     setName(ingredient.name);
     setUnit(ingredient.unit);
-    setCategoryId(ingredient.categoryId || "");
     setCurrentStock(ingredient.currentStock ? String(ingredient.currentStock) : "");
     setLowStockThreshold(ingredient.lowStockThreshold ? String(ingredient.lowStockThreshold) : "");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function handleDeleteIngredient(ingredient: Ingredient) {
-    const confirmed = await confirm(`Delete "${ingredient.name}"? This cannot be undone.`, {
-      title: "Delete ingredient",
-      confirmText: "Delete",
+    const confirmed = await confirm(t('ingredientStock.confirmDialogs.deleteIngredientMessage', { name: ingredient.name }), {
+      title: t('ingredientStock.confirmDialogs.deleteIngredientTitle'),
+      confirmText: t('common.delete'),
       tone: "danger",
     });
     if (!confirmed) return;
@@ -414,26 +392,30 @@ export function IngredientStockSection({
       setIngredients((prev) => prev.filter((i) => i.id !== ingredient.id));
       if (editingId === ingredient.id) resetForm();
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't delete", message: error instanceof Error ? error.message : "Failed to delete ingredient." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.deleteIngredientFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.deleteIngredientFailedMessage') });
     }
   }
 
   async function handleConfirmRestock(ingredient: Ingredient) {
     const quantity = Number(restockQty);
     if (!quantity) {
-      popup({ tone: "error", title: "Missing quantity", message: "Enter a non-zero quantity." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.missingQuantityTitle'), message: t('ingredientStock.toasts.nonZeroQuantity') });
       return;
     }
     try {
       const updated = await restockIngredient(ingredient.id, quantity);
       if (updated) {
         setIngredients((prev) => prev.map((i) => (i.id === ingredient.id ? updated : i)));
-        setStatusMessage({ text: `${quantity > 0 ? "Added" : "Removed"} ${Math.abs(quantity)}${ingredient.unit} ${quantity > 0 ? "to" : "from"} "${ingredient.name}".` });
+        setStatusMessage({
+          text: quantity > 0
+            ? t('ingredientStock.statusMessages.restockAdded', { qty: Math.abs(quantity), unit: ingredient.unit, name: ingredient.name })
+            : t('ingredientStock.statusMessages.restockRemoved', { qty: Math.abs(quantity), unit: ingredient.unit, name: ingredient.name }),
+        });
       }
       setRestockingId(null);
       setRestockQty("");
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't update stock", message: error instanceof Error ? error.message : "Failed to update stock." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.updateStockFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.updateStockFailedMessage') });
     }
   }
 
@@ -449,11 +431,11 @@ export function IngredientStockSection({
     const quantity = Number(purchaseQty);
     const rate = Number(purchaseRate);
     if (!quantity || quantity <= 0) {
-      popup({ tone: "error", title: "Missing quantity", message: "Enter a quantity greater than 0." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.missingQuantityTitle'), message: t('ingredientStock.toasts.quantityGreaterThanZero') });
       return;
     }
     if (!rate || rate <= 0) {
-      popup({ tone: "error", title: "Missing purchase rate", message: `Enter the cost per ${ingredient.unit} for this batch.` });
+      popup({ tone: "error", title: t('ingredientStock.toasts.missingPurchaseRateTitle'), message: t('ingredientStock.toasts.enterCostPerUnit', { unit: ingredient.unit }) });
       return;
     }
     try {
@@ -473,21 +455,39 @@ export function IngredientStockSection({
         // list loadAll() fetched once up front.
         setPurchases((prev) => [result.purchase, ...prev]);
         const due = result.purchase.remainingAmount;
+        const fromCompany = purchaseCompany.trim() ? t('ingredientStock.statusMessages.fromCompanySuffix', { company: purchaseCompany.trim() }) : "";
+        const dueOrPaid = due > 0 ? t('ingredientStock.statusMessages.dueSuffix', { due: formatMoney(due) }) : t('ingredientStock.statusMessages.fullyPaidSuffix');
         setStatusMessage({
-          text: `${result.purchase.purchaseOrderNumber}: logged ${quantity}${ingredient.unit} of "${ingredient.name}"${purchaseCompany.trim() ? ` from ${purchaseCompany.trim()}` : ""} at ${formatMoney(rate)}/${ingredient.unit} (${formatMoney(result.purchase.totalAmount)} total${due > 0 ? `, ${formatMoney(due)} due` : ", fully paid"}).`,
+          text: t('ingredientStock.statusMessages.purchaseLogged', {
+            po: result.purchase.purchaseOrderNumber,
+            qty: quantity,
+            unit: ingredient.unit,
+            name: ingredient.name,
+            fromCompany,
+            rate: formatMoney(rate),
+            total: formatMoney(result.purchase.totalAmount),
+            dueOrPaid,
+          }),
         });
       }
       resetPurchaseForm();
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't log purchase", message: error instanceof Error ? error.message : "Failed to log purchase." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.logPurchaseFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.logPurchaseFailedMessage') });
     }
   }
 
-  const categoryNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    categories.forEach((c) => map.set(c.id, c.name));
-    return map;
-  }, [categories]);
+  // Product Picker: which products from the catalog match whatever's
+  // currently typed in the "Product Name" field, shown as a dropdown of
+  // selectable suggestions below it (see the Add/Edit Ingredient form JSX).
+  // Matches on product name or company/brand so e.g. typing "Engro" finds
+  // that company's products too. Capped so the dropdown never grows huge.
+  const productSuggestions = useMemo(() => {
+    const q = name.trim().toLowerCase();
+    const list = q
+      ? products.filter((p) => p.name.toLowerCase().includes(q) || (p.company || "").toLowerCase().includes(q))
+      : products;
+    return [...list].sort((a, b) => a.name.localeCompare(b.name)).slice(0, 30);
+  }, [products, name]);
 
   // Task 4: "clicking a specific Company Tab displays only their products" -
   // there's no ingredientId<->supplierId link on Ingredient itself, so this
@@ -573,15 +573,13 @@ export function IngredientStockSection({
 
   const filteredIngredients = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    let list = q
-      ? ingredients.filter((i) => i.name.toLowerCase().includes(q) || (i.categoryId && categoryNameById.get(i.categoryId)?.toLowerCase().includes(q)))
-      : ingredients;
+    let list = q ? ingredients.filter((i) => i.name.toLowerCase().includes(q)) : ingredients;
     if (activeSupplier) {
       const ingredientIds = ingredientIdsByCompanyName.get(activeSupplier.name.trim().toLowerCase()) || new Set<string>();
       list = list.filter((i) => ingredientIds.has(i.id));
     }
     return [...list].sort((a, b) => a.name.localeCompare(b.name));
-  }, [ingredients, searchQuery, categoryNameById, activeSupplier, ingredientIdsByCompanyName]);
+  }, [ingredients, searchQuery, activeSupplier, ingredientIdsByCompanyName]);
 
   // Task 5: the exported table's rows (Download PDF / Download Excel /
   // Send WhatsApp) - one row per ingredient this company supplies, current
@@ -612,31 +610,34 @@ export function IngredientStockSection({
     ]);
   }
 
-  const purchaseSheetTitle = purchaseSheetRange === 'today' ? "Today's Purchase Orders" : 'All Purchase Orders';
+  const purchaseSheetTitle = purchaseSheetRange === 'today' ? t('ingredientStock.export.todaysPurchaseOrders') : t('ingredientStock.export.allPurchaseOrders');
 
   function downloadCompanyPdf() {
     if (!activeSupplier) return;
+    const productCount = filteredIngredients.length === 1
+      ? t('ingredientStock.export.productSingular', { count: filteredIngredients.length })
+      : t('ingredientStock.export.productPlural', { count: filteredIngredients.length });
     const doc = (
       <ReportPdfDocument
-        title={`${activeSupplier.name} — Purchase Order Sheet`}
-        subtitle={`${filteredIngredients.length} product${filteredIngredients.length === 1 ? '' : 's'} · Total due ${formatMoney(activeCompanyTotalDue)}`}
+        title={t('ingredientStock.export.purchaseOrderSheetTitle', { name: activeSupplier.name })}
+        subtitle={t('ingredientStock.export.purchaseOrderSheetSubtitle', { productCount, due: formatMoney(activeCompanyTotalDue) })}
         stats={[
-          { label: 'Products Supplied', value: String(filteredIngredients.length) },
-          { label: 'Total Purchased Amount', value: formatMoney(activeCompanySheetTotals.purchased) },
-          { label: 'Total Due', value: formatMoney(activeCompanyTotalDue) },
+          { label: t('ingredientStock.export.products'), value: String(filteredIngredients.length) },
+          { label: t('ingredientStock.export.totalPurchasedAmount'), value: formatMoney(activeCompanySheetTotals.purchased) },
+          { label: t('ingredientStock.export.totalDue'), value: formatMoney(activeCompanyTotalDue) },
         ]}
         tables={[
           {
             title: purchaseSheetTitle,
             columns: [
-              { label: 'PO #', width: 1 },
-              { label: 'Date & Time', width: 1.3 },
-              { label: 'Product', width: 2 },
-              { label: 'Qty', width: 0.8, align: 'right' },
-              { label: 'Rate', width: 0.9, align: 'right' },
-              { label: 'Total', width: 0.9, align: 'right' },
-              { label: 'Paid', width: 0.9, align: 'right' },
-              { label: 'Due', width: 0.9, align: 'right' },
+              { label: t('ingredientStock.export.poNumber'), width: 1 },
+              { label: t('ingredientStock.export.dateTime'), width: 1.3 },
+              { label: t('ingredientStock.export.product'), width: 2 },
+              { label: t('ingredientStock.export.qty'), width: 0.8, align: 'right' },
+              { label: t('ingredientStock.export.rate'), width: 0.9, align: 'right' },
+              { label: t('common.total'), width: 0.9, align: 'right' },
+              { label: t('ingredientStock.export.paid'), width: 0.9, align: 'right' },
+              { label: t('ingredientStock.export.due'), width: 0.9, align: 'right' },
             ],
             rows: buildPurchaseSheetRows(),
             // Financial Aggregations: a prominent bolded totals row right
@@ -645,19 +646,19 @@ export function IngredientStockSection({
             // this range) alongside the matching Paid/Due sums, so the
             // outstanding Due Amount column is never read in isolation
             // from what it's actually a due AGAINST.
-            footer: ['', '', '', '', 'TOTALS', formatMoney(activeCompanySheetTotals.purchased), formatMoney(activeCompanySheetTotals.paid), formatMoney(activeCompanySheetTotals.due)],
-            emptyMessage: 'No purchase orders logged for this company in this range yet.',
+            footer: ['', '', '', '', t('ingredientStock.export.totals'), formatMoney(activeCompanySheetTotals.purchased), formatMoney(activeCompanySheetTotals.paid), formatMoney(activeCompanySheetTotals.due)],
+            emptyMessage: t('ingredientStock.export.noPurchaseOrdersRange'),
           },
           {
-            title: 'Current Stock Levels',
+            title: t('ingredientStock.export.currentStockLevels'),
             columns: [
-              { label: 'Ingredient', width: 2 },
-              { label: 'Unit', width: 1 },
-              { label: 'Current Stock', width: 1.2, align: 'right' },
-              { label: 'Avg Cost / Unit', width: 1.3, align: 'right' },
+              { label: t('ingredientStock.export.ingredient'), width: 2 },
+              { label: t('ingredientStock.export.unit'), width: 1 },
+              { label: t('ingredientStock.export.currentStock'), width: 1.2, align: 'right' },
+              { label: t('ingredientStock.export.avgCostPerUnit'), width: 1.3, align: 'right' },
             ],
             rows: buildStockExportSheetRows(),
-            emptyMessage: 'No products on file for this company yet.',
+            emptyMessage: t('ingredientStock.noProductsForCompany'),
           },
         ]}
       />
@@ -672,7 +673,7 @@ export function IngredientStockSection({
   // restaurantName line). Same live localStorage-backed source
   // DashboardShell.tsx's sidebar reads.
   function buildRestaurantNameRow(columnCount: number): ExcelCell[] {
-    const restaurantName = getAuthShop()?.name || 'Shop';
+    const restaurantName = getAuthShop()?.name || t('ingredientStock.export.shopFallback');
     const row: ExcelCell[] = [{ value: restaurantName, style: { bold: true, fontSize: 14 } }];
     for (let i = 1; i < columnCount; i += 1) row.push({ value: '' });
     return row;
@@ -686,22 +687,22 @@ export function IngredientStockSection({
   function buildGeneratedAtRow(columnCount: number): ExcelCell[] {
     const row: ExcelCell[] = Array.from({ length: Math.max(columnCount - 1, 0) }, () => ({ value: '' }));
     const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
-    row.push({ value: `Generated: ${generatedAt}`, style: { align: 'Right', color: '6B7280', fontSize: 9 } });
+    row.push({ value: t('ingredientStock.export.generatedAt', { date: generatedAt }), style: { align: 'Right', color: '6B7280', fontSize: 9 } });
     return row;
   }
 
   function buildCompanyExcelSheet(): ExcelSheet {
     return {
-      name: 'Stock Status',
+      name: t('ingredientStock.export.companyStockSheetName'),
       columnWidths: [160, 60, 90, 100],
       rows: [
         buildRestaurantNameRow(4),
         buildGeneratedAtRow(4),
         [
-          { value: 'Ingredient', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Unit', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Current Stock', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Avg Cost / Unit', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.ingredient'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.unit'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.currentStock'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.avgCostPerUnit'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
         ],
         ...filteredIngredients.map((i) => [
           { value: i.name },
@@ -715,20 +716,20 @@ export function IngredientStockSection({
 
   function buildPurchaseOrderExcelSheet(): ExcelSheet {
     return {
-      name: 'Purchase Orders',
+      name: t('ingredientStock.export.purchaseOrdersSheetName'),
       columnWidths: [90, 130, 160, 70, 80, 90, 80, 80],
       rows: [
         buildRestaurantNameRow(8),
         buildGeneratedAtRow(8),
         [
-          { value: 'PO #', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Date & Time', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Product', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Qty', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Rate', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Total', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Paid', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Due', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.poNumber'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.dateTime'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.product'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.qty'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.rate'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('common.total'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.paid'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('ingredientStock.export.due'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
         ],
         ...activeCompanySheetPurchases.map((p) => [
           { value: p.purchaseOrderNumber },
@@ -750,7 +751,7 @@ export function IngredientStockSection({
           { value: '' },
           { value: '' },
           { value: '' },
-          { value: 'TOTALS', style: { bold: true } },
+          { value: t('ingredientStock.export.totals'), style: { bold: true } },
           { value: activeCompanySheetTotals.purchased, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
           { value: activeCompanySheetTotals.paid, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
           { value: activeCompanySheetTotals.due, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
@@ -778,32 +779,33 @@ export function IngredientStockSection({
     return filteredIngredients.map((ingredient) => {
       const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
       return [
-        `${ingredient.name}: ${formatStockQty(ingredient.currentStock)}${ingredient.unit} remaining`,
-        ingredient.categoryId ? categoryNameById.get(ingredient.categoryId) || 'Uncategorized' : 'Uncategorized',
-        isLow ? 'LOW STOCK' : 'OK',
+        t('ingredientStock.export.remainingStockRow', { name: ingredient.name, qty: formatStockQty(ingredient.currentStock), unit: ingredient.unit }),
+        isLow ? t('ingredientStock.export.lowStock') : t('ingredientStock.export.ok'),
       ];
     });
   }
 
   function buildDirectoryStockPdfDoc() {
     const lowCount = filteredIngredients.filter((i) => i.lowStockThreshold > 0 && i.currentStock < i.lowStockThreshold).length;
+    const ingredientCount = filteredIngredients.length === 1
+      ? t('ingredientStock.export.ingredientSingular', { count: filteredIngredients.length })
+      : t('ingredientStock.export.ingredientPlural', { count: filteredIngredients.length });
     return (
       <ReportPdfDocument
-        title="Current Stock Availability Checklist"
-        subtitle={`${filteredIngredients.length} ingredient${filteredIngredients.length === 1 ? '' : 's'}${activeSupplier ? ` · ${activeSupplier.name}` : ''}`}
+        title={t('ingredientStock.export.stockAvailabilityChecklist')}
+        subtitle={`${ingredientCount}${activeSupplier ? t('ingredientStock.export.companySuffix', { name: activeSupplier.name }) : ''}`}
         stats={[
-          { label: 'Total Ingredients', value: String(filteredIngredients.length) },
-          { label: 'Low Stock Items', value: String(lowCount) },
+          { label: t('ingredientStock.export.totalIngredients'), value: String(filteredIngredients.length) },
+          { label: t('ingredientStock.export.lowStockItems'), value: String(lowCount) },
         ]}
         tables={[{
-          title: 'Inventory Audit Checklist',
+          title: t('ingredientStock.export.inventoryAuditChecklist'),
           columns: [
-            { label: 'Ingredient - Remaining Stock', width: 2.6 },
-            { label: 'Category', width: 1.3 },
-            { label: 'Status', width: 0.9 },
+            { label: t('ingredientStock.export.ingredientRemainingStock'), width: 2.6 },
+            { label: t('common.status'), width: 0.9 },
           ],
           rows: buildDirectoryStockChecklistRows(),
-          emptyMessage: 'No ingredients configured yet.',
+          emptyMessage: t('ingredientStock.directory.noIngredientsConfigured'),
         }]}
       />
     );
@@ -815,22 +817,20 @@ export function IngredientStockSection({
 
   function buildDirectoryStockExcelSheet(): ExcelSheet {
     return {
-      name: 'Stock Availability',
-      columnWidths: [260, 140, 100],
+      name: t('ingredientStock.export.stockAvailabilitySheetName'),
+      columnWidths: [260, 100],
       rows: [
-        buildRestaurantNameRow(3),
-        buildGeneratedAtRow(3),
+        buildRestaurantNameRow(2),
+        buildGeneratedAtRow(2),
         [
-          { value: 'Ingredient - Remaining Stock', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Category', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Status', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('ingredientStock.export.ingredientRemainingStock'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('common.status'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
         ],
         ...filteredIngredients.map((ingredient) => {
           const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
           return [
-            { value: `${ingredient.name}: ${formatStockQty(ingredient.currentStock)}${ingredient.unit} remaining` },
-            { value: ingredient.categoryId ? categoryNameById.get(ingredient.categoryId) || 'Uncategorized' : 'Uncategorized' },
-            { value: isLow ? 'LOW STOCK' : 'OK', style: isLow ? { bold: true, color: 'B91C1C' } : undefined },
+            { value: t('ingredientStock.export.remainingStockRow', { name: ingredient.name, qty: formatStockQty(ingredient.currentStock), unit: ingredient.unit }) },
+            { value: isLow ? t('ingredientStock.export.lowStock') : t('ingredientStock.export.ok'), style: isLow ? { bold: true, color: 'B91C1C' } : undefined },
           ];
         }),
       ],
@@ -849,56 +849,59 @@ export function IngredientStockSection({
   async function handleSendWhatsapp() {
     if (!activeSupplier) return;
     if (!activeSupplier.phone.trim()) {
-      popup({ tone: "error", title: "No WhatsApp number on file", message: `Add a WhatsApp number for "${activeSupplier.name}" first (edit it in the Companies list above).` });
+      popup({ tone: "error", title: t('ingredientStock.toasts.noWhatsappNumberTitle'), message: t('ingredientStock.toasts.addWhatsappNumberFirst', { name: activeSupplier.name }) });
       return;
     }
     try {
       setIsSendingWhatsapp(true);
+      const productCount = filteredIngredients.length === 1
+        ? t('ingredientStock.export.productSingular', { count: filteredIngredients.length })
+        : t('ingredientStock.export.productPlural', { count: filteredIngredients.length });
       const doc = (
         <ReportPdfDocument
-          title={`${activeSupplier.name} — Purchase Order Sheet`}
-          subtitle={`${filteredIngredients.length} product${filteredIngredients.length === 1 ? '' : 's'} · Total due ${formatMoney(activeCompanyTotalDue)}`}
+          title={t('ingredientStock.export.purchaseOrderSheetTitle', { name: activeSupplier.name })}
+          subtitle={t('ingredientStock.export.purchaseOrderSheetSubtitle', { productCount, due: formatMoney(activeCompanyTotalDue) })}
           stats={[
-            { label: 'Products Supplied', value: String(filteredIngredients.length) },
-            { label: 'Total Purchased Amount', value: formatMoney(activeCompanySheetTotals.purchased) },
-            { label: 'Total Due', value: formatMoney(activeCompanyTotalDue) },
+            { label: t('ingredientStock.export.products'), value: String(filteredIngredients.length) },
+            { label: t('ingredientStock.export.totalPurchasedAmount'), value: formatMoney(activeCompanySheetTotals.purchased) },
+            { label: t('ingredientStock.export.totalDue'), value: formatMoney(activeCompanyTotalDue) },
           ]}
           tables={[
             {
               title: purchaseSheetTitle,
               columns: [
-                { label: 'PO #', width: 1 },
-                { label: 'Date & Time', width: 1.3 },
-                { label: 'Product', width: 2 },
-                { label: 'Qty', width: 0.8, align: 'right' },
-                { label: 'Rate', width: 0.9, align: 'right' },
-                { label: 'Total', width: 0.9, align: 'right' },
-                { label: 'Paid', width: 0.9, align: 'right' },
-                { label: 'Due', width: 0.9, align: 'right' },
+                { label: t('ingredientStock.export.poNumber'), width: 1 },
+                { label: t('ingredientStock.export.dateTime'), width: 1.3 },
+                { label: t('ingredientStock.export.product'), width: 2 },
+                { label: t('ingredientStock.export.qty'), width: 0.8, align: 'right' },
+                { label: t('ingredientStock.export.rate'), width: 0.9, align: 'right' },
+                { label: t('common.total'), width: 0.9, align: 'right' },
+                { label: t('ingredientStock.export.paid'), width: 0.9, align: 'right' },
+                { label: t('ingredientStock.export.due'), width: 0.9, align: 'right' },
               ],
               rows: buildPurchaseSheetRows(),
-              footer: ['', '', '', '', 'TOTALS', formatMoney(activeCompanySheetTotals.purchased), formatMoney(activeCompanySheetTotals.paid), formatMoney(activeCompanySheetTotals.due)],
-              emptyMessage: 'No purchase orders logged for this company in this range yet.',
+              footer: ['', '', '', '', t('ingredientStock.export.totals'), formatMoney(activeCompanySheetTotals.purchased), formatMoney(activeCompanySheetTotals.paid), formatMoney(activeCompanySheetTotals.due)],
+              emptyMessage: t('ingredientStock.export.noPurchaseOrdersRange'),
             },
             {
-              title: 'Current Stock Levels',
+              title: t('ingredientStock.export.currentStockLevels'),
               columns: [
-                { label: 'Ingredient', width: 2 },
-                { label: 'Unit', width: 1 },
-                { label: 'Current Stock', width: 1.2, align: 'right' },
-                { label: 'Avg Cost / Unit', width: 1.3, align: 'right' },
+                { label: t('ingredientStock.export.ingredient'), width: 2 },
+                { label: t('ingredientStock.export.unit'), width: 1 },
+                { label: t('ingredientStock.export.currentStock'), width: 1.2, align: 'right' },
+                { label: t('ingredientStock.export.avgCostPerUnit'), width: 1.3, align: 'right' },
               ],
               rows: buildStockExportSheetRows(),
-              emptyMessage: 'No products on file for this company yet.',
+              emptyMessage: t('ingredientStock.noProductsForCompany'),
             },
           ]}
         />
       );
       const base64 = await pdfDocumentToBase64(doc);
       await sendWhatsappDocument(activeSupplier.phone, base64, `${activeSupplier.name.replace(/\s+/g, '_')}_purchase_order_sheet.pdf`);
-      popup({ tone: "success", title: "Sent", message: `Purchase order sheet sent to ${activeSupplier.name} on WhatsApp.` });
+      popup({ tone: "success", title: t('ingredientStock.toasts.whatsappSentTitle'), message: t('ingredientStock.toasts.whatsappSentMessage', { name: activeSupplier.name }) });
     } catch (error) {
-      popup({ tone: "error", title: "Couldn't send WhatsApp message", message: error instanceof Error ? error.message : "Failed to send. Make sure WhatsApp is connected in Settings." });
+      popup({ tone: "error", title: t('ingredientStock.toasts.sendWhatsappFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.sendWhatsappFailedMessage') });
     } finally {
       setIsSendingWhatsapp(false);
     }
@@ -908,9 +911,9 @@ export function IngredientStockSection({
     <div className={cardClassName}>
       <div className="flex items-center gap-2 mb-4">
         <Boxes size={18} className="text-emerald-600" />
-        <h3 className="text-lg font-black text-slate-900">{title}</h3>
+        <h3 className="text-lg font-black text-slate-900">{resolvedTitle}</h3>
       </div>
-      <p className="max-w-2xl text-sm text-slate-500 mb-6">{description}</p>
+      <p className="max-w-2xl text-sm text-slate-500 mb-6">{resolvedDescription}</p>
 
       {statusMessage ? (
         <div className="mb-5 flex items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
@@ -921,76 +924,41 @@ export function IngredientStockSection({
 
       {offlineSnapshotAt ? (
         <div className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-700">
-          Offline - showing stock levels as of {new Date(offlineSnapshotAt).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}, adjusted for orders taken this session. Purchases/new ingredients need internet.
+          {t('ingredientStock.offline.banner', { time: new Date(offlineSnapshotAt).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) })}
         </div>
       ) : null}
-
-      {/* Categories */}
-      <div className="rounded-[28px] border border-slate-100 bg-slate-50 p-6 space-y-3 shadow-sm mb-6">
-        <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2">
-          <Tags size={14} /> Categories
-        </label>
-        <div className="flex flex-wrap gap-2">
-          {categories.map((c) => (
-            <span key={c.id} className="inline-flex items-center gap-2 rounded-full bg-white ring-1 ring-slate-200 px-3.5 py-1.5 text-[12px] font-black text-slate-600">
-              {c.name}
-              <button type="button" onClick={() => void handleDeleteCategory(c)} className="text-slate-300 hover:text-rose-500">
-                <X size={12} />
-              </button>
-            </span>
-          ))}
-          {categories.length === 0 ? <span className="text-xs font-bold text-slate-400">No categories yet - add one below.</span> : null}
-        </div>
-        <div className="flex gap-2 pt-1">
-          <input
-            type="text"
-            value={newCategoryName}
-            onChange={(e) => setNewCategoryName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void handleAddCategory(); }}
-            placeholder="e.g. Pizza Items"
-            className="flex-1 rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
-          />
-          <button
-            type="button"
-            onClick={() => void handleAddCategory()}
-            className="inline-flex items-center gap-2 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-black text-white hover:bg-emerald-700 transition-colors shadow-sm shrink-0"
-          >
-            <Plus size={16} /> Add
-          </button>
-        </div>
-      </div>
 
       {/* Companies (Task 4/5): the registered supplier directory - one
           Filter Tab per company below, and a WhatsApp number to send stock
           exports to. */}
       <div className="rounded-[28px] border border-slate-100 bg-slate-50 p-6 space-y-3 shadow-sm mb-6">
         <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2">
-          <Building2 size={14} /> Companies
+          <Building2 size={14} /> {t('ingredientStock.companies.label')}
         </label>
         <p className="text-[11px] font-bold text-slate-400 ml-1">
-          Tap the pencil on a company to update its registered WhatsApp number at any time - e.g. when the representative or manager changes. The new number is used immediately, including for Send WhatsApp.
+          {t('ingredientStock.companies.hint')}
         </p>
         <div className="flex flex-wrap gap-2">
           {suppliers.map((s) => (
             <span key={s.id} className={`inline-flex items-center gap-2 rounded-full bg-white ring-1 px-3.5 py-1.5 text-[12px] font-black text-slate-600 ${editingCompanyId === s.id ? "ring-emerald-400" : "ring-slate-200"}`}>
               {s.name}
               {s.phone ? <span className="font-bold text-slate-400">· {s.phone}</span> : null}
-              <button type="button" onClick={() => handleEditCompanyClick(s)} title="Edit WhatsApp number" className="text-slate-300 hover:text-emerald-600">
+              <button type="button" onClick={() => handleEditCompanyClick(s)} title={t('ingredientStock.companies.editPhoneTitle')} className="text-slate-300 hover:text-emerald-600">
                 <Edit size={12} />
               </button>
-              <button type="button" onClick={() => void handleDeleteCompany(s)} title="Remove company" className="text-slate-300 hover:text-rose-500">
+              <button type="button" onClick={() => void handleDeleteCompany(s)} title={t('ingredientStock.companies.removeTitle')} className="text-slate-300 hover:text-rose-500">
                 <X size={12} />
               </button>
             </span>
           ))}
-          {suppliers.length === 0 ? <span className="text-xs font-bold text-slate-400">No companies yet - add one below.</span> : null}
+          {suppliers.length === 0 ? <span className="text-xs font-bold text-slate-400">{t('ingredientStock.companies.empty')}</span> : null}
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto_auto] gap-2 pt-1">
           <input
             type="text"
             value={newCompanyName}
             onChange={(e) => setNewCompanyName(e.target.value)}
-            placeholder="Company name"
+            placeholder={t('ingredientStock.companies.namePlaceholder')}
             className="rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
           />
           <input
@@ -998,7 +966,7 @@ export function IngredientStockSection({
             value={newCompanyPhone}
             onChange={(e) => setNewCompanyPhone(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void handleSaveCompany(); }}
-            placeholder="WhatsApp number"
+            placeholder={t('ingredientStock.companies.phonePlaceholder')}
             className="rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
           />
           <button
@@ -1006,7 +974,7 @@ export function IngredientStockSection({
             onClick={() => void handleSaveCompany()}
             className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-black text-white hover:bg-emerald-700 transition-colors shadow-sm shrink-0"
           >
-            {editingCompanyId ? <Edit size={16} /> : <Plus size={16} />} {editingCompanyId ? "Update" : "Add"}
+            {editingCompanyId ? <Edit size={16} /> : <Plus size={16} />} {editingCompanyId ? t('common.update') : t('common.add')}
           </button>
           {editingCompanyId ? (
             <button
@@ -1014,7 +982,7 @@ export function IngredientStockSection({
               onClick={resetCompanyForm}
               className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-200 px-5 py-3 text-sm font-black text-slate-700 hover:bg-slate-300 transition-all shadow-sm shrink-0"
             >
-              <X size={16} /> Cancel
+              <X size={16} /> {t('common.cancel')}
             </button>
           ) : null}
         </div>
@@ -1024,39 +992,54 @@ export function IngredientStockSection({
       <div className="rounded-[32px] border border-slate-100 bg-slate-50 p-6 space-y-5 shadow-sm">
         {editingId ? (
           <h4 className="text-sm font-black uppercase text-emerald-600 tracking-wider flex items-center gap-2 border-b border-emerald-100 pb-3">
-            <Edit size={16} /> Edit Ingredient
+            <Edit size={16} /> {t('ingredientStock.form.editHeading')}
           </h4>
         ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Ingredient Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Cheese"
-              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Category</label>
-            <select
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all appearance-none"
-            >
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
+        <div className="grid grid-cols-1 gap-5">
+          {/* Product Picker: typing filters this shop's own Manage Products
+              catalog (fetched once into `products` on load - same
+              fetchProducts ProductManagementSection.tsx uses), shown as a
+              selectable dropdown right below. Picking a suggestion fills
+              `name` with that product's own name; the field still accepts
+              free text too, for a raw ingredient that isn't itself a sold
+              product. */}
+          <div className="space-y-2 relative">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.form.nameLabel')}</label>
+            <div className="relative">
+              <span className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-slate-400"><Search size={15} /></span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => { setName(e.target.value); setIsProductDropdownOpen(true); }}
+                onFocus={() => setIsProductDropdownOpen(true)}
+                onBlur={() => window.setTimeout(() => setIsProductDropdownOpen(false), 150)}
+                placeholder={t('ingredientStock.form.namePlaceholder')}
+                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white pl-10 pr-4 rtl:pl-4 rtl:pr-10 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+              />
+              {isProductDropdownOpen && productSuggestions.length > 0 ? (
+                <div className="absolute z-10 mt-1.5 max-h-60 w-full overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-lg">
+                  {productSuggestions.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => { setName(p.name); setIsProductDropdownOpen(false); }}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left rtl:text-right text-sm font-bold text-slate-700 hover:bg-emerald-50 transition-colors"
+                    >
+                      <span className="truncate">{p.name}</span>
+                      {p.company ? <span className="shrink-0 text-xs font-bold text-slate-400">{p.company}</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Unit</label>
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.form.unitLabel')}</label>
             <select
               value={unit}
               onChange={(e) => setUnit(e.target.value as IngredientUnit)}
@@ -1068,7 +1051,7 @@ export function IngredientStockSection({
             </select>
           </div>
           <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{editingId ? "Current Stock" : "Starting Stock"}</label>
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{editingId ? t('ingredientStock.form.currentStockLabel') : t('ingredientStock.form.startingStockLabel')}</label>
             <input
               type="number"
               value={currentStock}
@@ -1078,12 +1061,12 @@ export function IngredientStockSection({
             />
           </div>
           <div className="space-y-2">
-            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Low Stock Alert Below</label>
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.form.lowStockLabel')}</label>
             <input
               type="number"
               value={lowStockThreshold}
               onChange={(e) => setLowStockThreshold(e.target.value)}
-              placeholder="Optional"
+              placeholder={t('ingredientStock.form.optionalPlaceholder')}
               className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
             />
           </div>
@@ -1097,11 +1080,11 @@ export function IngredientStockSection({
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/30 bg-emerald-600 px-8 py-4 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(6,78,59,0.5)] transition-all hover:-translate-y-0.5"
           >
             {editingId ? <Edit size={16} /> : <Plus size={16} />}
-            {isSaving ? "Saving..." : editingId ? "Update Ingredient" : "Add Ingredient"}
+            {isSaving ? t('common.saving') : editingId ? t('ingredientStock.form.updateIngredient') : t('ingredientStock.form.addIngredient')}
           </button>
           {editingId ? (
             <button type="button" onClick={resetForm} className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-200 px-6 py-4 text-sm font-black text-slate-700 hover:bg-slate-300 transition-all shadow-sm">
-              <X size={16} /> Cancel Edit
+              <X size={16} /> {t('common.cancelEdit')}
             </button>
           ) : null}
         </div>
@@ -1111,16 +1094,16 @@ export function IngredientStockSection({
       <div className="mt-10 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-1 gap-3">
           <h4 className="text-xs font-black uppercase text-slate-400 tracking-wider flex items-center gap-2">
-            <Boxes size={14} /> Ingredient Directory ({filteredIngredients.length})
+            <Boxes size={14} /> {t('ingredientStock.directory.heading', { count: filteredIngredients.length })}
           </h4>
           <div className="relative w-full sm:w-64">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"><Search size={16} /></span>
+            <span className="absolute left-3 rtl:left-auto rtl:right-3 top-1/2 -translate-y-1/2 text-slate-400"><Search size={16} /></span>
             <input
               type="text"
-              placeholder="Search ingredients..."
+              placeholder={t('ingredientStock.directory.searchPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-[14px] border border-slate-200 bg-white pl-9 pr-4 py-2 text-sm font-bold outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition-all shadow-sm"
+              className="w-full rounded-[14px] border border-slate-200 bg-white pl-9 pr-4 rtl:pl-4 rtl:pr-9 py-2 text-sm font-bold outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 transition-all shadow-sm"
             />
           </div>
         </div>
@@ -1140,7 +1123,7 @@ export function IngredientStockSection({
             disabled={filteredIngredients.length === 0}
             className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2 text-[10px] font-black uppercase tracking-wide text-white hover:bg-slate-800 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <Download size={13} /> Download PDF
+            <Download size={13} /> {t('ingredientStock.directory.downloadPdf')}
           </button>
           <button
             type="button"
@@ -1148,7 +1131,7 @@ export function IngredientStockSection({
             disabled={filteredIngredients.length === 0}
             className="flex items-center gap-1.5 rounded-xl bg-slate-100 px-3.5 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 hover:bg-slate-200 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <FileSpreadsheet size={13} /> Download Excel
+            <FileSpreadsheet size={13} /> {t('ingredientStock.directory.downloadExcel')}
           </button>
         </div>
 
@@ -1164,7 +1147,7 @@ export function IngredientStockSection({
               onClick={() => setActiveCompanyId(null)}
               className={`rounded-full px-4 py-2 text-xs font-black uppercase tracking-wider transition-colors ${activeCompanyId === null ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
             >
-              All
+              {t('common.all')}
             </button>
             {suppliers.map((s) => (
               <button
@@ -1187,16 +1170,16 @@ export function IngredientStockSection({
             <div>
               <p className="text-sm font-black text-slate-900">{activeSupplier.name}</p>
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                {activeSupplier.phone ? `WhatsApp: ${activeSupplier.phone}` : "No WhatsApp number on file"}
-                {activeCompanyTotalDue > 0 ? ` · ${formatMoney(activeCompanyTotalDue)} due` : ""}
+                {activeSupplier.phone ? t('ingredientStock.directory.whatsappLabel', { phone: activeSupplier.phone }) : t('ingredientStock.directory.noWhatsappOnFile')}
+                {activeCompanyTotalDue > 0 ? t('ingredientStock.directory.totalDueSuffix', { due: formatMoney(activeCompanyTotalDue) }) : ""}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               <button type="button" onClick={downloadCompanyPdf} className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-slate-700 bg-white hover:bg-slate-100 ring-1 ring-slate-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm">
-                <Download size={14} /> PDF
+                <Download size={14} /> {t('ingredientStock.directory.pdf')}
               </button>
               <button type="button" onClick={downloadCompanyExcel} className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-slate-700 bg-white hover:bg-slate-100 ring-1 ring-slate-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm">
-                <FileSpreadsheet size={14} /> Excel
+                <FileSpreadsheet size={14} /> {t('ingredientStock.directory.excel')}
               </button>
               <button
                 type="button"
@@ -1204,7 +1187,7 @@ export function IngredientStockSection({
                 disabled={isSendingWhatsapp}
                 className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-emerald-700 bg-emerald-100 hover:bg-emerald-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm disabled:opacity-60"
               >
-                <MessageCircle size={14} /> {isSendingWhatsapp ? "Sending..." : "Send WhatsApp"}
+                <MessageCircle size={14} /> {isSendingWhatsapp ? t('ingredientStock.directory.sendingWhatsapp') : t('ingredientStock.directory.sendWhatsapp')}
               </button>
             </div>
           </div>
@@ -1225,31 +1208,31 @@ export function IngredientStockSection({
                   onClick={() => setPurchaseSheetRange('today')}
                   className={`rounded-full px-3.5 py-1.5 text-[11px] font-black uppercase tracking-wider transition-colors ${purchaseSheetRange === 'today' ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-200"}`}
                 >
-                  Today
+                  {t('common.today')}
                 </button>
                 <button
                   type="button"
                   onClick={() => setPurchaseSheetRange('all')}
                   className={`rounded-full px-3.5 py-1.5 text-[11px] font-black uppercase tracking-wider transition-colors ${purchaseSheetRange === 'all' ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-200"}`}
                 >
-                  All
+                  {t('common.all')}
                 </button>
               </div>
             </div>
             {activeCompanySheetPurchases.length === 0 ? (
-              <p className="px-5 py-6 text-center text-sm font-bold text-slate-400">No purchase orders logged for this company{purchaseSheetRange === 'today' ? ' today' : ''} yet.</p>
+              <p className="px-5 py-6 text-center text-sm font-bold text-slate-400">{t('ingredientStock.directory.noPurchaseOrdersForCompany', { todaySuffix: purchaseSheetRange === 'today' ? t('ingredientStock.directory.todaySuffix') : '' })}</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50">
-                      <th className="text-left px-5 py-2.5">PO #</th>
-                      <th className="text-left px-3 py-2.5">Date &amp; Time</th>
-                      <th className="text-left px-3 py-2.5">Product</th>
-                      <th className="text-right px-3 py-2.5">Qty</th>
-                      <th className="text-right px-3 py-2.5">Total</th>
-                      <th className="text-right px-3 py-2.5">Paid</th>
-                      <th className="text-right px-5 py-2.5">Due</th>
+                      <th className="text-left rtl:text-right px-5 py-2.5">{t('ingredientStock.export.poNumber')}</th>
+                      <th className="text-left rtl:text-right px-3 py-2.5">{t('ingredientStock.export.dateTime')}</th>
+                      <th className="text-left rtl:text-right px-3 py-2.5">{t('ingredientStock.export.product')}</th>
+                      <th className="text-right px-3 py-2.5">{t('ingredientStock.export.qty')}</th>
+                      <th className="text-right px-3 py-2.5">{t('common.total')}</th>
+                      <th className="text-right px-3 py-2.5">{t('ingredientStock.export.paid')}</th>
+                      <th className="text-right px-5 py-2.5">{t('ingredientStock.export.due')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1275,7 +1258,7 @@ export function IngredientStockSection({
                       it's a due against. */}
                   <tfoot>
                     <tr className="border-t-2 border-slate-200 bg-slate-50">
-                      <td colSpan={4} className="px-5 py-2.5 text-[11px] font-black uppercase tracking-widest text-slate-500">Totals</td>
+                      <td colSpan={4} className="px-5 py-2.5 text-[11px] font-black uppercase tracking-widest text-slate-500">{t('ingredientStock.directory.totalsLabel')}</td>
                       <td className="px-3 py-2.5 text-right font-black text-slate-900 whitespace-nowrap">{formatMoney(activeCompanySheetTotals.purchased)}</td>
                       <td className="px-3 py-2.5 text-right font-black text-emerald-700 whitespace-nowrap">{formatMoney(activeCompanySheetTotals.paid)}</td>
                       <td className={`px-5 py-2.5 text-right font-black whitespace-nowrap ${activeCompanySheetTotals.due > 0 ? "text-rose-700" : "text-emerald-700"}`}>{formatMoney(activeCompanySheetTotals.due)}</td>
@@ -1294,10 +1277,10 @@ export function IngredientStockSection({
         {activeSupplier ? (
           <div className="rounded-[24px] border border-slate-100 bg-emerald-50/40 shadow-sm overflow-hidden">
             <h5 className="px-5 py-4 text-xs font-black uppercase text-emerald-700 tracking-wider border-b border-emerald-100">
-              Current Stock Available
+              {t('ingredientStock.directory.currentStockAvailable')}
             </h5>
             {filteredIngredients.length === 0 ? (
-              <p className="px-5 py-6 text-center text-sm font-bold text-slate-400">No products on file for this company yet.</p>
+              <p className="px-5 py-6 text-center text-sm font-bold text-slate-400">{t('ingredientStock.noProductsForCompany')}</p>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-5">
                 {filteredIngredients.map((i) => (
@@ -1311,8 +1294,8 @@ export function IngredientStockSection({
           </div>
         ) : null}
 
-        {isLoading ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse border border-slate-100">Loading ingredients...</div> : null}
-        {!isLoading && filteredIngredients.length === 0 ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 border border-slate-100">No ingredients configured yet.</div> : null}
+        {isLoading ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse border border-slate-100">{t('ingredientStock.directory.loading')}</div> : null}
+        {!isLoading && filteredIngredients.length === 0 ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 border border-slate-100">{t('ingredientStock.directory.noIngredientsConfigured')}</div> : null}
 
         <div className="flex flex-col gap-3">
           {filteredIngredients.map((ingredient) => {
@@ -1341,14 +1324,15 @@ export function IngredientStockSection({
                       {ingredient.name}
                       {isLow ? (
                         <span className="inline-flex items-center gap-1 bg-rose-100 text-rose-600 px-2 py-0.5 rounded-lg text-[10px] uppercase font-black tracking-wider">
-                          <AlertTriangle size={10} /> Low Stock
+                          <AlertTriangle size={10} /> {t('ingredientStock.directory.lowStockBadge')}
                         </span>
                       ) : null}
                     </div>
-                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mt-1">
-                      {ingredient.categoryId ? categoryNameById.get(ingredient.categoryId) || "Uncategorized" : "Uncategorized"}
-                      {ingredient.averageCost > 0 ? ` · Avg cost ${formatMoney(ingredient.averageCost)}/${ingredient.unit}` : ""}
-                    </p>
+                    {ingredient.averageCost > 0 ? (
+                      <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mt-1">
+                        {t('ingredientStock.directory.avgCostSuffix', { cost: formatMoney(ingredient.averageCost), unit: ingredient.unit })}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap items-center gap-3 sm:shrink-0">
                     <div className={`text-[15px] font-black ${isLow ? "text-rose-600" : "text-slate-900"}`}>
@@ -1358,15 +1342,15 @@ export function IngredientStockSection({
                       <button
                         type="button"
                         onClick={() => { if (isPurchasing) resetPurchaseForm(); else setPurchasingId(ingredient.id); }}
-                        title="Log a purchased batch (company, product, rate, quantity, total, due)"
+                        title={t('ingredientStock.directory.logPurchaseTitle')}
                         className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-emerald-700 bg-emerald-100 hover:bg-emerald-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm"
                       >
-                        <ShoppingCart size={14} /> Log Purchase
+                        <ShoppingCart size={14} /> {t('ingredientStock.directory.logPurchase')}
                       </button>
                       <button
                         type="button"
                         onClick={() => { setRestockingId(isRestocking ? null : ingredient.id); setRestockQty(""); }}
-                        title="Manual stock adjustment (correction/wastage - no cost)"
+                        title={t('ingredientStock.directory.adjustStockTitle')}
                         className="p-3 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 border border-transparent hover:border-emerald-100 rounded-xl transition-all shadow-sm"
                       >
                         <PackagePlus size={16} />
@@ -1374,7 +1358,7 @@ export function IngredientStockSection({
                       <button
                         type="button"
                         onClick={() => setExpandedHistoryId(isHistoryOpen ? null : ingredient.id)}
-                        title="Purchase order history for this ingredient (dates, suppliers, quantities, status)"
+                        title={t('ingredientStock.directory.historyTitle')}
                         className={`p-3 border rounded-xl transition-all shadow-sm ${isHistoryOpen ? "text-indigo-600 bg-indigo-50 border-indigo-100" : "text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border-transparent hover:border-indigo-100"}`}
                       >
                         <History size={16} />
@@ -1391,12 +1375,16 @@ export function IngredientStockSection({
                 {isHistoryOpen ? (
                   <div className="mt-3 border-t border-slate-100 pt-3">
                     <div className="mb-2 flex items-center justify-between">
-                      <h6 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Purchase Order History</h6>
-                      <span className="text-[10px] font-bold text-slate-300">{ingredientHistory.length} record{ingredientHistory.length === 1 ? "" : "s"}</span>
+                      <h6 className="text-[10px] font-black uppercase tracking-widest text-slate-400">{t('ingredientStock.directory.purchaseOrderHistory')}</h6>
+                      <span className="text-[10px] font-bold text-slate-300">
+                        {ingredientHistory.length === 1
+                          ? t('ingredientStock.directory.recordCount', { count: ingredientHistory.length })
+                          : t('ingredientStock.directory.recordCountPlural', { count: ingredientHistory.length })}
+                      </span>
                     </div>
                     {ingredientHistory.length === 0 ? (
                       <p className="rounded-xl bg-slate-50 px-4 py-4 text-center text-xs font-bold text-slate-400">
-                        No purchase orders logged for this ingredient yet.
+                        {t('ingredientStock.directory.noPurchaseOrdersForIngredient')}
                       </p>
                     ) : (
                       <div className="max-h-64 space-y-1.5 overflow-y-auto">
@@ -1404,7 +1392,7 @@ export function IngredientStockSection({
                           <div key={p.id} className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-2.5">
                             <div className="min-w-0">
                               <p className="truncate text-xs font-black text-slate-700">
-                                {p.purchaseOrderNumber} <span className="font-bold text-slate-400">· {p.companyName || "Unspecified supplier"}</span>
+                                {p.purchaseOrderNumber} <span className="font-bold text-slate-400">· {p.companyName || t('ingredientStock.directory.unspecifiedSupplier')}</span>
                               </p>
                               <p className="text-[10px] font-bold text-slate-400">{formatPurchaseDateTime(purchaseDisplayDate(p))}</p>
                             </div>
@@ -1414,7 +1402,7 @@ export function IngredientStockSection({
                                 p.status === "received" ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
                               }`}>
                                 {p.status === "received" ? <CheckCircle2 size={11} /> : <Clock size={11} />}
-                                {p.status === "received" ? "Received" : "Pending"}
+                                {p.status === "received" ? t('ingredientStock.directory.received') : t('ingredientStock.directory.pending')}
                               </span>
                             </div>
                           </div>
@@ -1427,7 +1415,7 @@ export function IngredientStockSection({
                   <div className="mt-3 space-y-3 border-t border-slate-100 pt-3">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Company Name</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.companyNameLabel')}</label>
                         <select
                           autoFocus
                           value={purchaseSupplierId}
@@ -1436,17 +1424,17 @@ export function IngredientStockSection({
                             setPurchaseSupplierId(e.target.value);
                             setPurchaseCompany(supplier?.name || "");
                           }}
-                          title={suppliers.length === 0 ? "Add a company in the Companies list above first" : undefined}
+                          title={suppliers.length === 0 ? t('ingredientStock.purchaseForm.addCompanyFirstTitle') : undefined}
                           className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all appearance-none"
                         >
-                          <option value="">{suppliers.length === 0 ? "No companies yet - add one above" : "Select a company"}</option>
+                          <option value="">{suppliers.length === 0 ? t('ingredientStock.purchaseForm.noCompaniesSelect') : t('ingredientStock.purchaseForm.selectCompany')}</option>
                           {suppliers.map((s) => (
                             <option key={s.id} value={s.id}>{s.name}</option>
                           ))}
                         </select>
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Product Details</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.productDetailsLabel')}</label>
                         <input
                           type="text"
                           value={purchaseProductDetails}
@@ -1457,17 +1445,17 @@ export function IngredientStockSection({
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Rate per {ingredient.unit}</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.rateLabel', { unit: ingredient.unit })}</label>
                         <input
                           type="number"
                           value={purchaseRate}
                           onChange={(e) => setPurchaseRate(e.target.value)}
-                          title="The exact cost this batch was bought at - saved on the batch and folded into this ingredient's average cost."
+                          title={t('ingredientStock.purchaseForm.rateTitle')}
                           className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Quantity ({ingredient.unit})</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.quantityLabel', { unit: ingredient.unit })}</label>
                         <input
                           type="number"
                           value={purchaseQty}
@@ -1476,20 +1464,20 @@ export function IngredientStockSection({
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Total Amount</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.totalAmountLabel')}</label>
                         <div className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-100 px-4 py-2.5 text-sm font-black text-slate-700">
                           {formatMoney(purchaseTotal)}
                         </div>
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Amount Paid</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.amountPaidLabel')}</label>
                         <input
                           type="number"
                           value={purchasePaid}
                           onChange={(e) => setPurchasePaid(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") void handleConfirmPurchase(ingredient); }}
                           placeholder="0"
-                          title="How much is actually being paid to this company right now. Leave blank if nothing is being paid - the full total becomes Due."
+                          title={t('ingredientStock.purchaseForm.amountPaidTitle')}
                           className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold text-emerald-700 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
                         />
                       </div>
@@ -1506,10 +1494,10 @@ export function IngredientStockSection({
                         disabled={purchaseTotal <= 0}
                         className="inline-flex items-center gap-1.5 rounded-xl bg-white ring-1 ring-emerald-200 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-emerald-700 hover:bg-emerald-50 transition-colors shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Full Payment
+                        {t('ingredientStock.purchaseForm.fullPayment')}
                       </button>
                       <div className="text-right">
-                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Due Amount (Udhaar)</p>
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t('ingredientStock.purchaseForm.dueAmountLabel')}</p>
                         <p className={`text-sm font-black ${purchaseDueAmount > 0 ? "text-rose-600" : "text-emerald-600"}`}>
                           {formatMoney(purchaseDueAmount)}
                         </p>
@@ -1517,10 +1505,10 @@ export function IngredientStockSection({
                     </div>
                     <div className="flex items-center justify-end gap-2">
                       <button type="button" onClick={() => void handleConfirmPurchase(ingredient)} className="rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-black text-white hover:bg-emerald-700 transition-colors shadow-sm">
-                        Confirm Purchase
+                        {t('ingredientStock.purchaseForm.confirmPurchase')}
                       </button>
                       <button type="button" onClick={resetPurchaseForm} className="rounded-2xl bg-slate-200 px-4 py-2.5 text-sm font-black text-slate-700 hover:bg-slate-300 transition-all shadow-sm">
-                        Cancel
+                        {t('common.cancel')}
                       </button>
                     </div>
                   </div>
@@ -1528,7 +1516,7 @@ export function IngredientStockSection({
                 {isRestocking ? (
                   <div className="mt-3 flex items-end gap-2 border-t border-slate-100 pt-3">
                     <div className="flex-1 space-y-1.5">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Adjustment ({ingredient.unit}) - negative to remove</label>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.restockForm.adjustmentLabel', { unit: ingredient.unit })}</label>
                       <input
                         type="number"
                         autoFocus
@@ -1539,10 +1527,10 @@ export function IngredientStockSection({
                       />
                     </div>
                     <button type="button" onClick={() => void handleConfirmRestock(ingredient)} className="rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-black text-white hover:bg-emerald-700 transition-colors shadow-sm">
-                      Confirm
+                      {t('common.confirm')}
                     </button>
                     <button type="button" onClick={() => setRestockingId(null)} className="rounded-2xl bg-slate-200 px-4 py-2.5 text-sm font-black text-slate-700 hover:bg-slate-300 transition-all shadow-sm">
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   </div>
                 ) : null}

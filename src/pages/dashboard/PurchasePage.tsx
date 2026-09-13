@@ -13,6 +13,7 @@ import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { getAuthShop } from '@/lib/auth';
 import { ReportPdfDocument, downloadPdfDocument, pdfDocumentToBase64 } from '@/lib/pdf-export';
 import { downloadExcelWorkbook, type ExcelCell, type ExcelSheet } from '@/lib/excel-export';
+import { useLanguage } from '@/i18n';
 
 function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
@@ -45,8 +46,8 @@ function formatPurchaseDateTime(value: string) {
 // reasoning/pattern as IngredientStockSection.tsx's own
 // buildRestaurantNameRow (a sheet forwarded straight to a supplier on
 // WhatsApp needs to say which shop it's from with no other context).
-function buildRestaurantNameRow(columnCount: number): ExcelCell[] {
-  const restaurantName = getAuthShop()?.name || 'Shop';
+function buildRestaurantNameRow(columnCount: number, t: (key: string, vars?: Record<string, string | number>) => string): ExcelCell[] {
+  const restaurantName = getAuthShop()?.name || t('purchase.defaultShopName');
   const row: ExcelCell[] = [{ value: restaurantName, style: { bold: true, fontSize: 14 } }];
   for (let i = 1; i < columnCount; i += 1) row.push({ value: '' });
   return row;
@@ -54,10 +55,10 @@ function buildRestaurantNameRow(columnCount: number): ExcelCell[] {
 
 // Live generation timestamp, top-right of every exported Excel sheet - same
 // pattern as IngredientStockSection.tsx's own buildGeneratedAtRow.
-function buildGeneratedAtRow(columnCount: number): ExcelCell[] {
+function buildGeneratedAtRow(columnCount: number, t: (key: string, vars?: Record<string, string | number>) => string): ExcelCell[] {
   const row: ExcelCell[] = Array.from({ length: Math.max(columnCount - 1, 0) }, () => ({ value: '' }));
   const generatedAt = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
-  row.push({ value: `Generated: ${generatedAt}`, style: { align: 'Right', color: '6B7280', fontSize: 9 } });
+  row.push({ value: t('purchase.generatedAt', { date: generatedAt }), style: { align: 'Right', color: '6B7280', fontSize: 9 } });
   return row;
 }
 
@@ -88,7 +89,7 @@ type NewOrderLine = { ingredientId: string; quantity: string };
 // (see ingredientPurchaseController.createPurchaseOrder). This is what
 // turns the flat list fetchIngredientPurchases returns back into the
 // grouped rows the Purchase Log actually displays.
-function groupPurchasesByOrder(purchases: IngredientPurchase[]): PurchaseOrderGroup[] {
+function groupPurchasesByOrder(purchases: IngredientPurchase[], t: (key: string, vars?: Record<string, string | number>) => string): PurchaseOrderGroup[] {
   const byOrder = new Map<string, IngredientPurchase[]>();
   for (const purchase of purchases) {
     const key = purchase.purchaseOrderNumber;
@@ -100,7 +101,7 @@ function groupPurchasesByOrder(purchases: IngredientPurchase[]): PurchaseOrderGr
       const first = items[0];
       return {
         purchaseOrderNumber,
-        companyName: first.companyName || 'Unspecified',
+        companyName: first.companyName || t('purchase.unspecifiedCompany'),
         supplierId: first.supplierId,
         // Every line of one PO always shares the same status - see this
         // type's own comment in pos-types.ts.
@@ -120,6 +121,7 @@ function groupPurchasesByOrder(purchases: IngredientPurchase[]): PurchaseOrderGr
 
 export default function PurchasePage() {
   const { toast } = useToast();
+  const { t } = useLanguage();
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
@@ -159,7 +161,7 @@ export default function PurchasePage() {
       if (sups) setSuppliers(sups);
       if (ings) setIngredients(ings);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not load suppliers/ingredients.');
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.loadDirectoryFailed'));
     }
   }
 
@@ -170,7 +172,7 @@ export default function PurchasePage() {
       const data = await fetchIngredientPurchases({ startDate: rangeFrom, endDate: rangeTo });
       if (data) setPurchases(data);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not load purchase orders.');
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.loadPurchasesFailed'));
     } finally {
       setLoading(false);
     }
@@ -207,7 +209,7 @@ export default function PurchasePage() {
     setDataVersion((v) => v + 1);
   }
 
-  const groupedOrders = useMemo(() => groupPurchasesByOrder(purchases), [purchases]);
+  const groupedOrders = useMemo(() => groupPurchasesByOrder(purchases, t), [purchases, t]);
 
   const activeSupplier = useMemo(
     () => suppliers.find((s) => s.id === activeSupplierId) || null,
@@ -227,13 +229,13 @@ export default function PurchasePage() {
   const masterCompanyGroups = useMemo(() => {
     const byCompany = new Map<string, PurchaseOrderGroup[]>();
     for (const group of groupedOrders) {
-      const key = group.companyName || 'Unspecified';
+      const key = group.companyName || t('purchase.unspecifiedCompany');
       const list = byCompany.get(key);
       if (list) list.push(group);
       else byCompany.set(key, [group]);
     }
     return [...byCompany.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [groupedOrders]);
+  }, [groupedOrders, t]);
 
   const masterTotals = useMemo(() => ({
     purchased: groupedOrders.reduce((sum, g) => sum + g.totalAmount, 0),
@@ -244,7 +246,7 @@ export default function PurchasePage() {
   const masterRangeLabel = rangeFrom === rangeTo ? formatDisplayDate(rangeFrom) : `${formatDisplayDate(rangeFrom)} - ${formatDisplayDate(rangeTo)}`;
 
   function buildMasterPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Shop';
+    const restaurantName = getAuthShop()?.name || t('purchase.defaultShopName');
     const tables = masterCompanyGroups.map(([companyName, companyGroups]) => {
       const purchased = companyGroups.reduce((sum, g) => sum + g.totalAmount, 0);
       const paid = companyGroups.reduce((sum, g) => sum + g.paidAmount, 0);
@@ -257,41 +259,48 @@ export default function PurchasePage() {
         // breakdown instead of one giant undifferentiated list.
         title: companyName,
         columns: [
-          { label: 'PO #', width: 1 },
-          { label: 'Date & Time', width: 1.3 },
-          { label: 'Item', width: 2 },
-          { label: 'Qty', width: 0.8, align: 'right' as const },
-          { label: 'Status', width: 0.9 },
-          { label: 'Rate', width: 0.9, align: 'right' as const },
-          { label: 'Total', width: 0.9, align: 'right' as const },
-          { label: 'Paid', width: 0.9, align: 'right' as const },
-          { label: 'Due', width: 0.9, align: 'right' as const },
+          { label: t('purchase.columns.poNumber'), width: 1 },
+          { label: t('purchase.columns.dateTime'), width: 1.3 },
+          { label: t('purchase.columns.item'), width: 2 },
+          { label: t('purchase.columns.qty'), width: 0.8, align: 'right' as const },
+          { label: t('common.status'), width: 0.9 },
+          { label: t('purchase.columns.rate'), width: 0.9, align: 'right' as const },
+          { label: t('common.total'), width: 0.9, align: 'right' as const },
+          { label: t('purchase.columns.paid'), width: 0.9, align: 'right' as const },
+          { label: t('purchase.columns.due'), width: 0.9, align: 'right' as const },
         ],
         rows: companyGroups.flatMap((g) => g.items.map((item) => [
           g.purchaseOrderNumber,
           formatPurchaseDateTime(item.status === 'received' && item.receivedAt ? item.receivedAt : g.purchaseDate),
           `${item.ingredientName}${item.productDetails ? ` · ${item.productDetails}` : ''}`,
           `${item.quantity}${item.unit}`,
-          item.status === 'received' ? 'Received' : 'Pending',
+          item.status === 'received' ? t('purchase.status.received') : t('purchase.status.pending'),
           formatMoney(item.rate),
           formatMoney(item.totalAmount),
           formatMoney(item.paidAmount),
           formatMoney(item.remainingAmount),
         ])),
-        footer: ['', '', '', '', 'TOTALS', '', formatMoney(purchased), formatMoney(paid), formatMoney(due)],
-        emptyMessage: 'No orders for this company in this range.',
+        footer: ['', '', '', '', t('purchase.totalsLabel'), '', formatMoney(purchased), formatMoney(paid), formatMoney(due)],
+        emptyMessage: t('purchase.empty.noOrders'),
       };
     });
 
+    const companiesLabel = masterCompanyGroups.length === 1
+      ? t('purchase.companiesCountLabel.one', { count: masterCompanyGroups.length })
+      : t('purchase.companiesCountLabel.other', { count: masterCompanyGroups.length });
+    const ordersLabel = groupedOrders.length === 1
+      ? t('purchase.ordersCountLabel.one', { count: groupedOrders.length })
+      : t('purchase.ordersCountLabel.other', { count: groupedOrders.length });
+
     return (
       <ReportPdfDocument
-        title="Master Purchase Log — All Companies"
-        subtitle={`${masterCompanyGroups.length} compan${masterCompanyGroups.length === 1 ? 'y' : 'ies'} · ${groupedOrders.length} order${groupedOrders.length === 1 ? '' : 's'} · ${masterRangeLabel}`}
+        title={t('purchase.titles.masterPurchaseLogAllCompanies')}
+        subtitle={t('purchase.masterExport.summaryWithRange', { companies: companiesLabel, orders: ordersLabel, range: masterRangeLabel })}
         stats={[
-          { label: 'Shop', value: restaurantName },
-          { label: 'Total Purchased', value: formatMoney(masterTotals.purchased) },
-          { label: 'Total Paid', value: formatMoney(masterTotals.paid) },
-          { label: 'Total Due', value: formatMoney(masterTotals.due) },
+          { label: t('purchase.stats.shop'), value: restaurantName },
+          { label: t('purchase.stats.totalPurchased'), value: formatMoney(masterTotals.purchased) },
+          { label: t('purchase.stats.totalPaid'), value: formatMoney(masterTotals.paid) },
+          { label: t('purchase.stats.totalDue'), value: formatMoney(masterTotals.due) },
         ]}
         tables={tables}
       />
@@ -319,21 +328,21 @@ export default function PurchasePage() {
       return row;
     }
     const columnHeaderRow: ExcelCell[] = [
-      { value: 'PO #', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-      { value: 'Date & Time', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-      { value: 'Item', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-      { value: 'Qty', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-      { value: 'Status', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-      { value: 'Rate', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-      { value: 'Total', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-      { value: 'Paid', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-      { value: 'Due', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+      { value: t('purchase.columns.poNumber'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+      { value: t('purchase.columns.dateTime'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+      { value: t('purchase.columns.item'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+      { value: t('purchase.columns.qty'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+      { value: t('common.status'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+      { value: t('purchase.columns.rate'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+      { value: t('common.total'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+      { value: t('purchase.columns.paid'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+      { value: t('purchase.columns.due'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
     ];
 
     const rows: ExcelCell[][] = [
-      buildRestaurantNameRow(columnCount),
-      buildGeneratedAtRow(columnCount),
-      [{ value: 'Master Purchase Log — All Companies', style: { bold: true, fontSize: 13 } }, ...Array.from({ length: columnCount - 1 }, () => ({ value: '' }))],
+      buildRestaurantNameRow(columnCount, t),
+      buildGeneratedAtRow(columnCount, t),
+      [{ value: t('purchase.titles.masterPurchaseLogAllCompanies'), style: { bold: true, fontSize: 13 } }, ...Array.from({ length: columnCount - 1 }, () => ({ value: '' }))],
       [{ value: masterRangeLabel, style: { color: '6B7280', fontSize: 9 } }, ...Array.from({ length: columnCount - 1 }, () => ({ value: '' }))],
       blankRow(),
     ];
@@ -352,7 +361,7 @@ export default function PurchasePage() {
             { value: formatPurchaseDateTime(item.status === 'received' && item.receivedAt ? item.receivedAt : g.purchaseDate) },
             { value: `${item.ingredientName}${item.productDetails ? ` · ${item.productDetails}` : ''}` },
             { value: `${item.quantity}${item.unit}`, style: { align: 'Right' as const } },
-            { value: item.status === 'received' ? 'Received' : 'Pending' },
+            { value: item.status === 'received' ? t('purchase.status.received') : t('purchase.status.pending') },
             { value: item.rate, style: { align: 'Right' as const, format: '"Rs "#,##0.00' } },
             { value: item.totalAmount, style: { align: 'Right' as const, format: '"Rs "#,##0.00' } },
             { value: item.paidAmount, style: { align: 'Right' as const, format: '"Rs "#,##0.00' } },
@@ -362,7 +371,7 @@ export default function PurchasePage() {
       }
       rows.push([
         { value: '' }, { value: '' }, { value: '' }, { value: '' },
-        { value: 'TOTALS', style: { bold: true } },
+        { value: t('purchase.totalsLabel'), style: { bold: true } },
         { value: '' },
         { value: purchased, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
         { value: paid, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
@@ -371,7 +380,7 @@ export default function PurchasePage() {
       rows.push(blankRow());
     }
 
-    return { name: 'Master Purchase Log', columnWidths: [90, 130, 200, 70, 80, 80, 90, 80, 80], rows };
+    return { name: t('purchase.sheetNames.masterPurchaseLog'), columnWidths: [90, 130, 200, 70, 80, 80, 90, 80, 80], rows };
   }
 
   function downloadMasterExcel() {
@@ -476,24 +485,24 @@ export default function PurchasePage() {
         setShowNewSupplierForm(false);
         setNewSupplierName('');
         setNewSupplierPhone('');
-        toast.success(`Added "${created.name}" as a supplier company.`);
+        toast.success(t('purchase.toast.supplierAdded', { name: created.name }));
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not add this supplier.');
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.addSupplierFailed'));
     }
   }
 
   async function submitNewOrder() {
     const supplier = suppliers.find((s) => s.id === orderSupplierId);
     if (!supplier) {
-      toast.error('Select a Supplier Company first.');
+      toast.error(t('purchase.toast.selectSupplierFirst'));
       return;
     }
     const validItems = orderItems
       .filter((line) => line.ingredientId && Number(line.quantity) > 0)
       .map((line) => ({ ingredientId: line.ingredientId, quantity: Number(line.quantity) }));
     if (validItems.length === 0) {
-      toast.error('Add at least one item with a quantity.');
+      toast.error(t('purchase.toast.addAtLeastOneItem'));
       return;
     }
     setSubmittingOrder(true);
@@ -506,12 +515,15 @@ export default function PurchasePage() {
         items: validItems,
       });
       if (result) {
-        toast.success(`Purchase Order ${result.purchaseOrderNumber} created - ${validItems.length} item(s), awaiting delivery.`);
+        const itemsLabel = validItems.length === 1
+          ? t('purchase.itemCountLabel.one', { count: validItems.length })
+          : t('purchase.itemCountLabel.other', { count: validItems.length });
+        toast.success(t('purchase.toast.orderCreated', { po: result.purchaseOrderNumber, items: itemsLabel }));
         setShowNewOrder(false);
         refreshAfterMutation();
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not create this purchase order.');
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.createOrderFailed'));
     } finally {
       setSubmittingOrder(false);
     }
@@ -568,7 +580,7 @@ export default function PurchasePage() {
       const rawRate = receiveLineRates[item.id];
       const rateValue = Number(rawRate);
       if (rawRate === undefined || rawRate === '' || !Number.isFinite(rateValue) || rateValue < 0) {
-        toast.error(`Enter a valid rate for ${item.ingredientName}.`);
+        toast.error(t('purchase.toast.invalidRate', { name: item.ingredientName }));
         return;
       }
       items.push({ purchaseId: item.id, rate: rateValue });
@@ -577,14 +589,15 @@ export default function PurchasePage() {
     try {
       const result = await receivePurchaseOrder(receiveTarget.purchaseOrderNumber, items, receiveAmount);
       if (result) {
-        toast.success(
-          `${receiveTarget.purchaseOrderNumber} received - stock updated${receiveDue > 0 ? `, Rs ${Math.round(receiveDue)} left as due` : ', paid in full'}.`,
-        );
+        const suffix = receiveDue > 0
+          ? t('purchase.toast.dueSuffix', { amount: Math.round(receiveDue) })
+          : t('purchase.toast.paidInFullSuffix');
+        toast.success(t('purchase.toast.receivedSuccess', { po: receiveTarget.purchaseOrderNumber, suffix }));
         setReceiveTarget(null);
         refreshAfterMutation();
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not mark this purchase order received.');
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.receiveFailed'));
     } finally {
       setSubmittingReceive(false);
     }
@@ -597,9 +610,9 @@ export default function PurchasePage() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
           <h1 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-            Procurement <Truck className="text-indigo-600" size={32} />
+            {t('purchase.header.title')} <Truck className="text-indigo-600" size={32} />
           </h1>
-          <p className="text-slate-500 font-bold">Manage supply chain and stock replenishment.</p>
+          <p className="text-slate-500 font-bold">{t('purchase.header.subtitle')}</p>
         </div>
 
         <div className="flex flex-wrap gap-3">
@@ -610,13 +623,13 @@ export default function PurchasePage() {
               there's room (sm, 640px) - same breathing-room breakpoint used
               elsewhere in the app, not the near-unreachable xl one. */}
           <div className="relative w-full sm:w-64">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <Search className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Track PO number or supplier..."
-              className="w-full pl-12 pr-4 py-3 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-indigo-500 text-sm outline-none"
+              placeholder={t('purchase.searchPlaceholder')}
+              className="w-full pl-12 pr-4 rtl:pl-4 rtl:pr-12 py-3 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-indigo-500 text-sm outline-none"
             />
           </div>
           <button
@@ -624,7 +637,7 @@ export default function PurchasePage() {
             onClick={() => openNewOrderModal()}
             className="flex items-center gap-2 px-6 py-4 border-[0.5px] border-white/30 bg-indigo-600 text-white rounded-[20px] font-black text-sm hover:bg-indigo-700 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)]"
           >
-            <PackagePlus size={18} /> New Purchase Order
+            <PackagePlus size={18} /> {t('purchase.newPurchaseOrder')}
           </button>
         </div>
       </div>
@@ -637,9 +650,11 @@ export default function PurchasePage() {
               <AlertCircle size={24} />
             </div>
             <div>
-              <h4 className="font-black text-orange-900">Low Stock Warning</h4>
+              <h4 className="font-black text-orange-900">{t('purchase.lowStock.title')}</h4>
               <p className="text-orange-700 text-sm font-medium">
-                {lowStockIngredients.length} item{lowStockIngredients.length === 1 ? '' : 's'} below safety threshold. Restock recommended.
+                {lowStockIngredients.length === 1
+                  ? t('purchase.lowStock.messageOne', { count: lowStockIngredients.length })
+                  : t('purchase.lowStock.messageOther', { count: lowStockIngredients.length })}
               </p>
             </div>
           </div>
@@ -648,7 +663,7 @@ export default function PurchasePage() {
             onClick={handleAutoGeneratePO}
             className="px-6 py-2 bg-orange-500 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-orange-600 transition-colors"
           >
-            Auto-Generate PO
+            {t('purchase.lowStock.autoGenerate')}
           </button>
         </div>
       ) : null}
@@ -659,16 +674,16 @@ export default function PurchasePage() {
         <div className="space-y-6">
           <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-200">
             <h3 className="font-black text-slate-900 mb-4 flex items-center justify-between">
-              Suppliers
+              {t('purchase.sidebar.suppliersTitle')}
               {activeSupplierId ? (
-                <button type="button" onClick={() => setActiveSupplierId(null)} className="text-[10px] font-black text-indigo-500 uppercase">Clear</button>
+                <button type="button" onClick={() => setActiveSupplierId(null)} className="text-[10px] font-black text-indigo-500 uppercase">{t('common.clear')}</button>
               ) : (
-                <span className="text-[10px] text-slate-300 uppercase">{suppliers.length} total</span>
+                <span className="text-[10px] text-slate-300 uppercase">{t('purchase.sidebar.suppliersTotal', { count: suppliers.length })}</span>
               )}
             </h3>
             <div className="space-y-3">
               {suppliers.length === 0 ? (
-                <p className="text-xs font-bold text-slate-400">No registered supplier companies yet - add one from "New Purchase Order".</p>
+                <p className="text-xs font-bold text-slate-400">{t('purchase.sidebar.noSuppliers', { action: t('purchase.newPurchaseOrder') })}</p>
               ) : (
                 suppliers.map((sup) => {
                   const due = dueByCompanyName.get(sup.name.trim().toLowerCase()) || 0;
@@ -685,7 +700,7 @@ export default function PurchasePage() {
                         </div>
                         <div className="min-w-0">
                           <p className="truncate text-sm font-bold text-slate-700">{sup.name}</p>
-                          {due > 0 ? <p className="text-[10px] font-black text-rose-500">{formatMoney(due)} due</p> : null}
+                          {due > 0 ? <p className="text-[10px] font-black text-rose-500">{t('purchase.sidebar.dueAmount', { amount: formatMoney(due) })}</p> : null}
                         </div>
                       </div>
                       <ChevronRight size={14} className="shrink-0 text-slate-300" />
@@ -698,14 +713,14 @@ export default function PurchasePage() {
 
           <div className="bg-slate-900 p-8 rounded-[32px] text-white overflow-hidden relative">
             <Box className="absolute -right-4 -bottom-4 text-white/10" size={120} />
-            <h4 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 mb-2">Monthly Spend</h4>
+            <h4 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 mb-2">{t('purchase.sidebar.monthlySpend')}</h4>
             <div className="text-3xl font-black">{formatMoney(monthSpend)}</div>
             <button
               type="button"
               onClick={() => setStatusTab('pending')}
               className="text-[10px] text-indigo-400 font-bold mt-4 flex items-center gap-1"
             >
-              Active POs: {activePOCount} <ArrowRight size={10} />
+              {t('purchase.sidebar.activePOs', { count: activePOCount })} <ArrowRight size={10} className="rtl:rotate-180" />
             </button>
           </div>
         </div>
@@ -730,7 +745,7 @@ export default function PurchasePage() {
                   onClick={() => setStatusTab(tab)}
                   className={`text-sm font-black transition-all relative pb-2 capitalize ${statusTab === tab ? 'text-indigo-600' : 'text-slate-400'}`}
                 >
-                  {tab === 'all' ? 'All Orders' : tab === 'pending' ? 'Pending / Dispatched' : 'Received'}
+                  {tab === 'all' ? t('purchase.tabs.all') : tab === 'pending' ? t('purchase.tabs.pendingDispatched') : t('purchase.status.received')}
                   {statusTab === tab && <div className="absolute bottom-0 left-0 w-full h-1 bg-indigo-600 rounded-full" />}
                 </button>
               ))}
@@ -745,7 +760,7 @@ export default function PurchasePage() {
                       preset === item ? 'bg-slate-900 text-white' : 'text-slate-400 hover:text-slate-600'
                     }`}
                   >
-                    {item}
+                    {t(`purchase.preset.${item}`)}
                   </button>
                 ))}
               </div>
@@ -758,7 +773,7 @@ export default function PurchasePage() {
                     onChange={(e) => setRangeFrom(e.target.value)}
                     className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-bold outline-none focus:border-indigo-400"
                   />
-                  <span className="text-[10px] font-black text-slate-400">to</span>
+                  <span className="text-[10px] font-black text-slate-400">{t('purchase.rangeTo')}</span>
                   <input
                     type="date"
                     value={rangeTo}
@@ -769,7 +784,7 @@ export default function PurchasePage() {
                   />
                 </div>
               ) : null}
-              <button type="button" onClick={resetFilters} title="Reset filters" className="p-2 bg-slate-50 text-slate-400 rounded-xl hover:text-indigo-600 transition-colors">
+              <button type="button" onClick={resetFilters} title={t('purchase.resetFilters')} className="p-2 bg-slate-50 text-slate-400 rounded-xl hover:text-indigo-600 transition-colors">
                 <Filter size={18} />
               </button>
             </div>
@@ -782,8 +797,17 @@ export default function PurchasePage() {
               buildMasterExcelSheet). */}
           <div className="px-8 py-4 border-b border-slate-50 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-slate-50/50">
             <div>
-              <h4 className="text-xs font-black uppercase tracking-wide text-slate-500">Master Export - All Companies</h4>
-              <p className="text-[10px] font-bold text-slate-400">{masterCompanyGroups.length} compan{masterCompanyGroups.length === 1 ? 'y' : 'ies'} · {groupedOrders.length} order{groupedOrders.length === 1 ? '' : 's'} in this range</p>
+              <h4 className="text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.masterExport.heading')}</h4>
+              <p className="text-[10px] font-bold text-slate-400">
+                {t('purchase.masterExport.summary', {
+                  companies: masterCompanyGroups.length === 1
+                    ? t('purchase.companiesCountLabel.one', { count: masterCompanyGroups.length })
+                    : t('purchase.companiesCountLabel.other', { count: masterCompanyGroups.length }),
+                  orders: groupedOrders.length === 1
+                    ? t('purchase.ordersCountLabel.one', { count: groupedOrders.length })
+                    : t('purchase.ordersCountLabel.other', { count: groupedOrders.length }),
+                })}
+              </p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -792,7 +816,7 @@ export default function PurchasePage() {
                 disabled={groupedOrders.length === 0}
                 className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white hover:bg-slate-800 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <Download size={14} /> Download PDF
+                <Download size={14} /> {t('purchase.masterExport.downloadPdf')}
               </button>
               <button
                 type="button"
@@ -800,28 +824,28 @@ export default function PurchasePage() {
                 disabled={groupedOrders.length === 0}
                 className="flex items-center gap-1.5 rounded-xl bg-slate-100 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-slate-600 hover:bg-slate-200 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <FileSpreadsheet size={14} /> Download Excel
+                <FileSpreadsheet size={14} /> {t('purchase.masterExport.downloadExcel')}
               </button>
             </div>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left">
+            <table className="w-full text-left rtl:text-right">
               <thead>
                 <tr className="text-slate-400 text-[10px] uppercase tracking-widest font-black">
-                  <th className="px-8 py-6">Order Info</th>
-                  <th className="px-8 py-6">Supplier</th>
-                  <th className="px-8 py-6">Items</th>
-                  <th className="px-8 py-6">Status</th>
-                  <th className="px-8 py-6 text-right">Total Cost</th>
-                  <th className="px-8 py-6 text-right">Action</th>
+                  <th className="px-8 py-6 text-left rtl:text-right">{t('purchase.table.orderInfo')}</th>
+                  <th className="px-8 py-6 text-left rtl:text-right">{t('purchase.table.supplier')}</th>
+                  <th className="px-8 py-6 text-left rtl:text-right">{t('purchase.table.items')}</th>
+                  <th className="px-8 py-6 text-left rtl:text-right">{t('common.status')}</th>
+                  <th className="px-8 py-6 text-right rtl:text-left">{t('purchase.table.totalCost')}</th>
+                  <th className="px-8 py-6 text-right rtl:text-left">{t('purchase.table.action')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {loading ? (
-                  <tr><td colSpan={6} className="px-8 py-10 text-center text-sm font-bold text-slate-400 animate-pulse">Loading purchase orders...</td></tr>
+                  <tr><td colSpan={6} className="px-8 py-10 text-center text-sm font-bold text-slate-400 animate-pulse">{t('purchase.table.loading')}</td></tr>
                 ) : filteredOrders.length === 0 ? (
-                  <tr><td colSpan={6} className="px-8 py-10 text-center text-sm font-bold text-slate-400">No purchase orders match the current filters.</td></tr>
+                  <tr><td colSpan={6} className="px-8 py-10 text-center text-sm font-bold text-slate-400">{t('purchase.table.noMatches')}</td></tr>
                 ) : (
                   filteredOrders.map((po) => (
                     <tr key={po.purchaseOrderNumber} className="group hover:bg-slate-50/50 transition-colors">
@@ -838,7 +862,11 @@ export default function PurchasePage() {
                         <span className="text-sm font-bold text-slate-600">{po.companyName}</span>
                       </td>
                       <td className="px-8 py-6">
-                        <span className="text-sm font-black text-slate-900">{po.itemCount} item{po.itemCount === 1 ? '' : 's'}</span>
+                        <span className="text-sm font-black text-slate-900">
+                          {po.itemCount === 1
+                            ? t('purchase.itemCountLabel.one', { count: po.itemCount })
+                            : t('purchase.itemCountLabel.other', { count: po.itemCount })}
+                        </span>
                         <p className="text-[10px] font-bold text-slate-400 truncate max-w-[160px]">{po.totalQuantityLabel}</p>
                       </td>
                       <td className="px-8 py-6">
@@ -846,25 +874,25 @@ export default function PurchasePage() {
                           po.status === 'received' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'
                         }`}>
                           {po.status === 'received' ? <CheckCircle2 size={12} /> : <Clock size={12} />}
-                          {po.status === 'received' ? 'Received' : 'Pending / Dispatched'}
+                          {po.status === 'received' ? t('purchase.status.received') : t('purchase.tabs.pendingDispatched')}
                         </span>
                       </td>
-                      <td className="px-8 py-6 text-right">
+                      <td className="px-8 py-6 text-right rtl:text-left">
                         <div className="text-sm font-black text-slate-900">{formatMoney(po.totalAmount)}</div>
                         {po.status === 'received' && po.remainingAmount > 0 ? (
-                          <div className="text-[10px] font-bold text-rose-500 uppercase">{formatMoney(po.remainingAmount)} due</div>
+                          <div className="text-[10px] font-bold text-rose-500 uppercase">{t('purchase.sidebar.dueAmount', { amount: formatMoney(po.remainingAmount) })}</div>
                         ) : (
-                          <div className="text-[10px] font-bold text-indigo-500 uppercase">{po.status === 'received' ? 'Paid in full' : 'Awaiting delivery'}</div>
+                          <div className="text-[10px] font-bold text-indigo-500 uppercase">{po.status === 'received' ? t('purchase.status.paidInFull') : t('purchase.status.awaitingDelivery')}</div>
                         )}
                       </td>
-                      <td className="px-8 py-6 text-right">
+                      <td className="px-8 py-6 text-right rtl:text-left">
                         {po.status === 'pending' ? (
                           <button
                             type="button"
                             onClick={() => openReceiveModal(po)}
                             className="rounded-xl bg-emerald-500 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-white hover:bg-emerald-600 transition-colors"
                           >
-                            Mark Received
+                            {t('purchase.table.markReceived')}
                           </button>
                         ) : (
                           <span className="text-[10px] font-bold text-slate-300">-</span>
@@ -967,14 +995,15 @@ function NewPurchaseOrderModal({
 }) {
   // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
   useBackspaceToClose(onClose);
+  const { t } = useLanguage();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="flex w-full max-w-2xl max-h-[calc(100vh-2rem)] flex-col rounded-[32px] bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-6 py-5">
           <div>
-            <h2 className="text-xl font-black text-slate-900">New Purchase Order</h2>
-            <p className="text-xs font-bold text-slate-400">Phase 1 - Order Placed. Stock updates only once marked Received.</p>
+            <h2 className="text-xl font-black text-slate-900">{t('purchase.newPurchaseOrder')}</h2>
+            <p className="text-xs font-bold text-slate-400">{t('purchase.newOrderModal.subtitle')}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full bg-slate-50 p-2.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
             <X size={18} />
@@ -983,20 +1012,20 @@ function NewPurchaseOrderModal({
 
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
           <div>
-            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Supplier Company</label>
+            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.newOrderModal.supplierCompanyLabel')}</label>
             <div className="flex gap-2">
               <select
                 value={orderSupplierId}
                 onChange={(e) => setOrderSupplierId(e.target.value)}
                 className="flex-1 min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-400"
               >
-                <option value="">{suppliers.length === 0 ? 'No companies yet - add one' : 'Select a supplier company'}</option>
+                <option value="">{suppliers.length === 0 ? t('purchase.newOrderModal.noCompaniesOption') : t('purchase.newOrderModal.selectSupplierOption')}</option>
                 {suppliers.map((s) => (
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
               <button type="button" onClick={() => setShowNewSupplierForm((prev) => !prev)} className="shrink-0 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-black text-white">
-                + New
+                {t('purchase.newOrderModal.newSupplierButton')}
               </button>
             </div>
             {showNewSupplierForm ? (
@@ -1004,24 +1033,24 @@ function NewPurchaseOrderModal({
                 <input
                   value={newSupplierName}
                   onChange={(e) => setNewSupplierName(e.target.value)}
-                  placeholder="Company name"
+                  placeholder={t('purchase.newOrderModal.companyNamePlaceholder')}
                   className="flex-1 min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400"
                 />
                 <input
                   value={newSupplierPhone}
                   onChange={(e) => setNewSupplierPhone(e.target.value)}
-                  placeholder="Phone (optional)"
+                  placeholder={t('purchase.newOrderModal.phonePlaceholder')}
                   className="w-36 shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400"
                 />
                 <button type="button" onClick={onQuickAddSupplier} className="shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-black text-white">
-                  Add
+                  {t('common.add')}
                 </button>
               </div>
             ) : null}
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Order Date</label>
+            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.newOrderModal.orderDateLabel')}</label>
             <input
               type="date"
               value={orderPurchaseDate}
@@ -1033,12 +1062,12 @@ function NewPurchaseOrderModal({
 
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <label className="text-xs font-black uppercase tracking-wide text-slate-500">Items</label>
+              <label className="text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.table.items')}</label>
               <button type="button" onClick={addLine} className="flex items-center gap-1 text-xs font-black text-indigo-600">
-                <Plus size={14} /> Add Item
+                <Plus size={14} /> {t('purchase.newOrderModal.addItem')}
               </button>
             </div>
-            <p className="mb-2 text-[10px] font-bold text-slate-400">Ingredient + Quantity only - the supplier rate is entered later, once the delivery actually arrives.</p>
+            <p className="mb-2 text-[10px] font-bold text-slate-400">{t('purchase.newOrderModal.itemsHint')}</p>
             <div className="space-y-2">
               {orderItems.map((line, idx) => (
                 <div key={idx} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2.5">
@@ -1047,7 +1076,7 @@ function NewPurchaseOrderModal({
                     onChange={(e) => updateLine(idx, { ingredientId: e.target.value })}
                     className="flex-1 min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs font-bold outline-none focus:border-indigo-400"
                   >
-                    <option value="">Select ingredient</option>
+                    <option value="">{t('purchase.newOrderModal.selectIngredientOption')}</option>
                     {ingredients.map((ing) => (
                       <option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>
                     ))}
@@ -1055,7 +1084,7 @@ function NewPurchaseOrderModal({
                   <input
                     value={line.quantity}
                     onChange={(e) => { if (/^\d*\.?\d*$/.test(e.target.value)) updateLine(idx, { quantity: e.target.value }); }}
-                    placeholder="Qty"
+                    placeholder={t('purchase.columns.qty')}
                     className="w-20 shrink-0 rounded-lg border border-slate-200 px-2 py-2 text-xs font-bold outline-none focus:border-indigo-400"
                   />
                   <button type="button" onClick={() => removeLine(idx)} className="shrink-0 text-slate-300 hover:text-rose-500">
@@ -1067,7 +1096,7 @@ function NewPurchaseOrderModal({
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Note (optional)</label>
+            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.newOrderModal.noteLabel')}</label>
             <textarea
               value={orderNote}
               onChange={(e) => setOrderNote(e.target.value)}
@@ -1084,7 +1113,7 @@ function NewPurchaseOrderModal({
             onClick={onSubmit}
             className="w-full rounded-2xl bg-indigo-600 py-3.5 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {submitting ? 'Creating...' : 'Create Purchase Order'}
+            {submitting ? t('purchase.newOrderModal.creating') : t('purchase.newOrderModal.submit')}
           </button>
         </div>
       </div>
@@ -1120,14 +1149,15 @@ function ReceivePurchaseOrderModal({
 }) {
   // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
   useBackspaceToClose(onClose);
+  const { t } = useLanguage();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="flex w-full max-w-2xl max-h-[calc(100vh-2rem)] flex-col rounded-[32px] bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-6 py-5">
           <div>
-            <h2 className="text-lg font-black text-slate-900">Receive &amp; Bill {group.purchaseOrderNumber}</h2>
-            <p className="text-xs font-bold text-slate-400">{group.companyName} - enter the Actual Supplier Rate for each delivered item.</p>
+            <h2 className="text-lg font-black text-slate-900">{t('purchase.receiveModal.title', { po: group.purchaseOrderNumber })}</h2>
+            <p className="text-xs font-bold text-slate-400">{t('purchase.receiveModal.subtitle', { company: group.companyName })}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full bg-slate-50 p-2.5 text-slate-400 hover:bg-slate-100">
             <X size={18} />
@@ -1148,7 +1178,7 @@ function ReceivePurchaseOrderModal({
                     <p className="text-[10px] font-black text-slate-400 uppercase">{item.quantity}{item.unit}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <span className="text-[10px] font-black text-slate-400">Rate</span>
+                    <span className="text-[10px] font-black text-slate-400">{t('purchase.columns.rate')}</span>
                     <input
                       value={rateValue}
                       onChange={(e) => { if (/^\d*\.?\d*$/.test(e.target.value)) setLineRate(item.id, e.target.value); }}
@@ -1163,7 +1193,7 @@ function ReceivePurchaseOrderModal({
           </div>
 
           <div className="flex items-center justify-between rounded-2xl bg-slate-900 px-5 py-3.5 text-white">
-            <span className="text-xs font-black uppercase tracking-wide text-slate-400">Total Bill</span>
+            <span className="text-xs font-black uppercase tracking-wide text-slate-400">{t('purchase.receiveModal.totalBill')}</span>
             <span className="text-xl font-black">{formatMoney(totalBill)}</span>
           </div>
 
@@ -1173,24 +1203,24 @@ function ReceivePurchaseOrderModal({
               onClick={() => setPaymentType('full')}
               className={`rounded-xl py-2.5 text-xs font-black uppercase transition-colors ${paymentType === 'full' ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500'}`}
             >
-              Full Pay
+              {t('purchase.receiveModal.fullPay')}
             </button>
             <button
               type="button"
               onClick={() => setPaymentType('partial')}
               className={`rounded-xl py-2.5 text-xs font-black uppercase transition-colors ${paymentType === 'partial' ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-500'}`}
             >
-              Partial (Dues)
+              {t('purchase.receiveModal.partialDues')}
             </button>
           </div>
 
           {paymentType === 'partial' ? (
             <div>
-              <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Amount Paid Now</label>
+              <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">{t('purchase.receiveModal.amountPaidNowLabel')}</label>
               <input
                 value={partialAmount}
                 onChange={(e) => { if (/^\d*\.?\d*$/.test(e.target.value)) setPartialAmount(e.target.value); }}
-                placeholder={`Up to Rs ${Math.round(totalBill)}`}
+                placeholder={t('purchase.receiveModal.upToPlaceholder', { amount: Math.round(totalBill) })}
                 className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-400"
               />
             </div>
@@ -1198,7 +1228,7 @@ function ReceivePurchaseOrderModal({
 
           {due > 0 ? (
             <div className="rounded-2xl bg-rose-50 px-4 py-3 text-center">
-              <p className="text-[10px] font-black uppercase tracking-wide text-rose-500">Remaining Due</p>
+              <p className="text-[10px] font-black uppercase tracking-wide text-rose-500">{t('purchase.receiveModal.remainingDue')}</p>
               <p className="text-2xl font-black text-rose-600">{formatMoney(due)}</p>
             </div>
           ) : null}
@@ -1211,10 +1241,10 @@ function ReceivePurchaseOrderModal({
             onClick={onSubmit}
             className="w-full rounded-2xl bg-indigo-600 py-3.5 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {submitting ? 'Receiving...' : 'Confirm Received & Update Stock'}
+            {submitting ? t('purchase.receiveModal.receiving') : t('purchase.receiveModal.confirmSubmit')}
           </button>
           <p className="mt-2 text-center text-[10px] font-bold text-slate-400">
-            Amount to record now: {formatMoney(amount)}
+            {t('purchase.receiveModal.amountToRecord', { amount: formatMoney(amount) })}
           </p>
         </div>
       </div>
@@ -1247,6 +1277,7 @@ function SupplierDashboard({
   const [purchases, setPurchases] = useState<IngredientPurchase[]>([]);
   const [loading, setLoading] = useState(true);
   const [sendingWhatsapp, setSendingWhatsapp] = useState(false);
+  const { t } = useLanguage();
 
   function applyPreset(next: Preset) {
     setPreset(next);
@@ -1262,7 +1293,7 @@ function SupplierDashboard({
       const data = await fetchIngredientPurchases({ supplierId: supplier.id, startDate: rangeFrom, endDate: rangeTo });
       if (data) setPurchases(data);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load this supplier's purchase history.");
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.loadSupplierHistoryFailed'));
     } finally {
       setLoading(false);
     }
@@ -1271,7 +1302,7 @@ function SupplierDashboard({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { void load(); }, [supplier.id, rangeFrom, rangeTo, dataVersion]);
 
-  const groups = useMemo(() => groupPurchasesByOrder(purchases), [purchases]);
+  const groups = useMemo(() => groupPurchasesByOrder(purchases, t), [purchases, t]);
   const pendingGroups = useMemo(() => groups.filter((g) => g.status === 'pending'), [groups]);
   const completedGroups = useMemo(() => groups.filter((g) => g.status === 'received'), [groups]);
   const activeGroups = stream === 'pending' ? pendingGroups : completedGroups;
@@ -1286,23 +1317,26 @@ function SupplierDashboard({
 
   // --- Pending: rate-less demand sheet (nothing has been priced yet) ---
   function buildPendingPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Shop';
+    const restaurantName = getAuthShop()?.name || t('purchase.defaultShopName');
+    const pendingLabel = pendingGroups.length === 1
+      ? t('purchase.pendingOrdersCountLabel.one', { count: pendingGroups.length })
+      : t('purchase.pendingOrdersCountLabel.other', { count: pendingGroups.length });
     return (
       <ReportPdfDocument
-        title={`${supplier.name} — Purchase Demand Sheet`}
-        subtitle={`${pendingGroups.length} pending order${pendingGroups.length === 1 ? '' : 's'} · ${rangeLabel}`}
+        title={t('purchase.titles.demandSheetDoc', { name: supplier.name })}
+        subtitle={t('purchase.subtitleWithRange', { count: pendingLabel, range: rangeLabel })}
         stats={[
-          { label: 'Shop', value: restaurantName },
-          { label: 'Pending Orders', value: String(pendingGroups.length) },
-          { label: 'Line Items', value: String(pendingGroups.reduce((sum, g) => sum + g.itemCount, 0)) },
+          { label: t('purchase.stats.shop'), value: restaurantName },
+          { label: t('purchase.stats.pendingOrders'), value: String(pendingGroups.length) },
+          { label: t('purchase.stats.lineItems'), value: String(pendingGroups.reduce((sum, g) => sum + g.itemCount, 0)) },
         ]}
         tables={[{
-          title: 'Demand Requirement Sheet',
+          title: t('purchase.titles.demandRequirementSheet'),
           columns: [
-            { label: 'PO #', width: 1 },
-            { label: 'Date & Time', width: 1.3 },
-            { label: 'Item', width: 2.2 },
-            { label: 'Quantity', width: 1, align: 'right' },
+            { label: t('purchase.columns.poNumber'), width: 1 },
+            { label: t('purchase.columns.dateTime'), width: 1.3 },
+            { label: t('purchase.columns.item'), width: 2.2 },
+            { label: t('purchase.columns.quantity'), width: 1, align: 'right' },
           ],
           rows: pendingGroups.flatMap((g) => g.items.map((item) => [
             g.purchaseOrderNumber,
@@ -1310,7 +1344,7 @@ function SupplierDashboard({
             `${item.ingredientName}${item.productDetails ? ` · ${item.productDetails}` : ''}`,
             `${item.quantity}${item.unit}`,
           ])),
-          emptyMessage: 'No pending orders for this company in this range.',
+          emptyMessage: t('purchase.empty.noPendingOrders'),
         }]}
       />
     );
@@ -1322,16 +1356,16 @@ function SupplierDashboard({
 
   function buildPendingExcelSheet(): ExcelSheet {
     return {
-      name: 'Demand Sheet',
+      name: t('purchase.sheetNames.demandSheet'),
       columnWidths: [90, 130, 220, 90],
       rows: [
-        buildRestaurantNameRow(4),
-        buildGeneratedAtRow(4),
+        buildRestaurantNameRow(4, t),
+        buildGeneratedAtRow(4, t),
         [
-          { value: 'PO #', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Date & Time', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Item', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Quantity', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('purchase.columns.poNumber'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.dateTime'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.item'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.quantity'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
         ],
         ...pendingGroups.flatMap((g) => g.items.map((item) => [
           { value: g.purchaseOrderNumber },
@@ -1349,16 +1383,16 @@ function SupplierDashboard({
 
   async function sendPendingWhatsapp() {
     if (!supplier.phone.trim()) {
-      toast.error(`Add a WhatsApp number for "${supplier.name}" first.`);
+      toast.error(t('purchase.toast.noWhatsappNumber', { name: supplier.name }));
       return;
     }
     try {
       setSendingWhatsapp(true);
       const base64 = await pdfDocumentToBase64(buildPendingPdfDoc());
       await sendWhatsappDocument(supplier.phone, base64, `${supplier.name.replace(/\s+/g, '_')}_demand_sheet.pdf`);
-      toast.success(`Demand sheet sent to ${supplier.name} on WhatsApp.`);
+      toast.success(t('purchase.toast.demandSheetSent', { name: supplier.name }));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't send WhatsApp message. Make sure WhatsApp is connected in Settings.");
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.whatsappSendFailed'));
     } finally {
       setSendingWhatsapp(false);
     }
@@ -1379,32 +1413,35 @@ function SupplierDashboard({
   }
 
   function buildCompletedPdfDoc() {
-    const restaurantName = getAuthShop()?.name || 'Shop';
+    const restaurantName = getAuthShop()?.name || t('purchase.defaultShopName');
+    const completedLabel = completedGroups.length === 1
+      ? t('purchase.completedOrdersCountLabel.one', { count: completedGroups.length })
+      : t('purchase.completedOrdersCountLabel.other', { count: completedGroups.length });
     return (
       <ReportPdfDocument
-        title={`${supplier.name} — Purchase Statement`}
-        subtitle={`${completedGroups.length} completed order${completedGroups.length === 1 ? '' : 's'} · ${rangeLabel}`}
+        title={t('purchase.titles.purchaseStatementDoc', { name: supplier.name })}
+        subtitle={t('purchase.subtitleWithRange', { count: completedLabel, range: rangeLabel })}
         stats={[
-          { label: 'Shop', value: restaurantName },
-          { label: 'Total Purchased', value: formatMoney(completedTotals.purchased) },
-          { label: 'Total Paid', value: formatMoney(completedTotals.paid) },
-          { label: 'Total Due', value: formatMoney(completedTotals.due) },
+          { label: t('purchase.stats.shop'), value: restaurantName },
+          { label: t('purchase.stats.totalPurchased'), value: formatMoney(completedTotals.purchased) },
+          { label: t('purchase.stats.totalPaid'), value: formatMoney(completedTotals.paid) },
+          { label: t('purchase.stats.totalDue'), value: formatMoney(completedTotals.due) },
         ]}
         tables={[{
-          title: 'Purchase Statement',
+          title: t('purchase.titles.purchaseStatement'),
           columns: [
-            { label: 'PO #', width: 1 },
-            { label: 'Date & Time', width: 1.3 },
-            { label: 'Item', width: 2 },
-            { label: 'Qty', width: 0.8, align: 'right' },
-            { label: 'Rate', width: 0.9, align: 'right' },
-            { label: 'Total', width: 0.9, align: 'right' },
-            { label: 'Paid', width: 0.9, align: 'right' },
-            { label: 'Due', width: 0.9, align: 'right' },
+            { label: t('purchase.columns.poNumber'), width: 1 },
+            { label: t('purchase.columns.dateTime'), width: 1.3 },
+            { label: t('purchase.columns.item'), width: 2 },
+            { label: t('purchase.columns.qty'), width: 0.8, align: 'right' },
+            { label: t('purchase.columns.rate'), width: 0.9, align: 'right' },
+            { label: t('common.total'), width: 0.9, align: 'right' },
+            { label: t('purchase.columns.paid'), width: 0.9, align: 'right' },
+            { label: t('purchase.columns.due'), width: 0.9, align: 'right' },
           ],
           rows: buildCompletedRows(),
-          footer: ['', '', '', '', 'TOTALS', formatMoney(completedTotals.purchased), formatMoney(completedTotals.paid), formatMoney(completedTotals.due)],
-          emptyMessage: 'No completed purchases for this company in this range.',
+          footer: ['', '', '', '', t('purchase.totalsLabel'), formatMoney(completedTotals.purchased), formatMoney(completedTotals.paid), formatMoney(completedTotals.due)],
+          emptyMessage: t('purchase.empty.noCompletedPurchases'),
         }]}
       />
     );
@@ -1416,20 +1453,20 @@ function SupplierDashboard({
 
   function buildCompletedExcelSheet(): ExcelSheet {
     return {
-      name: 'Purchase Statement',
+      name: t('purchase.titles.purchaseStatement'),
       columnWidths: [90, 130, 200, 70, 80, 90, 80, 80],
       rows: [
-        buildRestaurantNameRow(8),
-        buildGeneratedAtRow(8),
+        buildRestaurantNameRow(8, t),
+        buildGeneratedAtRow(8, t),
         [
-          { value: 'PO #', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Date & Time', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Item', style: { bold: true, bg: '111827', color: 'FFFFFF' } },
-          { value: 'Qty', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Rate', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Total', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Paid', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
-          { value: 'Due', style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('purchase.columns.poNumber'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.dateTime'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.item'), style: { bold: true, bg: '111827', color: 'FFFFFF' } },
+          { value: t('purchase.columns.qty'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('purchase.columns.rate'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('common.total'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('purchase.columns.paid'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
+          { value: t('purchase.columns.due'), style: { bold: true, bg: '111827', color: 'FFFFFF', align: 'Right' } },
         ],
         ...completedGroups.flatMap((g) => g.items.map((item) => [
           { value: g.purchaseOrderNumber },
@@ -1443,7 +1480,7 @@ function SupplierDashboard({
         ])),
         [
           { value: '' }, { value: '' }, { value: '' }, { value: '' },
-          { value: 'TOTALS', style: { bold: true } },
+          { value: t('purchase.totalsLabel'), style: { bold: true } },
           { value: completedTotals.purchased, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
           { value: completedTotals.paid, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
           { value: completedTotals.due, style: { bold: true, align: 'Right', format: '"Rs "#,##0.00' } },
@@ -1458,16 +1495,16 @@ function SupplierDashboard({
 
   async function sendCompletedWhatsapp() {
     if (!supplier.phone.trim()) {
-      toast.error(`Add a WhatsApp number for "${supplier.name}" first.`);
+      toast.error(t('purchase.toast.noWhatsappNumber', { name: supplier.name }));
       return;
     }
     try {
       setSendingWhatsapp(true);
       const base64 = await pdfDocumentToBase64(buildCompletedPdfDoc());
       await sendWhatsappDocument(supplier.phone, base64, `${supplier.name.replace(/\s+/g, '_')}_purchase_statement.pdf`);
-      toast.success(`Purchase statement sent to ${supplier.name} on WhatsApp.`);
+      toast.success(t('purchase.toast.statementSent', { name: supplier.name }));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't send WhatsApp message. Make sure WhatsApp is connected in Settings.");
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.whatsappSendFailed'));
     } finally {
       setSendingWhatsapp(false);
     }
@@ -1482,11 +1519,11 @@ function SupplierDashboard({
       <div className="flex flex-col gap-4 border-b border-slate-50 p-8 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
           <button type="button" onClick={onBack} className="rounded-xl bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-slate-500 hover:bg-slate-100">
-            ← All Orders
+            <span className="rtl:hidden">← </span>{t('purchase.tabs.all')}<span className="hidden rtl:inline"> →</span>
           </button>
           <div>
             <h3 className="text-lg font-black text-slate-900">{supplier.name}</h3>
-            <p className="text-xs font-bold text-slate-400">{supplier.phone || 'No WhatsApp number on file'}</p>
+            <p className="text-xs font-bold text-slate-400">{supplier.phone || t('purchase.supplierDashboard.noWhatsappOnFile')}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -1499,14 +1536,14 @@ function SupplierDashboard({
                   preset === item ? 'bg-slate-900 text-white' : 'text-slate-400 hover:text-slate-600'
                 }`}
               >
-                {item}
+                {t(`purchase.preset.${item}`)}
               </button>
             ))}
           </div>
           {preset === 'custom' ? (
             <div className="flex items-center gap-1.5">
               <input type="date" value={rangeFrom} max={rangeTo || todayKey} onChange={(e) => setRangeFrom(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-bold outline-none focus:border-indigo-400" />
-              <span className="text-[10px] font-black text-slate-400">to</span>
+              <span className="text-[10px] font-black text-slate-400">{t('purchase.rangeTo')}</span>
               <input type="date" value={rangeTo} min={rangeFrom} max={todayKey} onChange={(e) => setRangeTo(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-bold outline-none focus:border-indigo-400" />
             </div>
           ) : null}
@@ -1516,10 +1553,10 @@ function SupplierDashboard({
       <div className="flex flex-col gap-4 border-b border-slate-50 px-8 py-5 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex gap-2 rounded-2xl bg-slate-50 p-1">
           <button type="button" onClick={() => setStream('pending')} className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors ${stream === 'pending' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>
-            Pending ({pendingGroups.length})
+            {t('purchase.supplierDashboard.pendingCount', { count: pendingGroups.length })}
           </button>
           <button type="button" onClick={() => setStream('completed')} className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors ${stream === 'completed' ? 'bg-emerald-600 text-white' : 'text-slate-500'}`}>
-            Completed ({completedGroups.length})
+            {t('purchase.supplierDashboard.completedCount', { count: completedGroups.length })}
           </button>
         </div>
         <div className="flex items-center gap-2">
@@ -1530,7 +1567,7 @@ function SupplierDashboard({
             <FileSpreadsheet size={14} /> Excel
           </button>
           <button type="button" disabled={sendingWhatsapp} onClick={sendWhatsapp} className="flex items-center gap-1.5 rounded-xl bg-emerald-50 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-emerald-600 hover:bg-emerald-100 disabled:opacity-50">
-            <MessageCircle size={14} /> {sendingWhatsapp ? 'Sending...' : 'WhatsApp'}
+            <MessageCircle size={14} /> {sendingWhatsapp ? t('purchase.supplierDashboard.sending') : 'WhatsApp'}
           </button>
         </div>
       </div>
@@ -1538,35 +1575,35 @@ function SupplierDashboard({
       {stream === 'completed' ? (
         <div className="grid grid-cols-1 gap-4 px-4 py-5 sm:grid-cols-3 sm:px-8">
           <div className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-[10px] font-black uppercase text-slate-400">Total Purchased</p>
+            <p className="text-[10px] font-black uppercase text-slate-400">{t('purchase.stats.totalPurchased')}</p>
             <p className="text-lg font-black text-slate-900">{formatMoney(completedTotals.purchased)}</p>
           </div>
           <div className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-[10px] font-black uppercase text-slate-400">Total Paid</p>
+            <p className="text-[10px] font-black uppercase text-slate-400">{t('purchase.stats.totalPaid')}</p>
             <p className="text-lg font-black text-emerald-600">{formatMoney(completedTotals.paid)}</p>
           </div>
           <div className="rounded-2xl bg-slate-50 p-4">
-            <p className="text-[10px] font-black uppercase text-slate-400">Total Due</p>
+            <p className="text-[10px] font-black uppercase text-slate-400">{t('purchase.stats.totalDue')}</p>
             <p className="text-lg font-black text-rose-600">{formatMoney(completedTotals.due)}</p>
           </div>
         </div>
       ) : null}
 
       <div className="flex-1 overflow-x-auto">
-        <table className="w-full text-left">
+        <table className="w-full text-left rtl:text-right">
           <thead>
             <tr className="text-slate-400 text-[10px] uppercase tracking-widest font-black">
-              <th className="px-8 py-4">Order Info</th>
-              <th className="px-8 py-4">Items</th>
-              {stream === 'completed' ? <th className="px-8 py-4 text-right">Total / Due</th> : null}
-              <th className="px-8 py-4 text-right">Action</th>
+              <th className="px-8 py-4">{t('purchase.table.orderInfo')}</th>
+              <th className="px-8 py-4">{t('purchase.table.items')}</th>
+              {stream === 'completed' ? <th className="px-8 py-4 text-right rtl:text-left">{t('purchase.supplierDashboard.totalDueColumn')}</th> : null}
+              <th className="px-8 py-4 text-right rtl:text-left">{t('purchase.table.action')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
             {loading ? (
-              <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400 animate-pulse">Loading...</td></tr>
+              <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400 animate-pulse">{t('common.loading')}</td></tr>
             ) : activeGroups.length === 0 ? (
-              <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400">No {stream} orders for this company in this range.</td></tr>
+              <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400">{t('purchase.supplierDashboard.noStreamOrders', { stream: stream === 'pending' ? t('purchase.supplierDashboard.streamPending') : t('purchase.supplierDashboard.streamCompleted') })}</td></tr>
             ) : (
               activeGroups.map((po) => (
                 <tr key={po.purchaseOrderNumber} className="hover:bg-slate-50/50 transition-colors">
@@ -1575,23 +1612,27 @@ function SupplierDashboard({
                     <div className="text-[10px] font-bold text-slate-400 uppercase">{formatDisplayDate(po.purchaseDate)}</div>
                   </td>
                   <td className="px-8 py-5">
-                    <span className="text-sm font-black text-slate-900">{po.itemCount} item{po.itemCount === 1 ? '' : 's'}</span>
+                    <span className="text-sm font-black text-slate-900">
+                      {po.itemCount === 1
+                        ? t('purchase.itemCountLabel.one', { count: po.itemCount })
+                        : t('purchase.itemCountLabel.other', { count: po.itemCount })}
+                    </span>
                     <p className="text-[10px] font-bold text-slate-400 truncate max-w-[220px]">{po.totalQuantityLabel}</p>
                   </td>
                   {stream === 'completed' ? (
-                    <td className="px-8 py-5 text-right">
+                    <td className="px-8 py-5 text-right rtl:text-left">
                       <div className="text-sm font-black text-slate-900">{formatMoney(po.totalAmount)}</div>
                       {po.remainingAmount > 0 ? (
-                        <div className="text-[10px] font-bold text-rose-500 uppercase">{formatMoney(po.remainingAmount)} due</div>
+                        <div className="text-[10px] font-bold text-rose-500 uppercase">{t('purchase.sidebar.dueAmount', { amount: formatMoney(po.remainingAmount) })}</div>
                       ) : (
-                        <div className="text-[10px] font-bold text-emerald-500 uppercase">Paid in full</div>
+                        <div className="text-[10px] font-bold text-emerald-500 uppercase">{t('purchase.status.paidInFull')}</div>
                       )}
                     </td>
                   ) : null}
-                  <td className="px-8 py-5 text-right">
+                  <td className="px-8 py-5 text-right rtl:text-left">
                     {po.status === 'pending' ? (
                       <button type="button" onClick={() => onReceiveClick(po)} className="rounded-xl bg-emerald-500 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-white hover:bg-emerald-600 transition-colors">
-                        Receive &amp; Bill
+                        {t('purchase.receiveModal.receiveAndBill')}
                       </button>
                     ) : (
                       <span className="text-[10px] font-bold text-slate-300">-</span>
