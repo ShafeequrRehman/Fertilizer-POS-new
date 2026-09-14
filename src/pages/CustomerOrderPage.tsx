@@ -226,10 +226,10 @@ function redirectToGateway(redirect: PaymentRedirect) {
 // as everywhere else on this page).
 function VariationPickerSheet({ group, onSelect, onClose }: { group: ProductGroup; onSelect: (variation: PublicMenuProduct) => void; onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-40 flex items-end bg-black/50 sm:items-center sm:justify-center" onClick={onClose}>
-      <div className="w-full max-w-sm rounded-t-[28px] bg-white p-6 shadow-2xl sm:rounded-[28px]" onClick={(event) => event.stopPropagation()}>
+    <div className="glass-overlay fixed inset-0 z-40 flex items-end sm:items-center sm:justify-center" onClick={onClose}>
+      <div className="glass-strong w-full max-w-sm rounded-t-[28px] p-6 sm:rounded-[28px]" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-center gap-3">
-          <div className={`h-14 w-14 shrink-0 overflow-hidden rounded-[16px] ${group.color || 'bg-indigo-50'} p-2`}>
+          <div className={`h-14 w-14 shrink-0 overflow-hidden rounded-[16px] shadow-inner ${group.color || 'bg-indigo-50'} p-2`}>
             {getProductImageUrl(group.image) ? (
               <img src={getProductImageUrl(group.image)} alt={group.name} className="h-full w-full object-contain" />
             ) : (
@@ -247,14 +247,14 @@ function VariationPickerSheet({ group, onSelect, onClose }: { group: ProductGrou
               key={variation.id}
               type="button"
               onClick={() => onSelect(variation)}
-              className="flex w-full items-center justify-between rounded-2xl border border-gray-100 bg-[#FAFBFC] px-4 py-3 text-left transition hover:border-[#E2F33C] hover:bg-[#FBFDEB]"
+              className="flex w-full items-center justify-between rounded-2xl border border-white/50 bg-white/50 px-4 py-3 text-left shadow-inner transition hover:border-[#E2F33C]/70 hover:bg-[#FBFDEB]/70"
             >
               <p className="truncate text-sm font-black text-gray-900">{variation.variation || 'Standard'}</p>
               <span className="shrink-0 text-sm font-black text-gray-900">Rs {formatter.format(variation.price)}</span>
             </button>
           ))}
         </div>
-        <button type="button" onClick={onClose} className="mt-4 w-full rounded-2xl bg-gray-100 py-3 text-sm font-black text-gray-600">
+        <button type="button" onClick={onClose} className="glass-pill mt-4 w-full rounded-2xl py-3 text-sm font-black text-gray-600 transition hover:bg-white/70">
           Cancel
         </button>
       </div>
@@ -392,14 +392,14 @@ function ChangeRequestModal({
   const [pickerGroup, setPickerGroup] = useState<ProductGroup | null>(null);
 
   return (
-    <div className="fixed inset-0 z-40 flex items-end bg-black/50 sm:items-center sm:justify-center">
-      <div className="max-h-[92vh] w-full overflow-y-auto rounded-t-[28px] bg-white p-6 sm:max-w-lg sm:rounded-[28px]">
+    <div className="glass-overlay fixed inset-0 z-40 flex items-end sm:items-center sm:justify-center">
+      <div className="glass-strong max-h-[92vh] w-full overflow-y-auto rounded-t-[28px] p-6 sm:max-w-lg sm:rounded-[28px]">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-black text-gray-900">Request a Change</h2>
           <button type="button" onClick={onClose}><X size={20} className="text-gray-400" /></button>
         </div>
 
-        <div className={`mb-4 flex items-center gap-2 rounded-xl p-3 text-xs font-bold ${canAdd ? 'bg-indigo-50 text-indigo-800' : 'bg-gray-50 text-gray-500'}`}>
+        <div className={`mb-4 flex items-center gap-2 rounded-xl p-3 text-xs font-bold shadow-inner ${canAdd ? 'bg-indigo-50/80 text-indigo-800' : 'bg-gray-50/80 text-gray-500'}`}>
           <Clock size={14} className="shrink-0" />
           {canAdd
             ? `You can still add new items for the next ${formatCountdown(remaining)}.`
@@ -419,7 +419,7 @@ function ChangeRequestModal({
                       key={cat}
                       type="button"
                       onClick={() => setCategory(cat)}
-                      className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-black ${category === cat ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}
+                      className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-black transition ${category === cat ? 'glass-dark' : 'bg-white/50 text-gray-500 shadow-inner hover:bg-white/70'}`}
                     >
                       {cat}
                     </button>
@@ -435,15 +435,15 @@ function ChangeRequestModal({
                       const key = itemKey(product.name, product.variation);
                       const qty = addQuantities.get(key) || 0;
                       return (
-                        <div key={group.key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                        <div key={group.key} className="flex items-center justify-between rounded-xl bg-white/50 p-3 shadow-inner">
                           <div className="min-w-0">
                             <p className="truncate text-xs font-black text-gray-900">{product.name}{product.variation ? ` (${product.variation})` : ''}</p>
                             <p className="text-[11px] text-gray-400">Rs {formatter.format(product.price)}</p>
                           </div>
-                          <div className="flex shrink-0 items-center gap-2">
-                            <button type="button" onClick={() => setAddQty(product, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
+                          <div className="glass-pill flex shrink-0 items-center gap-2 rounded-full p-1">
+                            <button type="button" onClick={() => setAddQty(product, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70 disabled:opacity-30"><Minus size={13} /></button>
                             <span className="w-4 text-center text-xs font-black">{qty}</span>
-                            <button type="button" onClick={() => setAddQty(product, qty + 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={13} /></button>
+                            <button type="button" onClick={() => setAddQty(product, qty + 1)} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70"><Plus size={13} /></button>
                           </div>
                         </div>
                       );
@@ -455,13 +455,13 @@ function ChangeRequestModal({
                         key={group.key}
                         type="button"
                         onClick={() => setPickerGroup(group)}
-                        className="flex w-full items-center justify-between rounded-xl bg-[#F8F9FB] p-3 text-left"
+                        className="flex w-full items-center justify-between rounded-xl bg-white/50 p-3 text-left shadow-inner"
                       >
                         <div className="min-w-0">
                           <p className="truncate text-xs font-black text-gray-900">{group.name}</p>
                           <p className="text-[11px] text-gray-400">{group.variations.length} sizes/options - from Rs {formatter.format(cheapest)}</p>
                         </div>
-                        <span className="shrink-0 rounded-lg bg-black px-2.5 py-1.5 text-[10px] font-black text-white">{groupQty > 0 ? `${groupQty} added` : 'Select'}</span>
+                        <span className="glass-dark shrink-0 rounded-lg px-2.5 py-1.5 text-[10px] font-black">{groupQty > 0 ? `${groupQty} added` : 'Select'}</span>
                       </button>
                     );
                   })}
@@ -491,15 +491,15 @@ function ChangeRequestModal({
               const key = itemKey(item.name, item.variation);
               const qty = removeQuantities.get(key) || 0;
               return (
-                <div key={key} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                <div key={key} className="flex items-center justify-between rounded-xl bg-white/50 p-3 shadow-inner">
                   <div className="min-w-0">
                     <p className="truncate text-xs font-black text-gray-900">{item.name}{item.variation ? ` (${item.variation})` : ''}</p>
                     <p className="text-[11px] text-gray-400">You have {item.quantity} · Rs {formatter.format(item.price)} each</p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <button type="button" onClick={() => setRemoveQty(item, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Minus size={13} /></button>
+                  <div className="glass-pill flex shrink-0 items-center gap-2 rounded-full p-1">
+                    <button type="button" onClick={() => setRemoveQty(item, qty - 1)} disabled={qty === 0} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70 disabled:opacity-30"><Minus size={13} /></button>
                     <span className="w-4 text-center text-xs font-black">{qty}</span>
-                    <button type="button" onClick={() => setRemoveQty(item, qty + 1)} disabled={qty >= item.quantity} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white disabled:opacity-30"><Plus size={13} /></button>
+                    <button type="button" onClick={() => setRemoveQty(item, qty + 1)} disabled={qty >= item.quantity} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70 disabled:opacity-30"><Plus size={13} /></button>
                   </div>
                 </div>
               );
@@ -512,7 +512,7 @@ function ChangeRequestModal({
           onChange={(e) => setNote(e.target.value)}
           placeholder="Anything else to tell the shop about this request..."
           rows={2}
-          className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none"
+          className="w-full rounded-xl border border-white/60 bg-white/50 px-4 py-3 text-sm shadow-inner outline-none transition focus:border-[#D6E332]"
         />
 
         {error ? <p className="mt-3 text-xs font-bold text-rose-600">{error}</p> : null}
@@ -521,7 +521,7 @@ function ChangeRequestModal({
           type="button"
           onClick={() => void submit()}
           disabled={!canSubmit}
-          className="mt-4 w-full rounded-2xl bg-[#E2F33C] py-3.5 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-4 w-full rounded-2xl border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] py-3.5 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? 'Sending Request...' : 'Send Request to Shop'}
         </button>
@@ -566,8 +566,8 @@ function OrderProgressStepper({ status }: { status: PublicOrderStatus }) {
         <div key={step.key} className={`flex items-center ${index < PROGRESS_STEPS.length - 1 ? 'flex-1' : ''}`}>
           <div className="flex flex-col items-center">
             <div
-              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-black ${
-                index <= currentIndex ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-black shadow-inner ${
+                index <= currentIndex ? 'bg-emerald-500 text-white' : 'bg-white/60 text-gray-400'
               }`}
             >
               {index <= currentIndex ? <Check size={13} /> : index + 1}
@@ -631,11 +631,11 @@ function OrderStatusPanel({
 
   if (error) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] p-6 text-center text-sm font-bold text-gray-500">{error}</div>
+      <div className="glass-app-bg flex min-h-screen items-center justify-center p-6 text-center text-sm font-bold text-gray-500">{error}</div>
     );
   }
   if (!status) {
-    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading your order...</div>;
+    return <div className="glass-app-bg flex min-h-screen items-center justify-center text-sm font-bold text-gray-500">Loading your order...</div>;
   }
 
   const tracking = TRACKING_LABELS[status.trackingStatus] || TRACKING_LABELS.awaiting_confirmation;
@@ -646,17 +646,17 @@ function OrderStatusPanel({
   const canRequestChange = !isFinished && ['awaiting_confirmation', 'confirmed'].includes(status.trackingStatus);
   const changeRequest = status.customerChangeRequest;
   return (
-    <div className="min-h-screen bg-[#F8F9FB] p-6">
-      <div className="mx-auto max-w-md rounded-[28px] bg-white p-8 text-center shadow-sm">
+    <div className="glass-app-bg min-h-screen p-6">
+      <div className="glass-strong mx-auto max-w-md rounded-[28px] p-8 text-center">
         <CheckCircle2 className="mx-auto mb-3 text-emerald-500" size={56} />
         <h1 className="text-2xl font-black text-gray-900">Order #{status.dailyOrderNumber}</h1>
-        <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-black ${status.status === 'cancelled' ? TRACKING_LABELS.cancelled.tone : tracking.tone}`}>
+        <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-black shadow-inner ${status.status === 'cancelled' ? TRACKING_LABELS.cancelled.tone : tracking.tone}`}>
           {status.status === 'cancelled' ? TRACKING_LABELS.cancelled.label : status.status === 'completed' ? 'Order completed - thank you!' : tracking.label}
         </div>
 
         <OrderProgressStepper status={status} />
 
-        <div className="mt-6 space-y-1.5 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
+        <div className="mt-6 space-y-1.5 rounded-[20px] bg-white/50 p-4 text-left text-sm shadow-inner">
           {status.items.map((item, index) => (
             <div key={`${item.name}-${index}`} className="flex justify-between gap-3">
               <span className="text-gray-600">{item.quantity}x {item.name}{item.variation ? ` (${item.variation})` : ''}</span>
@@ -665,7 +665,7 @@ function OrderStatusPanel({
           ))}
         </div>
 
-        <div className="mt-3 space-y-2 rounded-2xl bg-[#F8F9FB] p-4 text-left text-sm">
+        <div className="mt-3 space-y-2 rounded-[20px] bg-white/50 p-4 text-left text-sm shadow-inner">
           <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="font-black">{status.orderType === 'DineIn' ? 'Dine-In' : status.orderType}</span></div>
           {status.table ? <div className="flex justify-between"><span className="text-gray-500">Table</span><span className="font-black">{formatTableLabel(status.table)}</span></div> : null}
           {status.address ? <div className="flex justify-between gap-3"><span className="shrink-0 text-gray-500">Address</span><span className="text-right font-black">{status.address}</span></div> : null}
@@ -679,20 +679,20 @@ function OrderStatusPanel({
         </div>
 
         {status.orderType === 'Delivery' && status.assignedRider ? (
-          <div className="mt-3 flex items-center gap-3 rounded-2xl bg-indigo-50 p-4 text-left">
+          <div className="mt-3 flex items-center gap-3 rounded-2xl bg-indigo-50/80 p-4 text-left shadow-inner">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white"><Bike size={16} /></div>
             <div className="min-w-0 flex-1">
               <p className="text-[10px] font-black uppercase tracking-[0.14em] text-indigo-400">Your Rider</p>
               <p className="truncate text-sm font-black text-indigo-900">{status.assignedRider.name || 'Assigned'}</p>
             </div>
-            <a href={`tel:${status.assignedRider.phone}`} className="flex shrink-0 items-center gap-1 rounded-xl bg-indigo-600 px-3 py-2 text-[11px] font-black text-white">
+            <a href={`tel:${status.assignedRider.phone}`} className="flex shrink-0 items-center gap-1 rounded-xl bg-indigo-600 px-3 py-2 text-[11px] font-black text-white transition hover:brightness-110">
               <Phone size={12} /> Call
             </a>
           </div>
         ) : null}
 
         {changeRequest && changeRequest.status === 'pending' ? (
-          <div className="mt-3 rounded-2xl bg-amber-50 p-4 text-left text-xs font-bold text-amber-800">
+          <div className="mt-3 rounded-2xl bg-amber-50/80 p-4 text-left text-xs font-bold text-amber-800 shadow-inner">
             <p>Your change request is waiting for the shop's approval:</p>
             <ul className="mt-1.5 space-y-0.5">
               {changeRequest.addItems.map((item, index) => (
@@ -704,11 +704,11 @@ function OrderStatusPanel({
             </ul>
           </div>
         ) : changeRequest && changeRequest.status === 'rejected' ? (
-          <div className="mt-3 rounded-2xl bg-rose-50 p-4 text-left text-xs font-bold text-rose-700">
+          <div className="mt-3 rounded-2xl bg-rose-50/80 p-4 text-left text-xs font-bold text-rose-700 shadow-inner">
             Your last change request was declined{changeRequest.note ? `: ${changeRequest.note}` : '.'}
           </div>
         ) : changeRequest && changeRequest.status === 'approved' ? (
-          <div className="mt-3 rounded-2xl bg-emerald-50 p-4 text-left text-xs font-bold text-emerald-700">
+          <div className="mt-3 rounded-2xl bg-emerald-50/80 p-4 text-left text-xs font-bold text-emerald-700 shadow-inner">
             Your last change request was approved and is reflected in your order above.
           </div>
         ) : null}
@@ -717,7 +717,7 @@ function OrderStatusPanel({
           <button
             type="button"
             onClick={() => setShowChangeModal(true)}
-            className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#F8F9FB] py-3.5 text-sm font-black text-gray-800"
+            className="glass-pill mt-5 flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-black text-gray-800 transition hover:bg-white/70"
           >
             <Edit3 size={15} /> Add or Remove Items
           </button>
@@ -727,7 +727,7 @@ function OrderStatusPanel({
           <button
             type="button"
             onClick={() => navigate(`/order/${shopId}`)}
-            className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl bg-black py-3.5 text-sm font-black text-white"
+            className="glass-dark mt-3 flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-black transition hover:brightness-110"
           >
             <RotateCcw size={15} /> Start a New Order
           </button>
@@ -767,13 +767,13 @@ function CustomerShell({
 }) {
   const [tab, setTab] = useState<'track' | 'menu'>('track');
   return (
-    <div className="min-h-screen bg-[#F8F9FB]">
-      <div className="sticky top-0 z-30 flex gap-1.5 bg-black p-2">
+    <div className="glass-app-bg min-h-screen">
+      <div className="glass-dark sticky top-0 z-30 flex gap-1.5 rounded-b-[24px] p-2">
         <button
           type="button"
           onClick={() => setTab('menu')}
           className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-black transition ${
-            tab === 'menu' ? 'bg-[#E2F33C] text-black' : 'text-white/60'
+            tab === 'menu' ? 'bg-[#E2F33C] text-black' : 'text-white/60 hover:text-white'
           }`}
         >
           <UtensilsCrossed size={14} /> Menu
@@ -782,7 +782,7 @@ function CustomerShell({
           type="button"
           onClick={() => setTab('track')}
           className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-black transition ${
-            tab === 'track' ? 'bg-[#E2F33C] text-black' : 'text-white/60'
+            tab === 'track' ? 'bg-[#E2F33C] text-black' : 'text-white/60 hover:text-white'
           }`}
         >
           <Clock size={14} /> Track Order
@@ -899,7 +899,7 @@ export default function CustomerOrderPage() {
   }, [shopId, params.orderId]);
 
   if (resolving) {
-    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading...</div>;
+    return <div className="glass-app-bg flex min-h-screen items-center justify-center text-sm font-bold text-gray-500">Loading...</div>;
   }
   if (resolvedOrderId) {
     return <CustomerShell shopId={shopId} activeOrderId={resolvedOrderId} onOrderFinished={() => clearSavedOrderId(shopId)} />;
@@ -1120,12 +1120,12 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   }
 
   if (loading) {
-    return <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] text-sm font-bold text-gray-500">Loading menu...</div>;
+    return <div className="glass-app-bg flex min-h-screen items-center justify-center text-sm font-bold text-gray-500">Loading menu...</div>;
   }
   if (loadError) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#F8F9FB] p-6 text-center">
-        <div>
+      <div className="glass-app-bg flex min-h-screen items-center justify-center p-6 text-center">
+        <div className="glass-strong rounded-[28px] p-8">
           <AlertCircle className="mx-auto mb-3 text-rose-500" size={40} />
           <p className="font-bold text-gray-700">{loadError}</p>
         </div>
@@ -1137,12 +1137,12 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8F9FB] pb-28">
-      <header className="bg-black px-5 py-6 text-white">
+    <div className="glass-app-bg min-h-screen pb-28">
+      <header className="glass-dark sticky top-0 z-20 rounded-b-[28px] px-5 py-6">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-xl font-black">{menu?.shopName || 'Menu'}</h1>
-            <p className="text-xs font-semibold text-white/60">Order Dine-In, Takeaway, or Delivery</p>
+            <p className="text-xs font-semibold text-white/60">Order Takeaway or Delivery</p>
           </div>
           {installPromptEvent ? (
             <button
@@ -1152,7 +1152,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 await installPromptEvent.userChoice;
                 setInstallPromptEvent(null);
               }}
-              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-2 text-xs font-black"
+              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-2 text-xs font-black transition hover:bg-white/20"
             >
               <Download size={14} /> Install
             </button>
@@ -1161,13 +1161,13 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       </header>
 
       {!menu?.isOpen ? (
-        <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 p-4 text-xs font-bold text-amber-800">
+        <div className="glass mx-5 mt-4 flex items-center gap-2 rounded-2xl p-4 text-xs font-bold text-amber-800">
           <AlertCircle size={16} /> This shop is currently closed and isn't taking orders right now.
         </div>
       ) : null}
 
       {showIosInstallHint ? (
-        <div className="mx-5 mt-4 flex items-start gap-2 rounded-2xl bg-white p-4 text-xs font-bold text-gray-700 shadow-sm">
+        <div className="glass mx-5 mt-4 flex items-start gap-2 rounded-2xl p-4 text-xs font-bold text-gray-700">
           <Share size={16} className="mt-0.5 shrink-0 text-indigo-600" />
           <span className="flex-1">
             Add this to your Home Screen: tap the <b>Share</b> button below, then <b>Add to Home Screen</b>.
@@ -1178,13 +1178,13 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         </div>
       ) : null}
 
-      <div className="flex gap-2 overflow-x-auto px-5 py-4">
+      <div className="flex flex-wrap gap-1.5 px-5 py-4">
         {categories.map((cat) => (
           <button
             key={cat}
             type="button"
             onClick={() => setCategory(cat)}
-            className={`shrink-0 rounded-full px-4 py-2 text-xs font-black ${category === cat ? 'bg-black text-white' : 'bg-white text-gray-500'}`}
+            className={`shrink-0 whitespace-nowrap rounded-full px-4 py-2 text-xs font-black transition ${category === cat ? 'glass-dark' : 'bg-white/50 text-gray-600 shadow-inner hover:bg-white/70'}`}
           >
             {cat}
           </button>
@@ -1208,14 +1208,14 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
           const cheapest = Math.min(...group.variations.map((v) => v.price));
           const imageUrl = getProductImageUrl(group.image);
           return (
-            <div key={group.key} className="rounded-2xl bg-white p-3 shadow-sm">
+            <div key={group.key} className="rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-br from-white/70 to-white/30 p-3 backdrop-blur-xl backdrop-saturate-150 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_8px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5">
               {/* Same colored icon tile POSPage.tsx's own product grid uses
                   on desktop (see getProductImageUrl's own comment for why a
                   relative path is required, not "/products/...") - keeps
                   this page visually identical to the shop's real catalog
                   instead of a plain photo grid, and still shows a sensible
                   placeholder for the (rare) product with no icon set. */}
-              <div className={`mb-2 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl p-2 ${group.color || 'bg-indigo-50'}`}>
+              <div className={`mb-2 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-[14px] p-2 shadow-inner ${group.color || 'bg-indigo-50'}`}>
                 {imageUrl ? (
                   <img src={imageUrl} alt={group.name} className="h-full w-full object-contain" />
                 ) : (
@@ -1226,17 +1226,17 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
               <p className="text-[11px] text-gray-400">{hasVariations ? `${group.variations.length} sizes/options` : single.variation}</p>
               <p className="mt-1 text-sm font-black text-gray-900">{hasVariations ? `From Rs ${formatter.format(cheapest)}` : `Rs ${formatter.format(single.price)}`}</p>
               {hasVariations ? (
-                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">
+                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] py-2 text-xs font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)] transition hover:brightness-105">
                   {groupCartCount > 0 ? `${groupCartCount} in cart - Select` : 'Select'}
                 </button>
               ) : line ? (
-                <div className="mt-2 flex items-center justify-between rounded-xl bg-[#F8F9FB] px-2 py-1.5">
-                  <button type="button" onClick={() => changeQuantity(single, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
+                <div className="glass-pill mt-2 flex items-center justify-between rounded-xl px-2 py-1.5">
+                  <button type="button" onClick={() => changeQuantity(single, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70"><Minus size={14} /></button>
                   <span className="text-sm font-black">{line.quantity}</span>
-                  <button type="button" onClick={() => changeQuantity(single, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
+                  <button type="button" onClick={() => changeQuantity(single, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70"><Plus size={14} /></button>
                 </div>
               ) : (
-                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl bg-[#E2F33C] py-2 text-xs font-black text-black">Add</button>
+                <button type="button" onClick={() => handleGroupTap(group)} className="mt-2 w-full rounded-xl border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] py-2 text-xs font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)] transition hover:brightness-105">Add</button>
               )}
             </div>
           );
@@ -1259,7 +1259,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
         <button
           type="button"
           onClick={() => setShowCart(true)}
-          className="fixed bottom-4 left-1/2 flex w-[92%] max-w-md -translate-x-1/2 items-center justify-between rounded-2xl bg-black px-5 py-4 text-white shadow-xl"
+          className="glass-dark fixed bottom-4 left-1/2 flex w-[92%] max-w-md -translate-x-1/2 items-center justify-between rounded-2xl px-5 py-4 transition hover:brightness-110"
         >
           <span className="flex items-center gap-2 text-sm font-black"><ShoppingCart size={18} /> {cartCount} item{cartCount === 1 ? '' : 's'}</span>
           <span className="text-sm font-black">Rs {formatter.format(cartTotal)} · Checkout</span>
@@ -1267,8 +1267,8 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
       ) : null}
 
       {showCart ? (
-        <div className="fixed inset-0 z-30 flex items-end bg-black/50 sm:items-center sm:justify-center">
-          <div className="max-h-[90vh] w-full overflow-y-auto rounded-t-[28px] bg-white p-6 sm:max-w-md sm:rounded-[28px]">
+        <div className="glass-overlay fixed inset-0 z-30 flex items-end sm:items-center sm:justify-center">
+          <div className="glass-strong max-h-[90vh] w-full overflow-y-auto rounded-t-[28px] p-6 sm:max-w-md sm:rounded-[28px]">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-black text-gray-900">Your Order</h2>
               <button type="button" onClick={() => setShowCart(false)}><X size={20} className="text-gray-400" /></button>
@@ -1276,21 +1276,21 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
 
             <div className="space-y-3">
               {cartLines.map((line) => (
-                <div key={cartKey(line.product)} className="flex items-center justify-between rounded-xl bg-[#F8F9FB] p-3">
+                <div key={cartKey(line.product)} className="flex items-center justify-between rounded-xl bg-white/50 p-3 shadow-inner">
                   <div>
                     <p className="text-sm font-black text-gray-900">{line.product.name}</p>
                     <p className="text-xs text-gray-400">Rs {formatter.format(line.product.price)} x {line.quantity}</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button type="button" onClick={() => changeQuantity(line.product, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Minus size={14} /></button>
+                  <div className="glass-pill flex items-center gap-2 rounded-full p-1">
+                    <button type="button" onClick={() => changeQuantity(line.product, -1)} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70"><Minus size={14} /></button>
                     <span className="text-sm font-black">{line.quantity}</span>
-                    <button type="button" onClick={() => changeQuantity(line.product, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg bg-white"><Plus size={14} /></button>
+                    <button type="button" onClick={() => changeQuantity(line.product, 1)} className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-600 transition hover:bg-white/70"><Plus size={14} /></button>
                   </div>
                 </div>
               ))}
             </div>
 
-            <div className="mt-4 flex justify-between border-t border-gray-100 pt-4 text-sm font-black">
+            <div className="mt-4 flex justify-between border-t border-white/50 pt-4 text-sm font-black">
               <span>Total</span>
               <span>Rs {formatter.format(cartTotal)}</span>
             </div>
@@ -1303,18 +1303,18 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                     key={type}
                     type="button"
                     onClick={() => setOrderType(type)}
-                    className={`flex-1 rounded-xl py-2.5 text-xs font-black ${orderType === type ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}
+                    className={`flex-1 rounded-xl border px-2.5 py-2.5 text-xs font-black transition ${orderType === type ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}
                   >
                     {type}
                   </button>
                 ))}
               </div>
 
-              <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Your name" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
-              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value.replace(/[^\d]/g, ''))} placeholder="Phone number" inputMode="numeric" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
+              <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Your name" className="w-full rounded-xl border border-white/60 bg-white/50 px-4 py-3 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
+              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value.replace(/[^\d]/g, ''))} placeholder="Phone number" inputMode="numeric" className="w-full rounded-xl border border-white/60 bg-white/50 px-4 py-3 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
               {orderType === 'Delivery' ? (
                 <div>
-                  <input value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Delivery address" className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" />
+                  <input value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} placeholder="Delivery address" className="w-full rounded-xl border border-white/60 bg-white/50 px-4 py-3 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" />
                   <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-bold text-amber-700">
                     <MapPin size={12} /> We'll ask to share your live location when you place the order - this is required for delivery so the rider can find you.
                   </p>
@@ -1322,7 +1322,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
               ) : null}
 
               {activeOrderWarning ? (
-                <div className="rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-800">
+                <div className="rounded-xl bg-amber-50/80 p-3 text-xs font-bold text-amber-800 shadow-inner">
                   <div className="flex items-center gap-2">
                     <AlertCircle size={14} className="shrink-0" />
                     <span>
@@ -1333,7 +1333,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                   <button
                     type="button"
                     onClick={() => navigate(`/order/${shopId}/status/${activeOrderWarning.id}`)}
-                    className="mt-2 w-full rounded-lg bg-amber-800/10 py-2 text-xs font-black text-amber-900"
+                    className="mt-2 w-full rounded-lg bg-amber-800/10 py-2 text-xs font-black text-amber-900 transition hover:bg-amber-800/20"
                   >
                     Track that order
                   </button>
@@ -1343,7 +1343,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
 
               <p className="mt-3 text-xs font-black uppercase tracking-[0.14em] text-gray-400">Payment</p>
               <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => setPaymentMethod('Cash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'Cash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>Cash</button>
+                <button type="button" onClick={() => setPaymentMethod('Cash')} className={`flex-1 rounded-xl border px-2.5 py-2.5 text-xs font-black transition ${paymentMethod === 'Cash' ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>Cash</button>
                 {/* Always offered, even with no JazzCash/EasyPaisa merchant
                     credentials configured - the customer just tells the
                     shop they'll pay online (bank transfer/personal
@@ -1351,12 +1351,12 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                     manually, same as they would with cash in hand. See
                     publicOrderController.js's createOrder for the
                     isOnlineIntent handling. */}
-                <button type="button" onClick={() => setPaymentMethod('Online')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'Online' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>Online</button>
+                <button type="button" onClick={() => setPaymentMethod('Online')} className={`flex-1 rounded-xl border px-2.5 py-2.5 text-xs font-black transition ${paymentMethod === 'Online' ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>Online</button>
                 {menu?.paymentMethods.jazzCash ? (
-                  <button type="button" onClick={() => setPaymentMethod('JazzCash')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'JazzCash' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>JazzCash</button>
+                  <button type="button" onClick={() => setPaymentMethod('JazzCash')} className={`flex-1 rounded-xl border px-2.5 py-2.5 text-xs font-black transition ${paymentMethod === 'JazzCash' ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>JazzCash</button>
                 ) : null}
                 {menu?.paymentMethods.easyPaisa ? (
-                  <button type="button" onClick={() => setPaymentMethod('EasyPaisa')} className={`flex-1 rounded-xl py-2.5 text-xs font-black ${paymentMethod === 'EasyPaisa' ? 'bg-black text-white' : 'bg-[#F8F9FB] text-gray-500'}`}>EasyPaisa</button>
+                  <button type="button" onClick={() => setPaymentMethod('EasyPaisa')} className={`flex-1 rounded-xl border px-2.5 py-2.5 text-xs font-black transition ${paymentMethod === 'EasyPaisa' ? 'border-[#D6E332] bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-2px_6px_rgba(132,144,10,0.4)]' : 'border-white/50 bg-white/50 text-gray-500 shadow-inner hover:border-[#E2F33C]/70'}`}>EasyPaisa</button>
                 ) : null}
               </div>
               {paymentMethod === 'Online' ? (
@@ -1365,7 +1365,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 <p className="text-[11px] font-semibold text-gray-400">You'll be taken to {paymentMethod}'s secure payment page next - your order is confirmed automatically once payment clears.</p>
               ) : null}
 
-              <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Any special instructions..." className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none" rows={2} />
+              <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Any special instructions..." className="w-full rounded-xl border border-white/60 bg-white/50 px-4 py-3 text-sm shadow-inner outline-none transition focus:border-[#D6E332]" rows={2} />
 
               {placeError ? <p className="text-xs font-bold text-rose-600">{placeError}</p> : null}
 
@@ -1373,7 +1373,7 @@ function CustomerOrderingFlow({ shopId }: { shopId: string }) {
                 type="button"
                 onClick={() => void handlePlaceOrder()}
                 disabled={!canSubmit || placing || Boolean(activeOrderWarning)}
-                className="w-full rounded-2xl bg-[#E2F33C] py-4 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
+                className="w-full rounded-[20px] border-[0.5px] border-white/50 bg-gradient-to-b from-[#eef7a0] to-[#d8e94a] py-4 text-sm font-black text-black shadow-[inset_0_1px_0_rgba(255,255,255,0.6),inset_0_-3px_8px_rgba(132,144,10,0.4)] transition hover:brightness-105 hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {placing ? (orderType === 'Delivery' ? 'Getting Your Location...' : 'Placing Order...') : `Place Order · Rs ${formatter.format(cartTotal)}`}
               </button>
