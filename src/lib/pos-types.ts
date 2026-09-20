@@ -94,6 +94,25 @@ export interface DuesHistoryEntry {
   createdAt: string;
 }
 
+// One linked-purchase row on a Unified Khata contact's statement - the
+// purchase-side counterpart to LedgerOrder above. Deliberately a small
+// subset of IngredientPurchase's own fields (same fields
+// ingredientPurchaseController.getCompanyLedger's rows already carry), just
+// enough for DuesPage.tsx's merged History timeline to show "which batch,
+// how much, how much still due" without pulling in the full purchase
+// record (recordedBy, note, etc.) this statement view never needs.
+export interface LedgerPurchase {
+  id: string;
+  purchaseOrderNumber: string;
+  ingredientName: string;
+  quantity: number;
+  unit: IngredientUnit;
+  totalAmount: number;
+  paidAmount: number;
+  remainingAmount: number;
+  purchaseDate: string;
+}
+
 export interface LedgerCustomer {
   id: string;
   name: string;
@@ -104,9 +123,27 @@ export interface LedgerCustomer {
   totalBilled: number;
   totalPaid: number;
   totalOrderBalance: number;
+  // Unchanged in meaning by Unified Khata - still purely the sales-side
+  // figure (totalOrderBalance + previousDues). Other pages/PDFs already
+  // rely on totalDue meaning exactly that, so it's kept as-is; the netted
+  // view is the separate netBalance field below.
   totalDue: number;
+  // Unified Khata / Customer-Supplier Netting: this contact's all-time
+  // purchase-side balance (sum of their linked, received
+  // IngredientPurchase rows' remainingAmount - what the shop still owes
+  // them for stock bought on credit) and the net of the two sides
+  // (totalDue - totalPurchaseBalance). Positive netBalance = the contact
+  // still owes the shop; negative = the shop owes the contact. See
+  // backend/controllers/customerController.js's getCustomerLedger for the
+  // full computation and worked examples.
+  totalPurchaseBalance: number;
+  netBalance: number;
   lastOrderAt: string | null;
   orders: LedgerOrder[];
+  // Period-scoped (same convention as `orders` above) - this contact's
+  // linked purchases, merged client-side with `orders`/`duesHistory` into
+  // one chronological History timeline (DuesPage.tsx).
+  purchases: LedgerPurchase[];
   duesHistory: DuesHistoryEntry[];
 }
 
@@ -219,6 +256,11 @@ export interface IngredientPurchase {
   ingredientName: string;
   unit: IngredientUnit;
   supplierId: string | null;
+  // Unified Khata / Customer-Supplier Netting: optional link to a Khata
+  // Customer contact - see backend/models/IngredientPurchase.js's own
+  // comment on why this is separate from supplierId above. When set,
+  // companyName below is that contact's own name.
+  linkedCustomerId: string | null;
   // Free-text vendor/company name - grouped by this exact string in the
   // Ledger's company-wise dues view (see CompanyLedgerEntry below).
   companyName: string;
@@ -268,6 +310,14 @@ export interface PurchaseOrderItemInput {
 export interface PurchaseOrderInput {
   companyName?: string;
   supplierId?: string | null;
+  // Unified Khata / Customer-Supplier Netting: optional id of an existing
+  // Khata Customer contact this whole order should be linked to (the
+  // Purchase page's "Link to Khata contact" search box) - when sent, the
+  // backend overrides companyName with that contact's own name and stamps
+  // every line with linkedCustomerId, so it nets against that contact's
+  // sales-side dues. Fully optional/backward-compatible - omit it for a
+  // plain one-off supplier who isn't a shop customer, exactly today's flow.
+  customerId?: string | null;
   purchaseDate?: string;
   note?: string;
   items: PurchaseOrderItemInput[];

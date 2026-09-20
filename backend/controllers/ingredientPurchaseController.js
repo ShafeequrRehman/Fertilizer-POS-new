@@ -2,8 +2,26 @@ const mongoose = require("mongoose");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const Ingredient = require("../models/Ingredient");
 const Shop = require("../models/Shop");
+const Customer = require("../models/Customer");
 const { shopScope } = require("../middleware/attachShopScope");
 const { toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
+
+// Unified Khata: resolves an optional `customerId` from a purchase request
+// body into that Customer's own document (just id/name - all that's needed
+// here), scoped to this shop so one shop can never link a purchase to
+// another shop's customer. Deliberately non-fatal, same "an optional
+// lookup failing should never take down the whole request" rule
+// orderController.createOrder's own customer-sync try/catch already
+// follows - an invalid/missing/cross-shop id just means this purchase
+// isn't linked to a Khata contact, not a 500.
+async function resolveLinkedCustomer(customerId, req) {
+  if (!customerId || !mongoose.Types.ObjectId.isValid(customerId)) return null;
+  try {
+    return await Customer.findOne({ _id: customerId, ...shopScope(req) }).select("name").lean();
+  } catch {
+    return null;
+  }
+}
 
 // Formats a shop's permanent purchaseOrderSequenceCounter into the
 // human-readable invoice number every logged batch gets ("PO-000123") -
@@ -110,7 +128,7 @@ exports.getPurchase = async (req, res) => {
 // marks a single-line legacy purchase "received".
 exports.createPurchase = async (req, res) => {
   try {
-    const { ingredientId, quantity, rate, paidAmount, companyName, productDetails, supplierId, purchaseDate, note } = req.body || {};
+    const { ingredientId, quantity, rate, paidAmount, companyName, productDetails, supplierId, purchaseDate, note, customerId } = req.body || {};
 
     if (!ingredientId || !mongoose.Types.ObjectId.isValid(ingredientId)) {
       return res.status(400).json({ error: "A valid ingredient is required." });
@@ -153,13 +171,21 @@ exports.createPurchase = async (req, res) => {
     // "a number was already reserved offline" case to reconcile here.
     const purchaseOrderNumber = await reservePurchaseOrderNumber(req.user.shopId);
 
+    // Unified Khata: when this batch is linked to an existing Khata
+    // contact, that contact's own name is what should show wherever
+    // companyName is already displayed (Purchase Log rows, exports, etc.)
+    // - overriding whatever free-text companyName was also sent, so the two
+    // never silently disagree about who this purchase was really from.
+    const linkedCustomer = await resolveLinkedCustomer(customerId, req);
+
     const purchase = await IngredientPurchase.create({
       purchaseOrderNumber,
       ingredientId: ingredient._id,
       ingredientName: ingredient.name,
       unit: ingredient.unit,
       supplierId: supplierId || null,
-      companyName: (companyName || "").trim(),
+      linkedCustomerId: linkedCustomer ? linkedCustomer._id : null,
+      companyName: linkedCustomer ? linkedCustomer.name : (companyName || "").trim(),
       productDetails: (productDetails || "").trim(),
       quantity: qty,
       rate: purchaseRate,
@@ -210,7 +236,7 @@ exports.createPurchase = async (req, res) => {
 // has been paid because nothing has been billed or delivered.
 exports.createPurchaseOrder = async (req, res) => {
   try {
-    const { companyName, supplierId, purchaseDate, note, items } = req.body || {};
+    const { companyName, supplierId, purchaseDate, note, items, customerId } = req.body || {};
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "At least one item is required." });
@@ -244,6 +270,15 @@ exports.createPurchaseOrder = async (req, res) => {
     const purchaseOrderNumber = await reservePurchaseOrderNumber(req.user.shopId);
     const sharedPurchaseDate = purchaseDate ? new Date(purchaseDate) : new Date();
 
+    // Unified Khata: resolved once and shared across every line of this
+    // order - see createPurchase's own comment on why companyName is
+    // overridden from the linked contact's name when one is set. Set here
+    // at Phase 1 (Order Placed) so it survives all the way through
+    // Phase 2 (receivePurchaseOrder below only flips status/rate/paid
+    // fields on the already-existing lines - it never touches or drops
+    // linkedCustomerId).
+    const linkedCustomer = await resolveLinkedCustomer(customerId, req);
+
     const docs = normalizedLines.map((line) => {
       const ingredient = ingredientById.get(String(line.ingredientId));
       return {
@@ -252,7 +287,8 @@ exports.createPurchaseOrder = async (req, res) => {
         ingredientName: ingredient.name,
         unit: ingredient.unit,
         supplierId: supplierId || null,
-        companyName: (companyName || "").trim(),
+        linkedCustomerId: linkedCustomer ? linkedCustomer._id : null,
+        companyName: linkedCustomer ? linkedCustomer.name : (companyName || "").trim(),
         productDetails: line.productDetails,
         quantity: line.qty,
         // Rate-Less Phase 1: no price known yet - schema defaults (0) apply.
@@ -472,7 +508,15 @@ exports.getCompanyLedger = async (req, res) => {
   // "pending" order hasn't been formally invoiced or paid against yet (see
   // recordPayment's own guard above), so it shouldn't inflate a company's
   // totalPurchased/totalPaid/totalDue until it's actually been received.
-  const purchases = await IngredientPurchase.find({ ...shopScope(req), companyName: { $ne: "" }, status: "received" })
+  //
+  // linkedCustomerId: null - a purchase now tied to a Khata contact (Unified
+  // Khata / Customer-Supplier Netting) is already counted, correctly, in
+  // that contact's own netBalance (customerController.getCustomerLedger).
+  // Also counting it here, grouped by its (now contact-derived) companyName,
+  // would double-count the same real due in two unreconciled ledgers - this
+  // plain free-text Suppliers view is only for a company that ISN'T also a
+  // Khata contact.
+  const purchases = await IngredientPurchase.find({ ...shopScope(req), companyName: { $ne: "" }, status: "received", linkedCustomerId: null })
     .select("companyName ingredientName quantity unit rate totalAmount paidAmount remainingAmount purchaseDate")
     .sort({ purchaseDate: -1 })
     .lean();

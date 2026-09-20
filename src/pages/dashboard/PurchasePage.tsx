@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Truck, PackagePlus, Clock, ChevronRight, Search, Filter, AlertCircle,
   CheckCircle2, Box, ArrowRight, Plus, Trash2, X, Download, FileSpreadsheet, MessageCircle,
@@ -6,8 +6,9 @@ import {
 import {
   fetchSuppliers, createSupplier, fetchIngredients, fetchIngredientPurchases,
   fetchCompanyLedger, createPurchaseOrder, receivePurchaseOrder, sendWhatsappDocument,
+  fetchCustomerSearch,
 } from '@/lib/pos-api';
-import { CompanyLedgerEntry, Ingredient, IngredientPurchase, PurchaseOrderGroup, PurchaseOrderReceiveItemInput, Supplier } from '@/lib/pos-types';
+import { CompanyLedgerEntry, Customer, Ingredient, IngredientPurchase, PurchaseOrderGroup, PurchaseOrderReceiveItemInput, Supplier } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { getAuthShop } from '@/lib/auth';
@@ -438,6 +439,19 @@ export default function PurchasePage() {
   const [newSupplierPhone, setNewSupplierPhone] = useState('');
   const [submittingOrder, setSubmittingOrder] = useState(false);
 
+  // --- Unified Khata / Customer-Supplier Netting: "Link to Khata contact"
+  // search box, alongside (not replacing) the plain Supplier picker above -
+  // fully optional, same debounced-search-as-you-type UX as POSPage.tsx's
+  // own customer search (searchTimeoutRef). A picked contact overrides the
+  // company name sent with the order; picking one and picking a Supplier
+  // company are mutually exclusive in submitNewOrder below (the contact
+  // wins if both are somehow set), never required together.
+  const [orderContactQuery, setOrderContactQuery] = useState('');
+  const [orderContactResults, setOrderContactResults] = useState<Customer[]>([]);
+  const [orderContactSearching, setOrderContactSearching] = useState(false);
+  const [orderLinkedCustomer, setOrderLinkedCustomer] = useState<Customer | null>(null);
+  const orderContactSearchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function openNewOrderModal(prefill?: NewOrderLine[]) {
     setOrderSupplierId('');
     setOrderPurchaseDate(toDateKey(new Date()));
@@ -446,7 +460,52 @@ export default function PurchasePage() {
     setShowNewSupplierForm(false);
     setNewSupplierName('');
     setNewSupplierPhone('');
+    setOrderContactQuery('');
+    setOrderContactResults([]);
+    setOrderLinkedCustomer(null);
     setShowNewOrder(true);
+  }
+
+  // Debounced name search against the same GET /api/customers/search
+  // endpoint POSPage.tsx/EditOrderPage.tsx already use for their own
+  // customer pickers - min-length-2 guard mirrors
+  // customerController.searchCustomers' own (a 1-character query isn't
+  // worth a round trip either way).
+  function searchOrderContacts(query: string) {
+    setOrderContactQuery(query);
+    if (orderContactSearchTimeoutRef.current) clearTimeout(orderContactSearchTimeoutRef.current);
+    if (query.trim().length < 2) {
+      setOrderContactResults([]);
+      setOrderContactSearching(false);
+      return;
+    }
+    setOrderContactSearching(true);
+    orderContactSearchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const result = await fetchCustomerSearch(query, 'name');
+        setOrderContactResults(result || []);
+      } catch {
+        setOrderContactResults([]);
+      } finally {
+        setOrderContactSearching(false);
+      }
+    }, 250);
+  }
+
+  function pickOrderContact(customer: Customer) {
+    setOrderLinkedCustomer(customer);
+    setOrderContactQuery('');
+    setOrderContactResults([]);
+    // A linked contact is who this order is really with - clear any
+    // separately-picked plain Supplier so the two can't silently disagree
+    // about which company name gets sent (submitNewOrder below always
+    // prefers the linked contact when one is set anyway, but keeping the
+    // dropdown in sync avoids a confusing UI where both look "selected").
+    setOrderSupplierId('');
+  }
+
+  function clearOrderContact() {
+    setOrderLinkedCustomer(null);
   }
 
   function updateOrderLine(index: number, patch: Partial<NewOrderLine>) {
@@ -494,7 +553,10 @@ export default function PurchasePage() {
 
   async function submitNewOrder() {
     const supplier = suppliers.find((s) => s.id === orderSupplierId);
-    if (!supplier) {
+    // Unified Khata: a linked Khata contact stands in for a plain Supplier
+    // company - either one satisfies "who is this order with", never both
+    // required. See openNewOrderModal/pickOrderContact's own comments.
+    if (!supplier && !orderLinkedCustomer) {
       toast.error(t('purchase.toast.selectSupplierFirst'));
       return;
     }
@@ -508,8 +570,9 @@ export default function PurchasePage() {
     setSubmittingOrder(true);
     try {
       const result = await createPurchaseOrder({
-        companyName: supplier.name,
-        supplierId: supplier.id,
+        companyName: orderLinkedCustomer ? orderLinkedCustomer.name : supplier!.name,
+        supplierId: orderLinkedCustomer ? null : supplier!.id,
+        customerId: orderLinkedCustomer ? orderLinkedCustomer.id : undefined,
         purchaseDate: orderPurchaseDate,
         note: orderNote.trim() || undefined,
         items: validItems,
@@ -935,6 +998,13 @@ export default function PurchasePage() {
           onClose={() => setShowNewOrder(false)}
           submitting={submittingOrder}
           todayKey={todayKey}
+          contactQuery={orderContactQuery}
+          onContactQueryChange={searchOrderContacts}
+          contactResults={orderContactResults}
+          contactSearching={orderContactSearching}
+          linkedCustomer={orderLinkedCustomer}
+          onPickContact={pickOrderContact}
+          onClearContact={clearOrderContact}
         />
       ) : null}
 
@@ -968,6 +1038,8 @@ function NewPurchaseOrderModal({
   showNewSupplierForm, setShowNewSupplierForm,
   newSupplierName, setNewSupplierName, newSupplierPhone, setNewSupplierPhone,
   onQuickAddSupplier, onSubmit, onClose, submitting, todayKey,
+  contactQuery, onContactQueryChange, contactResults, contactSearching,
+  linkedCustomer, onPickContact, onClearContact,
 }: {
   suppliers: Supplier[];
   ingredients: Ingredient[];
@@ -992,6 +1064,15 @@ function NewPurchaseOrderModal({
   onClose: () => void;
   submitting: boolean;
   todayKey: string;
+  // Unified Khata / Customer-Supplier Netting - "Link to Khata contact"
+  // search box, see PurchasePage's own state comment above.
+  contactQuery: string;
+  onContactQueryChange: (value: string) => void;
+  contactResults: Customer[];
+  contactSearching: boolean;
+  linkedCustomer: Customer | null;
+  onPickContact: (customer: Customer) => void;
+  onClearContact: () => void;
 }) {
   // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
   useBackspaceToClose(onClose);
@@ -1047,6 +1128,55 @@ function NewPurchaseOrderModal({
                 </button>
               </div>
             ) : null}
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">
+              Or link to an existing Khata contact (optional)
+            </label>
+            {linkedCustomer ? (
+              <div className="flex items-center justify-between rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-black text-indigo-900">{linkedCustomer.name}</p>
+                  <p className="truncate text-[11px] font-bold text-indigo-500">{linkedCustomer.phone}</p>
+                </div>
+                <button type="button" onClick={onClearContact} className="shrink-0 rounded-full p-1.5 text-indigo-400 hover:bg-indigo-100 hover:text-indigo-700">
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <input
+                  value={contactQuery}
+                  onChange={(e) => onContactQueryChange(e.target.value)}
+                  placeholder="Search a customer by name..."
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-400"
+                />
+                {contactQuery.trim().length >= 2 ? (
+                  <div className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                    {contactSearching ? (
+                      <p className="px-3 py-2 text-xs font-bold text-slate-400">Searching...</p>
+                    ) : contactResults.length === 0 ? (
+                      <p className="px-3 py-2 text-xs font-bold text-slate-400">No matching customers.</p>
+                    ) : (
+                      contactResults.map((customer) => (
+                        <button
+                          key={customer.id}
+                          type="button"
+                          onClick={() => onPickContact(customer)}
+                          className="block w-full px-3 py-2 text-left text-xs font-bold text-slate-700 hover:bg-indigo-50"
+                        >
+                          {customer.name} <span className="text-slate-400">· {customer.phone}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            )}
+            <p className="mt-1 text-[10px] font-bold text-slate-400">
+              Links this purchase to a Khata contact's account so their sales and purchase dues net into one balance on the Unified Khata page. Leave this empty for a plain supplier who isn't a shop customer.
+            </p>
           </div>
 
           <div>

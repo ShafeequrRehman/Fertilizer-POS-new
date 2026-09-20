@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
+const IngredientPurchase = require("../models/IngredientPurchase");
 const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
@@ -136,7 +137,7 @@ exports.getCustomerLedger = async (req, res) => {
       }
     }
 
-    const [customers, orders] = await Promise.all([
+    const [customers, orders, purchases] = await Promise.all([
       Customer.find(scope).sort({ name: 1 }).lean(),
       // Projected to just the fields this endpoint actually reads below -
       // an unprojected find() here pulls every order's full `items` array
@@ -153,6 +154,19 @@ exports.getCustomerLedger = async (req, res) => {
       )
         .sort({ createdAt: -1 })
         .lean(),
+      // Unified Khata / Customer-Supplier Netting: every RECEIVED purchase
+      // this shop has ever logged against ANY Khata contact, fetched once
+      // here (not N+1 per customer below) - same batching style as
+      // ordersByPhone right below. status:"received" only, same reasoning
+      // as ingredientPurchaseController.getCompanyLedger's own comment - a
+      // still-"pending" order hasn't been billed/paid against yet, so it
+      // shouldn't count toward what the shop owes this contact.
+      IngredientPurchase.find(
+        { ...scope, linkedCustomerId: { $ne: null }, status: "received" },
+        "linkedCustomerId purchaseOrderNumber ingredientName quantity unit totalAmount paidAmount remainingAmount purchaseDate"
+      )
+        .sort({ purchaseDate: -1 })
+        .lean(),
     ]);
 
     const ordersByPhone = new Map();
@@ -161,6 +175,16 @@ exports.getCustomerLedger = async (req, res) => {
       if (!phone || phone === WALKIN_PHONE) continue;
       if (!ordersByPhone.has(phone)) ordersByPhone.set(phone, []);
       ordersByPhone.get(phone).push(order);
+    }
+
+    // Unified Khata: keyed by linkedCustomerId (a real ObjectId ref, unlike
+    // ordersByPhone's phone-string key - a purchase is linked by id, not by
+    // a phone number a supplier-side batch was never asked for).
+    const purchasesByCustomerId = new Map();
+    for (const purchase of purchases) {
+      const key = String(purchase.linkedCustomerId);
+      if (!purchasesByCustomerId.has(key)) purchasesByCustomerId.set(key, []);
+      purchasesByCustomerId.get(key).push(purchase);
     }
 
     const ledger = customers.map((customer) => {
@@ -194,6 +218,35 @@ exports.getCustomerLedger = async (req, res) => {
       const totalBilled = periodBillable.reduce((sum, order) => sum + (order.total || 0), 0);
       const totalPaid = periodBillable.reduce((sum, order) => sum + (order.paidAmount || 0), 0);
 
+      // Unified Khata / Customer-Supplier Netting: exact same "current
+      // balance (all-time) vs period activity" split as totalOrderBalance/
+      // orders above, just for this contact's PURCHASE side instead of
+      // their sales side.
+      const customerPurchases = purchasesByCustomerId.get(String(customer._id)) || [];
+      const totalPurchaseBalance = customerPurchases.reduce((sum, p) => sum + (p.remainingAmount || 0), 0);
+      const periodPurchases = rangeStart
+        ? customerPurchases.filter((p) => {
+            const purchaseDate = new Date(p.purchaseDate);
+            return purchaseDate >= rangeStart && purchaseDate <= rangeEnd;
+          })
+        : customerPurchases;
+
+      const totalDue = totalOrderBalance + previousDues;
+      // The netting itself: `totalDue` (this contact's real, all-time
+      // sales-side balance - unchanged in meaning, still exactly what it
+      // was before this feature) minus `totalPurchaseBalance` (their real,
+      // all-time purchase-side balance). Both sides stay independently
+      // correct and auditable - this is a read-time computed VIEW, never
+      // written back into either Customer.previousDues/duesHistory or any
+      // Order/IngredientPurchase document. Positive = the contact still
+      // owes the shop; negative = the shop owes the contact.
+      //
+      // Worked examples (see the feature spec this implements):
+      //   totalDue=50000, totalPurchaseBalance=40000 -> netBalance=+10000
+      //   totalDue=50000, totalPurchaseBalance=70000 -> netBalance=-20000
+      //   totalDue=30000, totalPurchaseBalance=20000 -> netBalance=+10000
+      const netBalance = totalDue - totalPurchaseBalance;
+
       return {
         id: String(customer._id),
         name: customer.name,
@@ -204,7 +257,9 @@ exports.getCustomerLedger = async (req, res) => {
         totalBilled,
         totalPaid,
         totalOrderBalance,
-        totalDue: totalOrderBalance + previousDues,
+        totalDue,
+        totalPurchaseBalance,
+        netBalance,
         lastOrderAt: periodOrders[0]?.createdAt || null,
         // Manual add/settle entries (with whatever note the cashier typed)
         // - newest first. Merged client-side (DuesPage.tsx's History
@@ -242,6 +297,22 @@ exports.getCustomerLedger = async (req, res) => {
           billTid: order.billTid || "",
           billName: order.billName || "",
           cashRecipientName: order.cashRecipientName || "",
+        })),
+        // Unified Khata: this contact's linked purchases, period-scoped the
+        // same way `orders` above is - DuesPage.tsx merges these into the
+        // same chronological History timeline as orders/duesHistory, tagged
+        // distinctly (a purchase, not a sale) so it's always clear which
+        // side of the net balance each row belongs to.
+        purchases: periodPurchases.map((purchase) => ({
+          id: String(purchase._id),
+          purchaseOrderNumber: purchase.purchaseOrderNumber,
+          ingredientName: purchase.ingredientName,
+          quantity: purchase.quantity,
+          unit: purchase.unit,
+          totalAmount: purchase.totalAmount || 0,
+          paidAmount: purchase.paidAmount || 0,
+          remainingAmount: purchase.remainingAmount || 0,
+          purchaseDate: purchase.purchaseDate,
         })),
       };
     });

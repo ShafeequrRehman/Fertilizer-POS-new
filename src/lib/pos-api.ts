@@ -408,6 +408,10 @@ export interface IngredientPurchaseInput {
   companyName?: string;
   productDetails?: string;
   supplierId?: string | null;
+  // Unified Khata / Customer-Supplier Netting - see PurchaseOrderInput's
+  // own comment in pos-types.ts (same optional/backward-compatible link,
+  // just for the legacy single-batch Log Purchase form).
+  customerId?: string | null;
   purchaseDate?: string;
   note?: string;
 }

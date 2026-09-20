@@ -199,8 +199,18 @@ export default function CustomerDuesPage() {
     return bt - at;
   };
 
-  const customersWithDues = searchedCustomers.filter(c => (c.totalDue || 0) > 0).sort(byRecent);
-  const customersWithoutDues = searchedCustomers.filter(c => !(c.totalDue || 0)).sort(byRecent);
+  // Unified Khata / Customer-Supplier Netting: "pending" now means this
+  // contact's NET balance is non-zero either way - either they still owe
+  // the shop (netBalance > 0, same as the old totalDue > 0 case) OR the
+  // shop now owes THEM (netBalance < 0, only possible once a purchase has
+  // been linked to their Khata account) - both are equally worth surfacing
+  // here rather than buried in "All Other Customers". Falls back to
+  // totalDue for a defensive default (netBalance is always present from a
+  // freshly-loaded ledger, but this avoids a hard crash if `fetchCustomerLedger`
+  // ever came from stale/cached data missing the new field).
+  const netOf = (c: LedgerCustomer) => (typeof c.netBalance === 'number' ? c.netBalance : (c.totalDue || 0));
+  const customersWithDues = searchedCustomers.filter(c => netOf(c) !== 0).sort(byRecent);
+  const customersWithoutDues = searchedCustomers.filter(c => netOf(c) === 0).sort(byRecent);
 
   // Restart both grids at 10 whenever the underlying customer list or search
   // changes (add/update/refresh/search), so "Load More" never leaves a
@@ -218,9 +228,11 @@ export default function CustomerDuesPage() {
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-            Customer Dues <DollarSign className="text-indigo-600" size={32} />
+            Unified Khata <DollarSign className="text-indigo-600" size={32} />
           </h1>
-          <p className="text-slate-500 font-bold">Manage customer outstanding balances and send reminders.</p>
+          <p className="text-slate-500 font-bold">
+            Customer dues, plus any purchases linked to a contact - netted into one balance per person.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -403,11 +415,27 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
   // card just to see the current balance.
   const [showHistory, setShowHistory] = useState(false);
 
-  const isPending = (customer.totalDue || 0) > 0;
   const fromOrders = customer.totalOrderBalance || 0;
   const fromLumpSum = customer.previousDues || 0;
   const totalDue = customer.totalDue || 0;
   const amountValue = Number(amount) || 0;
+
+  // Unified Khata / Customer-Supplier Netting: the single Net Outstanding
+  // Balance this card leads with - `totalDue` (sales side, unchanged) minus
+  // `totalPurchaseBalance` (purchase side, from any IngredientPurchase
+  // linked to this contact) - see customerController.getCustomerLedger's
+  // own comment for the full computation and worked examples. Falls back
+  // to totalDue for the same defensive reason as DuesPage's netOf() above.
+  const netBalance = typeof customer.netBalance === 'number' ? customer.netBalance : totalDue;
+  const isPending = netBalance !== 0;
+  // + / - Add/Pay Dues and Clear below only ever touch the SALES side
+  // (Customer.previousDues + this customer's Orders - see
+  // customerController.updateCustomerDues/settleCustomerDues) - they are
+  // deliberately NOT wired to netBalance, since a single payment action
+  // that also somehow "pays down" a purchase-side due would mean writing
+  // money back into IngredientPurchase.paidAmount from here, which is out
+  // of scope (the owner asked for the BALANCE to net, not a unified
+  // payment action - see this feature's own spec).
 
   // Unified "everything that makes up what this customer owes" trail -
   // merges the manual duesHistory entries (each with whatever note was
@@ -455,6 +483,26 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
           orderId: order.id as string | undefined,
         };
       }),
+    // Unified Khata: this contact's linked purchases (the shop buying FROM
+    // them) - tagged distinctly from the sales-side rows above so it's
+    // always clear which side of the net balance each row belongs to.
+    // Purely informational here - unlike an order row, a purchase has no
+    // Delete action from this page (see IngredientPurchase.js's own
+    // comment on why a received purchase is never deleted).
+    ...(customer.purchases || []).map((purchase) => {
+      const paidStatus = purchase.remainingAmount > 0
+        ? `Rs ${purchase.remainingAmount} still owed to them (paid Rs ${purchase.paidAmount})`
+        : 'Fully paid';
+      return {
+        key: `purchase-${purchase.id}`,
+        date: purchase.purchaseDate,
+        label: `Purchase ${purchase.purchaseOrderNumber} - Rs ${purchase.totalAmount} (${purchase.ingredientName})`,
+        detail: paidStatus,
+        tone: purchase.remainingAmount > 0 ? 'text-blue-600' : 'text-slate-400',
+        by: '',
+        orderId: undefined as string | undefined,
+      };
+    }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   // Delete-order-from-Khata (feature 4): reuses the exact same guarded
@@ -559,17 +607,28 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
 
       <div className="flex justify-between items-end border-y border-slate-100 py-3">
         <div>
-          <p className="text-xs font-black uppercase text-slate-400 tracking-wider">Current Dues</p>
-          <p className={`text-2xl font-black ${isPending ? 'text-amber-600' : 'text-slate-800'}`}>
-            ₨{customer.totalDue || 0}
+          <p className="text-xs font-black uppercase text-slate-400 tracking-wider">Net Outstanding Balance</p>
+          <p className={`text-2xl font-black ${netBalance > 0 ? 'text-green-600' : netBalance < 0 ? 'text-red-600' : 'text-slate-800'}`}>
+            {netBalance > 0 ? `Owes you ₨${netBalance}` : netBalance < 0 ? `You owe them ₨${Math.abs(netBalance)}` : 'Settled'}
           </p>
-          {isPending && fromOrders > 0 ? (
-            <p className="text-[11px] font-bold text-amber-600/80 mt-1">
-              ₨{fromOrders} from unpaid orders{fromLumpSum > 0 ? ` + ₨${fromLumpSum} manual` : ''}
+          {fromOrders > 0 || fromLumpSum > 0 ? (
+            <p className="text-[11px] font-bold text-slate-400 mt-1">
+              ₨{totalDue} from sales{customer.totalPurchaseBalance ? ` - ₨${customer.totalPurchaseBalance} from purchases` : ''}
+            </p>
+          ) : customer.totalPurchaseBalance ? (
+            <p className="text-[11px] font-bold text-slate-400 mt-1">
+              ₨{customer.totalPurchaseBalance} owed to them from purchases
             </p>
           ) : null}
         </div>
-        {isPending && (
+        {totalDue > 0 && (
+          // Gated on totalDue (sales-side), not the new netBalance-based
+          // isPending below - handleSendReminder's message is hardcoded to
+          // "pending dues of totalDue", which would misleadingly read "₨0"
+          // for a contact whose only outstanding balance is purchase-side
+          // (the shop owes THEM, not the other way round). Reminding a
+          // supplier-side due is out of scope for this feature anyway - see
+          // this page's own comment on why Add/Pay Dues stay sales-only.
           <div className="flex flex-col items-end gap-1.5">
             <button
               onClick={onRemind}

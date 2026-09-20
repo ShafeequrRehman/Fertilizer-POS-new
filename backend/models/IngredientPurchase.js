@@ -37,6 +37,24 @@ const ingredientPurchaseSchema = new mongoose.Schema(
     ingredientName: { type: String, required: true },
     unit: { type: String, enum: INGREDIENT_UNITS, required: true },
     supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", default: null },
+    // Unified Khata / Customer-Supplier Netting: an OPTIONAL link to a
+    // Khata Customer contact, completely independent of supplierId/Supplier
+    // above. A real person can be BOTH a customer (buys from the shop,
+    // sometimes on credit) AND a supplier (sells stock to the shop,
+    // sometimes on credit) - e.g. "Rana Tayab" - and Customer/Supplier are
+    // two different collections with different identity (phone-uniqueness
+    // lives on Customer, not Supplier), so this deliberately does NOT reuse
+    // supplierId. Setting this is what lets customerController.getCustomerLedger
+    // net this contact's sales-side dues (Customer.previousDues + their
+    // Orders' remainingAmount) against their purchase-side dues (this
+    // purchase's own remainingAmount) into one balance, computed fresh at
+    // READ time - see that function's own comment. Never mutates
+    // remainingAmount/totalAmount/paidAmount here or on the Order/Customer
+    // side; this field only tells the netting query which rows belong to
+    // the same real person. Stays null for the overwhelming majority of
+    // purchases (a one-off supplier who has never been, and may never be,
+    // a shop customer).
+    linkedCustomerId: { type: mongoose.Schema.Types.ObjectId, ref: "Customer", default: null, index: true },
     // Free-text company/vendor name, deliberately NOT required to be a real
     // Supplier document - there is no Supplier-picker UI in the app yet
     // (models/Supplier.js exists but nothing on the frontend creates or
@@ -109,5 +127,10 @@ ingredientPurchaseSchema.index({ shopId: 1, companyName: 1 });
 // order, many line-item documents sharing a number" is the whole point.
 ingredientPurchaseSchema.index({ shopId: 1, purchaseOrderNumber: 1 });
 ingredientPurchaseSchema.index({ shopId: 1, status: 1, receivedAt: -1 });
+// Unified Khata netting - customerController.getCustomerLedger's one batch
+// lookup of every received purchase linked to any of a shop's customers,
+// kept fast the same way the companyName index above keeps getCompanyLedger
+// fast.
+ingredientPurchaseSchema.index({ shopId: 1, linkedCustomerId: 1, status: 1 });
 
 module.exports = mongoose.model("IngredientPurchase", ingredientPurchaseSchema);
