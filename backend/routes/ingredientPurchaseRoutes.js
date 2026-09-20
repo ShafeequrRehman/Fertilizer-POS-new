@@ -3,7 +3,7 @@ const authenticate = require("../middleware/authenticate");
 const { requireShopMember } = require("../middleware/roleGuards");
 const requireLicenseValid = require("../middleware/requireLicenseValid");
 const requireAnyPermission = require("../middleware/requireAnyPermission");
-const { getPurchases, getPurchase, createPurchase, createPurchaseOrder, receivePurchaseOrder, recordPayment, getCompanyLedger } = require("../controllers/ingredientPurchaseController");
+const { getPurchases, getPurchase, createPurchase, createPurchaseOrder, receivePurchaseOrder, recordPayment, cancelPurchase, getCompanyLedger } = require("../controllers/ingredientPurchaseController");
 
 const router = express.Router();
 
@@ -38,5 +38,10 @@ router.get("/", getPurchases);
 router.post("/", createPurchase);
 router.get("/:id", getPurchase);
 router.patch("/:id/pay", recordPayment);
+// Unified Khata: the audited cancel-a-purchase endpoint - see
+// ingredientPurchaseController.cancelPurchase's own comment. Gated by the
+// same purchases.manage/stock.manage permission as every other mutating
+// route in this router (no separate permission invented).
+router.post("/:id/cancel", cancelPurchase);
 
 module.exports = router;

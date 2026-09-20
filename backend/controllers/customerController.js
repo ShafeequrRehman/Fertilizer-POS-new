@@ -72,7 +72,14 @@ exports.searchCustomers = async (req, res) => {
   const baseQuery = { ...shopScope(req) };
   if (filters.length) baseQuery.$or = filters;
 
-  const customers = await Customer.find(baseQuery).sort({ createdAt: -1 }).limit(20).lean();
+  // Alphabetical by name - matches every other customer listing in this
+  // app (getAllCustomers/getCustomerLedger both already .sort({ name: 1 }))
+  // and is what PurchasePage.tsx's "Link to Existing Khata Contact" search
+  // box needs: the owner explicitly asked for an alphabetical lookup of
+  // credit customers, not "most recently added first" (which is what this
+  // used to sort by - a bug relative to that request, not a deliberate
+  // choice, since nothing else in the app sorts customers this way).
+  const customers = await Customer.find(baseQuery).sort({ name: 1 }).limit(20).lean();
   res.json(customers.map(serializeCustomer));
 };
 
@@ -154,16 +161,22 @@ exports.getCustomerLedger = async (req, res) => {
       )
         .sort({ createdAt: -1 })
         .lean(),
-      // Unified Khata / Customer-Supplier Netting: every RECEIVED purchase
-      // this shop has ever logged against ANY Khata contact, fetched once
-      // here (not N+1 per customer below) - same batching style as
-      // ordersByPhone right below. status:"received" only, same reasoning
-      // as ingredientPurchaseController.getCompanyLedger's own comment - a
-      // still-"pending" order hasn't been billed/paid against yet, so it
-      // shouldn't count toward what the shop owes this contact.
+      // Unified Khata / Customer-Supplier Netting: every RECEIVED *or
+      // CANCELLED* purchase this shop has ever logged against ANY Khata
+      // contact, fetched once here (not N+1 per customer below) - same
+      // batching style as ordersByPhone right below. "pending" is still
+      // left out entirely - a still-"pending" order hasn't been billed/
+      // paid against yet, so it shouldn't count toward (or even appear as
+      // history for) what the shop owes this contact. "cancelled" purchases
+      // ARE fetched (unlike getCompanyLedger, which only wants status:
+      // "received" for its money totals) purely so this contact's History
+      // timeline can show a cancelled purchase as an audited "Cancelled"
+      // row instead of it silently vanishing - see the netBalance/
+      // totalPurchaseBalance computation below, which still only sums
+      // status:"received" lines, exactly as before.
       IngredientPurchase.find(
-        { ...scope, linkedCustomerId: { $ne: null }, status: "received" },
-        "linkedCustomerId purchaseOrderNumber ingredientName quantity unit totalAmount paidAmount remainingAmount purchaseDate"
+        { ...scope, linkedCustomerId: { $ne: null }, status: { $in: ["received", "cancelled"] } },
+        "linkedCustomerId purchaseOrderNumber ingredientName quantity unit totalAmount paidAmount remainingAmount purchaseDate status cancelledAt cancelledBy cancelReason"
       )
         .sort({ purchaseDate: -1 })
         .lean(),
@@ -223,7 +236,12 @@ exports.getCustomerLedger = async (req, res) => {
       // orders above, just for this contact's PURCHASE side instead of
       // their sales side.
       const customerPurchases = purchasesByCustomerId.get(String(customer._id)) || [];
-      const totalPurchaseBalance = customerPurchases.reduce((sum, p) => sum + (p.remainingAmount || 0), 0);
+      // Balance math only ever counts status:"received" lines - a
+      // cancelled purchase never really happened as far as money/stock are
+      // concerned, exactly like a cancelled Order never counts toward
+      // totalOrderBalance above (see `billable` a few lines up).
+      const receivedCustomerPurchases = customerPurchases.filter((p) => p.status === "received");
+      const totalPurchaseBalance = receivedCustomerPurchases.reduce((sum, p) => sum + (p.remainingAmount || 0), 0);
       const periodPurchases = rangeStart
         ? customerPurchases.filter((p) => {
             const purchaseDate = new Date(p.purchaseDate);
@@ -313,6 +331,14 @@ exports.getCustomerLedger = async (req, res) => {
           paidAmount: purchase.paidAmount || 0,
           remainingAmount: purchase.remainingAmount || 0,
           purchaseDate: purchase.purchaseDate,
+          // Audit trail (Unified Khata purchase cancellation): DuesPage.tsx's
+          // History timeline uses these to render a cancelled purchase as a
+          // distinct "Cancelled" row (with who cancelled it and why) instead
+          // of it just disappearing once cancelPurchase flips its status.
+          status: purchase.status,
+          cancelledAt: purchase.cancelledAt || null,
+          cancelledBy: purchase.cancelledBy || "",
+          cancelReason: purchase.cancelReason || "",
         })),
       };
     });

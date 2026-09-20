@@ -483,6 +483,22 @@ export async function receivePurchaseOrder(purchaseOrderNumber: string, items: P
   }
 }
 
+// Unified Khata purchase cancellation - the audited "delete a purchase"
+// from the Khata History timeline (DuesPage.tsx). Mirrors cancelOrder
+// below exactly: same shop Cancel Order Key, same POST-with-key-and-reason
+// shape - see backend/controllers/ingredientPurchaseController.js
+// exports.cancelPurchase, which reverses this batch's stock effect (if it
+// had been received) and flips status to "cancelled" without ever
+// deleting the document.
+export async function cancelIngredientPurchase(id: string, payload: CancelOrderPayload) {
+  try {
+    const response = await api.post<IngredientPurchase & { _id?: string }>(`/ingredient-purchases/${id}/cancel`, payload);
+    return normalizeIngredientPurchase(response.data);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // Settles part (or all) of a batch's outstanding supplier due. Additive -
 // pass how much is being paid now, not the new total.
 export async function payIngredientPurchase(id: string, amount: number) {

@@ -1132,7 +1132,7 @@ function NewPurchaseOrderModal({
 
           <div>
             <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">
-              Or link to an existing Khata contact (optional)
+              Link to Existing Khata Contact (optional)
             </label>
             {linkedCustomer ? (
               <div className="flex items-center justify-between rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2.5">

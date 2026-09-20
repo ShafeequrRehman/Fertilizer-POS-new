@@ -1,10 +1,11 @@
 
 import React, { useState, useEffect } from 'react';
 import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, sendWhatsappDocument, fetchWhatsappStatus, fetchOrder } from '@/lib/pos-api';
-import { LedgerCustomer, SavedOrder } from '@/lib/pos-types';
+import { LedgerCustomer, LedgerPurchase, SavedOrder } from '@/lib/pos-types';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2 } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 import CancelOrderModal from '@/components/CancelOrderModal';
+import CancelPurchaseModal from '@/components/CancelPurchaseModal';
 
 // This page used to source its list from fetchAllCustomers(), which only
 // ever carries the OLD, manually-set lump-sum Customer.previousDues field -
@@ -451,15 +452,19 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
       orderId: undefined as string | undefined,
+      purchaseId: undefined as string | undefined,
     })),
-    // Cancelled orders are already excluded here - once one is deleted
-    // (via the Cancel Order flow below), it drops out of this history the
-    // next time the ledger reloads, same as any order cancelled from
-    // Sales already does.
-    ...customer.orders
-      .filter((order) => order.status !== 'cancelled')
-      .map((order) => {
-        const paidStatus = order.remainingAmount > 0 ? `Rs ${order.remainingAmount} still due (paid Rs ${order.paidAmount})` : 'Fully paid';
+    // Audit trail: a cancelled order is NOT excluded from this History
+    // list anymore - it still counts toward totalOrderBalance/totalDue as
+    // zero (see getCustomerLedger's own `billable` filter, unrelated to
+    // this display list), but it must stay visible here, explicitly
+    // labelled "Cancelled" and naming this customer, so deleting an order
+    // never looks like it just vanished without a trace.
+    ...customer.orders.map((order) => {
+        const isCancelled = order.status === 'cancelled';
+        const paidStatus = isCancelled
+          ? `Cancelled order for ${customer.name}`
+          : order.remainingAmount > 0 ? `Rs ${order.remainingAmount} still due (paid Rs ${order.paidAmount})` : 'Fully paid';
         // Electricity Bill / Cash special-product details - only ever set
         // on an order whose cart had the matching special item in it (see
         // POSPage.tsx's hasElectricityBillItem/hasCashItem). Appended onto
@@ -473,14 +478,16 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
         return {
           key: `order-${order.id}`,
           date: order.createdAt,
-          label: `Order #${order.dailyOrderNumber ?? order.id.slice(-4)} - Rs ${order.total}`,
+          label: `${isCancelled ? 'Cancelled Order' : 'Order'} #${order.dailyOrderNumber ?? order.id.slice(-4)} - Rs ${order.total}`,
           detail: specialDetails ? `${paidStatus} · ${specialDetails}` : paidStatus,
-          tone: order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
+          tone: isCancelled ? 'text-slate-400 line-through' : order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
           by: '',
           // Only order-based rows carry an id - lets the History row
-          // below know which entries can offer a Delete action (an order)
-          // vs. which can't (a manual dues add/settle entry).
-          orderId: order.id as string | undefined,
+          // below know which entries can offer a Delete action (an order
+          // that isn't already cancelled) vs. which can't (a manual dues
+          // add/settle entry, or an already-cancelled order).
+          orderId: !isCancelled ? (order.id as string | undefined) : undefined,
+          purchaseId: undefined as string | undefined,
         };
       }),
     // Unified Khata: this contact's linked purchases (the shop buying FROM
@@ -490,17 +497,25 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
     // Delete action from this page (see IngredientPurchase.js's own
     // comment on why a received purchase is never deleted).
     ...(customer.purchases || []).map((purchase) => {
-      const paidStatus = purchase.remainingAmount > 0
-        ? `Rs ${purchase.remainingAmount} still owed to them (paid Rs ${purchase.paidAmount})`
-        : 'Fully paid';
+      const isCancelled = purchase.status === 'cancelled';
+      const paidStatus = isCancelled
+        ? `Cancelled purchase from ${customer.name}${purchase.cancelReason ? ` - ${purchase.cancelReason}` : ''}`
+        : purchase.remainingAmount > 0
+          ? `Rs ${purchase.remainingAmount} still owed to them (paid Rs ${purchase.paidAmount})`
+          : 'Fully paid';
       return {
         key: `purchase-${purchase.id}`,
         date: purchase.purchaseDate,
-        label: `Purchase ${purchase.purchaseOrderNumber} - Rs ${purchase.totalAmount} (${purchase.ingredientName})`,
+        label: `${isCancelled ? 'Cancelled Purchase' : 'Purchase'} ${purchase.purchaseOrderNumber} - Rs ${purchase.totalAmount} (${purchase.ingredientName})`,
         detail: paidStatus,
-        tone: purchase.remainingAmount > 0 ? 'text-blue-600' : 'text-slate-400',
-        by: '',
+        tone: isCancelled ? 'text-slate-400 line-through' : purchase.remainingAmount > 0 ? 'text-blue-600' : 'text-slate-400',
+        by: isCancelled ? purchase.cancelledBy : '',
         orderId: undefined as string | undefined,
+        // Only a still-"received" (not yet cancelled) purchase carries a
+        // purchaseId - lets the History row below know which entries can
+        // offer the Cancel-Purchase action (see the orderId/purchaseId
+        // convention this same object already uses for orders above).
+        purchaseId: !isCancelled ? (purchase.id as string | undefined) : undefined,
       };
     }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -526,6 +541,23 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
     } finally {
       setLoadingOrderId(null);
     }
+  }
+
+  // Delete-a-purchase-from-Khata: the same guarded flow as
+  // handleDeleteOrderClick above, just for a linked IngredientPurchase
+  // instead of an Order - see CancelPurchaseModal.tsx. Unlike an order,
+  // the ledger already carries every field the modal needs (id,
+  // purchaseOrderNumber, quantity/unit/ingredientName for its confirmation
+  // copy) - no extra fetch required before opening it.
+  const [purchasePendingCancel, setPurchasePendingCancel] = useState<LedgerPurchase | null>(null);
+
+  function handleDeletePurchaseClick(purchaseId: string) {
+    const purchase = (customer.purchases || []).find((p) => p.id === purchaseId);
+    if (!purchase) {
+      toast.error('Could not find this purchase.');
+      return;
+    }
+    setPurchasePendingCancel(purchase);
   }
 
   // Shared by both the Download and Send buttons below - one
@@ -754,6 +786,17 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
                         {loadingOrderId === entry.orderId ? 'Loading...' : 'Delete'}
                       </button>
                     ) : null}
+                    {entry.purchaseId ? (
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePurchaseClick(entry.purchaseId as string)}
+                        className="mt-1 flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
+                        title="Cancel this purchase (requires the shop's Cancel Order Key) and reverse its stock"
+                      >
+                        <Trash2 size={11} />
+                        Delete
+                      </button>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -771,6 +814,19 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
             // Refresh the whole ledger (parent's loadCustomers) so this
             // card's balance, order list and History all reflect the
             // stock-reversed, now-cancelled order immediately.
+            onOrderCancelled();
+          }}
+        />
+      ) : null}
+      {purchasePendingCancel ? (
+        <CancelPurchaseModal
+          purchase={purchasePendingCancel}
+          onClose={() => setPurchasePendingCancel(null)}
+          onCancelled={() => {
+            setPurchasePendingCancel(null);
+            // Same reload as a cancelled order above - the ledger's
+            // totalPurchaseBalance/netBalance and this card's History both
+            // need the freshly-cancelled purchase's status reflected.
             onOrderCancelled();
           }}
         />

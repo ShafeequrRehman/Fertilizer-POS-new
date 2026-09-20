@@ -111,6 +111,16 @@ export interface LedgerPurchase {
   paidAmount: number;
   remainingAmount: number;
   purchaseDate: string;
+  // Unified Khata purchase cancellation (audited "delete") - "received" is
+  // the normal case; "cancelled" is what a purchase becomes after
+  // cancelIngredientPurchase, never removed from this list so the History
+  // timeline can still show it (see DuesPage.tsx) with who cancelled it and
+  // why, same audit-trail spirit as a cancelled Order's own cancelledBy/
+  // cancelReason.
+  status: 'received' | 'cancelled';
+  cancelledAt: string | null;
+  cancelledBy: string;
+  cancelReason: string;
 }
 
 export interface LedgerCustomer {

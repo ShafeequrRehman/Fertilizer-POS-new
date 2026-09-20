@@ -1,10 +1,13 @@
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const Ingredient = require("../models/Ingredient");
 const Shop = require("../models/Shop");
 const Customer = require("../models/Customer");
+const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
+const { reverseIngredientReceipt } = require("../services/stockService");
 
 // Unified Khata: resolves an optional `customerId` from a purchase request
 // body into that Customer's own document (just id/name - all that's needed
@@ -472,6 +475,76 @@ exports.recordPayment = async (req, res) => {
 // accounting practice doesn't delete a received bill either - a mistake
 // gets corrected going forward (a new batch, or a manual stock adjustment
 // via ingredientController.updateIngredient), not erased from history.
+//
+// POST /api/ingredient-purchases/:id/cancel  body: { key, reason? }
+// Unified Khata: the audited alternative to ever actually deleting a
+// received purchase (see this file's own comment right above, and
+// IngredientPurchase.js's header comment) - mirrors
+// orderController.cancelOrderCore as closely as this model's own shape
+// allows: same bcrypt.compare check against the shop's OWN
+// cancelOrderKeyHash (there is deliberately no separate purchase-side key -
+// the owner manages exactly one Cancel Order Key for both sales and
+// purchases), same "already cancelled" guard, same cancelledAt/cancelledBy/
+// cancelReason fields, same non-fatal stock-reversal-never-blocks-the-
+// cancellation reasoning.
+//
+// Stock reversal: a RECEIVED purchase added `quantity` of this ingredient
+// to Ingredient.currentStock at receive time (applyPurchaseToIngredientStock
+// above) - cancelling it means that stock never really arrived, so
+// stockService.reverseIngredientReceipt takes it back off the shelf (floored
+// at 0, averageCost deliberately left alone - see that function's own
+// comment on why). A "pending" purchase (never received, so never folded
+// into stock at all) is simply flipped to cancelled with no stock effect -
+// there's nothing to reverse.
+exports.cancelPurchase = async (req, res) => {
+  try {
+    const purchase = await IngredientPurchase.findOne({ _id: req.params.id, ...shopScope(req) });
+    if (!purchase) {
+      return res.status(404).json({ error: "Purchase not found" });
+    }
+    if (purchase.status === "cancelled") {
+      return res.status(400).json({ error: "This purchase is already cancelled.", reason: "already_cancelled" });
+    }
+
+    const { key, reason } = req.body || {};
+    if (!key) {
+      return res.status(400).json({ error: "The shop's Cancel Order Key is required." });
+    }
+
+    const shop = await Shop.findById(req.user.shopId).select("cancelOrderKeyHash").lean();
+    if (!shop || !shop.cancelOrderKeyHash) {
+      return res.status(409).json({ error: "No Cancel Order Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one." });
+    }
+
+    const matches = await bcrypt.compare(String(key), shop.cancelOrderKeyHash);
+    if (!matches) {
+      return res.status(401).json({ error: "Incorrect Cancel Order Key.", reason: "wrong_key" });
+    }
+
+    const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
+
+    const wasReceived = purchase.status === "received";
+    const { ingredientId, quantity, shopId } = purchase;
+
+    purchase.status = "cancelled";
+    purchase.cancelledAt = new Date();
+    purchase.cancelledBy = user?.name || user?.username || "";
+    purchase.cancelReason = reason || "No reason provided";
+    await purchase.save();
+
+    // Only a purchase that was actually RECEIVED (i.e. really folded into
+    // stock) has anything to reverse - a still-"pending" order never
+    // touched Ingredient.currentStock in the first place (see
+    // createPurchaseOrder's own comment).
+    if (wasReceived) {
+      await reverseIngredientReceipt(ingredientId, quantity, shopId);
+    }
+
+    res.json(purchase);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
 
 // GET /api/ingredient-purchases/company-ledger?startDate=&endDate=
 // Task 4 (Ledger Integration): "track outstanding supplier balances

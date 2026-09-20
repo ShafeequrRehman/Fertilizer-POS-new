@@ -99,7 +99,7 @@ const ingredientPurchaseSchema = new mongoose.Schema(
     // backfillIngredientPurchaseStatus() retroactively marks all of them
     // "received" (with receivedAt = their original purchaseDate) on first
     // boot after this change - never left as an unset/undefined status.
-    status: { type: String, enum: ["pending", "received"], default: "pending", index: true },
+    status: { type: String, enum: ["pending", "received", "cancelled"], default: "pending", index: true },
     // Set the moment status flips to "received" - this, not purchaseDate
     // (which only ever means "when the order was placed"), is what
     // reportController.js's Day-End/Inventory reports scope their date
@@ -108,6 +108,23 @@ const ingredientPurchaseSchema = new mongoose.Schema(
     receivedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     note: { type: String, default: "" },
     recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // Audited cancellation (mirrors Order.js's own cancelledAt/cancelledBy/
+    // cancelReason fields exactly, same names, same shape) - the ONLY way a
+    // purchase that turns out to be wrong is ever "removed": this document
+    // is still never hard-deleted (see this file's own header comment and
+    // ingredientPurchaseController's comment on why deletePurchase doesn't
+    // exist), it just moves to status:"cancelled" instead, same as an Order
+    // never disappears on cancellation either. A cancelled purchase must be
+    // excluded from every place that sums status:"received" purchases
+    // (getCompanyLedger, customerController.getCustomerLedger's
+    // totalPurchaseBalance/purchases, Day-End/Inventory reports' kitchen-
+    // stock totals) - every one of those already filters explicitly on
+    // status:"received" (the Dual-Status design this file already
+    // documents), so a cancelled purchase is already naturally excluded
+    // with zero extra filtering work anywhere else.
+    cancelledAt: { type: Date, default: null },
+    cancelledBy: { type: String, default: "" },
+    cancelReason: { type: String, default: "" },
   },
   { timestamps: true }
 );

@@ -445,4 +445,47 @@ async function restoreStockForItems(items, shopId) {
   }
 }
 
-module.exports = { deductStockForItems, restoreStockForOrder, restoreStockForItems };
+// Reverses the stock a single ingredient-purchase RECEIPT added to
+// Ingredient.currentStock (see ingredientPurchaseController.
+// applyPurchaseToIngredientStock, which is what added it at receive time) -
+// used when a Stock Manager cancels an already-received purchase
+// (ingredientPurchaseController.cancelPurchase) so the shelf reflects that
+// this batch never really came in. Same Safe Math Subtraction (toMilliUnits/
+// fromMilliUnits) as deductStockForItems, and same floored-at-0 physical-
+// reality rule a sale's own deduction already uses - the books briefly
+// disagreeing with reality (if some of this batch was already sold/used
+// again since) is fine; going negative on physical stock is not.
+//
+// Deliberately does NOT try to un-weight Ingredient.averageCost back to
+// whatever it was before this batch was folded in - reversing a weighted
+// average precisely would mean knowing every purchase/sale that has
+// happened to this ingredient since, which this function has no way to
+// see, and getting it wrong would be worse than leaving it alone. Any
+// imprecision this leaves behind only affects the cost basis of FUTURE
+// purchases' own weighted average - it can never change any past order's
+// already-frozen costPrice/grossProfit snapshot (those were computed and
+// saved at the time, never recomputed later). A safe, bounded imprecision,
+// not a correctness bug - same "never blocks, never throws, physical
+// reality wins" philosophy the rest of this file already documents for its
+// own deduction/restore functions.
+//
+// Never throws - same non-fatal reasoning as restoreStockForOrder: a stock
+// hiccup must never block a cancellation the Cancel Order Key already
+// authorized.
+async function reverseIngredientReceipt(ingredientId, quantity, shopId) {
+  try {
+    const qty = Number(quantity) || 0;
+    if (qty <= 0) return;
+    const ingredient = await Ingredient.findOne({ _id: ingredientId, shopId });
+    if (!ingredient) return;
+    const beforeMilli = toMilliUnits(ingredient.currentStock);
+    const removeMilli = toMilliUnits(qty);
+    const newStockMilli = Math.max(beforeMilli - removeMilli, 0);
+    ingredient.currentStock = fromMilliUnits(newStockMilli);
+    await ingredient.save();
+  } catch (error) {
+    console.error("Non-fatal: stock reversal failed while cancelling a purchase", ingredientId, error);
+  }
+}
+
+module.exports = { deductStockForItems, restoreStockForOrder, restoreStockForItems, reverseIngredientReceipt };
