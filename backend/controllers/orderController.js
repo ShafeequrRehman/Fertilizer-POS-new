@@ -8,7 +8,7 @@ const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { notifyRiderForDelivery, notifyAssignedRider } = require("../services/riderNotificationService");
 const { notifyCustomerConfirmed, notifyCustomerCompleted } = require("../services/customerNotificationService");
-const { deductStockForItems, restoreStockForOrder } = require("../services/stockService");
+const { deductStockForItems, restoreStockForOrder, restoreStockForItems } = require("../services/stockService");
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -118,6 +118,44 @@ function computeKitchenIncreaseDelta(oldItems, newItems) {
   return delta;
 }
 
+// The stock-refund counterpart to computeKitchenIncreaseDelta above: what
+// an order edit (addItems/replaceItems) reduced, per name+variation - a
+// line's quantity going down, or a line disappearing from the new item
+// list entirely (its new quantity is implicitly 0, same as
+// sumQuantitiesByKey/newQuantities.get returning undefined -> 0 for it).
+// Kept as its own small function, mirroring computeKitchenIncreaseDelta's
+// own shape/meta-lookup exactly, rather than folding both directions into
+// one function - the two are used for genuinely different purposes
+// (kitchen ticket vs stock ledger) at different points in applyOrderPatch,
+// and keeping them separate keeps each one's job obvious at a glance. Note
+// the meta lookup here has to fall back to the item's OWN name/variation
+// when a key exists only in oldItems (e.g. a line removed entirely, so it
+// never appears in newItems' meta map) - handled by also indexing oldItems
+// into the same meta map before reading back out of it.
+function computeQuantityDecreaseDelta(oldItems, newItems) {
+  const oldQuantities = sumQuantitiesByKey(oldItems);
+  const newQuantities = sumQuantitiesByKey(newItems);
+  const meta = new Map();
+  (oldItems || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    if (!meta.has(key)) meta.set(key, { name: item.name, price: item.price, variation: item.variation || "" });
+  });
+  (newItems || []).forEach((item) => {
+    const key = kitchenItemKey(item);
+    if (!meta.has(key)) meta.set(key, { name: item.name, price: item.price, variation: item.variation || "" });
+  });
+
+  const delta = [];
+  oldQuantities.forEach((oldQty, key) => {
+    const newQty = newQuantities.get(key) || 0;
+    const diff = oldQty - newQty;
+    if (diff > 0) {
+      delta.push({ ...meta.get(key), quantity: diff });
+    }
+  });
+  return delta;
+}
+
 // Folds a new delta into whatever's already queued and unprinted, summing
 // quantities per item - so a customer bumping the same item's quantity
 // twice before a till gets around to printing it doesn't lose the first
@@ -137,6 +175,57 @@ function mergeKitchenDelta(existingItems, delta) {
     }
   });
   return Array.from(map.values());
+}
+
+// Order-edit stock sync (see stockService.js's resolveIngredientQuantities/
+// restoreStockForItems for the full reasoning): keeps order.stockDeductions
+// an accurate LIVE snapshot of what THIS order currently has actually
+// deducted from ingredient stock, so that a later full cancellation
+// (cancelOrderCore -> restoreStockForOrder, which blindly adds every
+// stockDeductions entry back) always restores exactly the right remaining
+// amount - never double-restoring quantity an earlier edit already handed
+// back, and never under-restoring quantity an earlier edit added.
+// mergeKitchenDelta above solves the identical "fold new entries into an
+// existing list, summing by key" problem for the kitchen ticket - these
+// two mirror that, just keyed by ingredientId (string) and floored
+// differently for the add/subtract directions.
+function mergeStockDeductionsAdd(existingDeductions, additions) {
+  const map = new Map();
+  (existingDeductions || []).forEach((entry) => {
+    map.set(String(entry.ingredientId), { ingredientId: entry.ingredientId, quantity: Number(entry.quantity) || 0 });
+  });
+  (additions || []).forEach((entry) => {
+    const key = String(entry.ingredientId);
+    const existing = map.get(key);
+    if (existing) {
+      existing.quantity += entry.quantity;
+    } else {
+      map.set(key, { ingredientId: entry.ingredientId, quantity: entry.quantity });
+    }
+  });
+  return Array.from(map.values());
+}
+
+// Subtracts each restored quantity from the matching stockDeductions entry,
+// floored at 0 - an edit can never claim to have "un-deducted" more than
+// this order originally took, even if a rounding/unit-drift quirk in the
+// resolver produced a slightly different number on the way back out.
+// Entries that land at (or start at) 0 are dropped entirely, not kept as
+// zero-quantity rows, so a later cancel/restore pass never iterates a
+// no-op entry.
+function mergeStockDeductionsSubtract(existingDeductions, restorations) {
+  const map = new Map();
+  (existingDeductions || []).forEach((entry) => {
+    map.set(String(entry.ingredientId), { ingredientId: entry.ingredientId, quantity: Number(entry.quantity) || 0 });
+  });
+  (restorations || []).forEach((entry) => {
+    const key = String(entry.ingredientId);
+    const existing = map.get(key);
+    if (existing) {
+      existing.quantity = Math.max(existing.quantity - entry.quantity, 0);
+    }
+  });
+  return Array.from(map.values()).filter((entry) => entry.quantity > 0);
 }
 
 // Previously orders were scoped by `userId` (the logged-in account), which
@@ -1160,6 +1249,20 @@ async function applyOrderPatch(order, patch, req, options) {
       }
       order.items = [...order.items, ...patch.items];
       itemsOrDiscountChanged = true;
+
+      // Stock sync (Full/Partial Order Editing requirement): addItems only
+      // ever ADDS quantity (new lines appended - see the comment above), so
+      // this is purely a deduction, same as the very first deduction a new
+      // order gets at creation time (createOrder's own deductStockForItems
+      // call) - just for this delta instead of the whole order. Merged into
+      // order.stockDeductions/costPrice (not overwritten) so a later full
+      // cancellation still restores everything this order has ever really
+      // taken off the shelf, across every edit, not just its original items.
+      if (delta.length > 0) {
+        const stockResult = await deductStockForItems(delta, order.shopId);
+        order.stockDeductions = mergeStockDeductionsAdd(order.stockDeductions, stockResult.deductions);
+        order.costPrice = Math.max(Number(order.costPrice || 0) + stockResult.costPrice, 0);
+      }
     }
 
     if (patch.action === "replaceItems" && Array.isArray(patch.items)) {
@@ -1167,6 +1270,35 @@ async function applyOrderPatch(order, patch, req, options) {
       if (delta.length > 0 && !suppressKitchenUpdate) {
         order.pendingKitchenUpdate = { items: mergeKitchenDelta(order.pendingKitchenUpdate?.items, delta), queuedAt: new Date() };
       }
+
+      // Stock sync (Full/Partial Order Editing requirement): unlike
+      // addItems, replaceItems hands in a whole NEW item list that can
+      // both raise some lines' quantities and lower/remove others in the
+      // same request (e.g. Edit Order's quantity stepper, or removing one
+      // cart line) - so both directions have to be resolved against the
+      // OLD item list (order.items, still the pre-edit value here) before
+      // it's overwritten below. `delta` above is already exactly the
+      // increase half (reused, not recomputed, so the kitchen ticket and
+      // the stock ledger can never disagree about what went up); the
+      // decrease half mirrors it via computeQuantityDecreaseDelta.
+      const decreaseDelta = computeQuantityDecreaseDelta(order.items, patch.items);
+      if (decreaseDelta.length > 0) {
+        // Give ingredients back FIRST, then take the increases off - order
+        // doesn't actually matter for correctness (they touch the same
+        // Ingredient docs additively/subtractively either way), but doing
+        // the refund first means a shopper who swaps one large-quantity
+        // item for another sees the freed-up stock accounted for before
+        // the new deduction's own shortage check runs.
+        const restoreResult = await restoreStockForItems(decreaseDelta, order.shopId);
+        order.stockDeductions = mergeStockDeductionsSubtract(order.stockDeductions, restoreResult.restorations);
+        order.costPrice = Math.max(Number(order.costPrice || 0) - restoreResult.creditValue, 0);
+      }
+      if (delta.length > 0) {
+        const stockResult = await deductStockForItems(delta, order.shopId);
+        order.stockDeductions = mergeStockDeductionsAdd(order.stockDeductions, stockResult.deductions);
+        order.costPrice = Math.max(Number(order.costPrice || 0) + stockResult.costPrice, 0);
+      }
+
       order.items = patch.items;
       itemsOrDiscountChanged = true;
     }
@@ -1183,6 +1315,17 @@ async function applyOrderPatch(order, patch, req, options) {
       order.total = totals.total;
       order.discount = buildDiscountRecord(order.discount, totals.discountAmount);
       order.remainingAmount = Math.max(order.total - (order.paidAmount || 0), 0);
+    }
+
+    // Recompute grossProfit whenever an item edit may have moved costPrice
+    // (addItems/replaceItems above) - deliberately placed AFTER the
+    // itemsOrDiscountChanged block so order.total already reflects the
+    // NEW item list/discount, not the pre-edit total. Mirrors exactly how
+    // createOrder/importOfflineOrders compute grossProfit at creation time
+    // (`total - costPrice`, stored rather than derived on read - see
+    // Order.js's own comment on costPrice/grossProfit).
+    if (patch.action === "addItems" || patch.action === "replaceItems") {
+      order.grossProfit = Math.round(((order.total || 0) - (order.costPrice || 0)) * 100) / 100;
     }
 
     // A customer can have more than one order open at once now (see
@@ -1705,6 +1848,16 @@ exports.assignRider = async (req, res) => {
 // pendingKitchenUpdate, since the kitchen genuinely does need to know
 // about more food to cook. Rejecting just marks it declined; the order's
 // items are left untouched either way if rejected.
+//
+// NOT COVERED: unlike applyOrderPatch's addItems/replaceItems, this path
+// does NOT run the stockService deduct/restore sync for its own item-list
+// surgery below - a customer-qr change request is a narrower, less-used
+// flow, and doing this correctly deserves its own careful pass rather than
+// a rushed copy-paste here. A future change here should mirror
+// applyOrderPatch's replaceItems handling (computeKitchenIncreaseDelta +
+// computeQuantityDecreaseDelta against the pre-change order.items, then
+// deductStockForItems/restoreStockForItems merged into
+// stockDeductions/costPrice) before it touches ingredient stock.
 exports.respondToChangeRequest = async (req, res) => {
   try {
     const { action, reason } = req.body || {};
