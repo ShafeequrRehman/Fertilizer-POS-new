@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -558,6 +558,19 @@ export async function deleteExpense(id: string) {
 export async function fetchDayEndReport(startDate: string, endDate: string) {
   try {
     const response = await api.get<DayEndReport>('/reports/day-end', { params: { startDate, endDate } });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Shop Ledger (feature 6): the unified transaction list backing
+// AccountingPage.tsx's General Ledger table - cash sales, credit sales,
+// due payments, purchases and expenses, all in one flat, date-sorted
+// array. See reportController.getLedgerTransactions for the row shape.
+export async function fetchLedgerTransactions(startDate: string, endDate: string) {
+  try {
+    const response = await api.get<LedgerTransactionsResponse>('/reports/ledger-transactions', { params: { startDate, endDate } });
     return response.data;
   } catch (error) {
     handleApiError(error);

@@ -423,6 +423,37 @@ export interface DayEndReport {
   kitchenStockDetails: KitchenStockDetail[];
 }
 
+// Shop Ledger (feature 6) - one row per real money-in/money-out event in
+// the requested range, backing AccountingPage.tsx's General Ledger table.
+// See reportController.getLedgerTransactions for how each type is sourced.
+export type LedgerTransactionType = 'sale' | 'purchase' | 'expense' | 'due_payment';
+
+export interface LedgerTransaction {
+  type: LedgerTransactionType;
+  // Only meaningful for type 'sale' - true when the order still carries a
+  // due (remainingAmount > 0) at query time, i.e. it's a credit sale, not
+  // a plain cash sale.
+  isCredit: boolean;
+  date: string;
+  amount: number;
+  direction: 'in' | 'out';
+  label: string;
+  detail: string;
+  refId: string;
+  paidAmount?: number;
+  remainingAmount?: number;
+  paymentMethod?: string;
+}
+
+export interface LedgerTransactionsResponse {
+  startDate: string;
+  endDate: string;
+  rows: LedgerTransaction[];
+  totalIn: number;
+  totalOut: number;
+  net: number;
+}
+
 // Role-Based Security: what "reports.view.own_sales" actually returns (see
 // reportController.getMySalesReport) - one calendar day, only the orders
 // THIS logged-in account created. Deliberately no cost/profit fields at

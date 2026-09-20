@@ -397,12 +397,14 @@ export default function EditOrderPage() {
   // A pending order stays editable indefinitely, any number of times - see
   // this file's orderNumberLabel comment and DashboardShell.tsx's
   // NotificationBellButton, which now always jumps here regardless of how
-  // long ago the order was saved. Once it's actually completed (or
-  // cancelled/paid), editing locks for real, here, no matter which
-  // shortcut got someone to this URL - same rule the Sales page's own Edit
-  // button already followed (selectedOrder.status === 'pending'), just now
-  // enforced on the live order itself instead of only hiding a button.
-  if (order.status !== 'pending') {
+  // long ago the order was saved. A COMPLETED order is also still
+  // editable (feature request: "completed orders stay editable in
+  // Sales") - the backend's applyOrderPatch has never restricted edits
+  // by status, so this was purely a frontend lock; only a cancelled
+  // order actually locks for real, here, no matter which shortcut got
+  // someone to this URL - same rule the Sales page's own Edit button
+  // follows (selectedOrder.status !== 'cancelled').
+  if (order.status === 'cancelled') {
     return (
       <div className="space-y-4">
         <Link to="/dashboard/sales" className="text-sm font-bold text-gray-500">

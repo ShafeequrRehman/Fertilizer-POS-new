@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect } from 'react';
-import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, sendWhatsappDocument, fetchWhatsappStatus } from '@/lib/pos-api';
-import { LedgerCustomer } from '@/lib/pos-types';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText } from 'lucide-react';
+import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, sendWhatsappDocument, fetchWhatsappStatus, fetchOrder } from '@/lib/pos-api';
+import { LedgerCustomer, SavedOrder } from '@/lib/pos-types';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2 } from 'lucide-react';
 import { useToast } from '@/lib/toast';
+import CancelOrderModal from '@/components/CancelOrderModal';
 
 // This page used to source its list from fetchAllCustomers(), which only
 // ever carries the OLD, manually-set lump-sum Customer.previousDues field -
@@ -325,6 +326,7 @@ export default function CustomerDuesPage() {
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
+                  onOrderCancelled={loadCustomers}
                   whatsappConnected={whatsappConnected}
                 />
               ))}
@@ -359,6 +361,7 @@ export default function CustomerDuesPage() {
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
+                  onOrderCancelled={loadCustomers}
                   whatsappConnected={whatsappConnected}
                 />
               ))}
@@ -381,7 +384,7 @@ export default function CustomerDuesPage() {
   );
 }
 
-function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsappConnected }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void, whatsappConnected: boolean }) {
+function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
@@ -419,7 +422,12 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsa
       detail: entry.note || 'No note',
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
+      orderId: undefined as string | undefined,
     })),
+    // Cancelled orders are already excluded here - once one is deleted
+    // (via the Cancel Order flow below), it drops out of this history the
+    // next time the ledger reloads, same as any order cancelled from
+    // Sales already does.
     ...customer.orders
       .filter((order) => order.status !== 'cancelled')
       .map((order) => {
@@ -441,9 +449,36 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsa
           detail: specialDetails ? `${paidStatus} · ${specialDetails}` : paidStatus,
           tone: order.remainingAmount > 0 ? 'text-amber-600' : 'text-slate-400',
           by: '',
+          // Only order-based rows carry an id - lets the History row
+          // below know which entries can offer a Delete action (an order)
+          // vs. which can't (a manual dues add/settle entry).
+          orderId: order.id as string | undefined,
         };
       }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  // Delete-order-from-Khata (feature 4): reuses the exact same guarded
+  // Cancel Order flow (shop's Cancel Order Key + POST /api/orders/:id/
+  // cancel, which restores stock via restoreStockForOrder) already used
+  // everywhere else in the app - no separate unguarded delete path. The
+  // ledger's own order rows are lean (LedgerOrder - no items array), so
+  // the full order is fetched fresh right before opening the modal, since
+  // CancelOrderModal needs the real items to print the kitchen "order
+  // cancelled" ticket.
+  const [orderPendingCancel, setOrderPendingCancel] = useState<SavedOrder | null>(null);
+  const [loadingOrderId, setLoadingOrderId] = useState<string | null>(null);
+
+  async function handleDeleteOrderClick(orderId: string) {
+    setLoadingOrderId(orderId);
+    try {
+      const fullOrder = await fetchOrder(orderId);
+      setOrderPendingCancel(fullOrder);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not load this order.');
+    } finally {
+      setLoadingOrderId(null);
+    }
+  }
 
   // Shared by both the Download and Send buttons below - one
   // <ReportPdfDocument> (same building block Ledger/Record's own PDF
@@ -648,6 +683,18 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsa
                     </div>
                     <p className="mt-0.5 text-slate-500 font-semibold">{entry.detail}</p>
                     {entry.by ? <p className="mt-0.5 text-slate-400">by {entry.by}</p> : null}
+                    {entry.orderId ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteOrderClick(entry.orderId as string)}
+                        disabled={loadingOrderId === entry.orderId}
+                        className="mt-1 flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
+                        title="Cancel this order (requires the shop's Cancel Order Key) and restore its stock"
+                      >
+                        <Trash2 size={11} />
+                        {loadingOrderId === entry.orderId ? 'Loading...' : 'Delete'}
+                      </button>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -655,6 +702,20 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, whatsa
           </div>
         ) : null}
       </div>
+
+      {orderPendingCancel ? (
+        <CancelOrderModal
+          order={orderPendingCancel}
+          onClose={() => setOrderPendingCancel(null)}
+          onCancelled={() => {
+            setOrderPendingCancel(null);
+            // Refresh the whole ledger (parent's loadCustomers) so this
+            // card's balance, order list and History all reflect the
+            // stock-reversed, now-cancelled order immediately.
+            onOrderCancelled();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

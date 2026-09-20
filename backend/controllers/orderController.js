@@ -563,36 +563,60 @@ exports.createOrder = async (req, res) => {
         shopId: req.user.shopId,
       };
 
-      // Best-effort contact-info sync - never allowed to fail the order
-      // itself, which is already safely saved above by this point. Two
-      // orders for a phone number that has never placed an order before,
-      // submitted within the same instant, can both pass Mongoose's
-      // upsert "not found" check and then race on the actual insert -
+      // Khata (Customer Dues ledger) should only ever exist for a
+      // customer who actually has/had credit with the shop - a cash
+      // customer who pays in full shouldn't get a khata profile just
+      // because they gave a phone number. `order.remainingAmount` (set
+      // just above from Order.create) is the source of truth for "does
+      // this order leave a due" - > 0 means a real credit component.
+      //
+      // So: a customer who ALREADY exists (from a past credit purchase,
+      // or a previous order that left a due) still gets their contact
+      // info refreshed on every order, cash or credit alike, since they
+      // already have a khata and their name/address may have changed. A
+      // customer who does NOT exist yet only gets a brand-new Customer
+      // document created when THIS order actually leaves a due - a
+      // fully-paid cash sale from a brand-new phone number leaves no
+      // Customer record at all (receipts/WhatsApp/delivery all read off
+      // Order.customer directly, never Customer, so nothing else here
+      // needs one to exist).
+      //
+      // Best-effort contact-info sync either way - never allowed to fail
+      // the order itself, which is already safely saved above by this
+      // point. Two orders for a phone number that has never placed an
+      // order before, submitted within the same instant, can both pass
+      // the "not found" check below and then race on the actual insert -
       // MongoDB's unique index on `phone` then rejects the loser with an
-      // E11000 duplicate-key error even though the upsert itself is
-      // per-operation atomic. Retry as a plain (non-upsert) update in that
-      // case, since the document now certainly exists.
+      // E11000 duplicate-key error. Retry as a plain update in that case,
+      // since the document now certainly exists.
       try {
-        await Customer.findOneAndUpdate(
-          { phone: payload.customer.phone, ...buildShopScope(req) },
-          customerUpdate,
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-      } catch (customerError) {
-        if (customerError?.code === 11000) {
+        const existingCustomer = await Customer.findOne({ phone: payload.customer.phone, ...buildShopScope(req) });
+        if (existingCustomer) {
+          await Customer.findOneAndUpdate(
+            { phone: payload.customer.phone, ...buildShopScope(req) },
+            customerUpdate
+          );
+        } else if (order.remainingAmount > 0) {
           try {
-            await Customer.findOneAndUpdate(
-              { phone: payload.customer.phone, ...buildShopScope(req) },
-              customerUpdate
-            );
-          } catch (retryError) {
-            console.error("Non-fatal: customer contact-info retry sync failed", retryError);
-            customerSyncWarning = "The order was saved, but this customer's info could not be saved to Customers/Ledger. Ask your admin to check the backend logs.";
+            await Customer.create({ ...customerUpdate, ...buildShopScope(req) });
+          } catch (customerError) {
+            if (customerError?.code === 11000) {
+              // Lost the create race to a concurrent order for the same
+              // new phone number - the document exists now, just update it.
+              await Customer.findOneAndUpdate(
+                { phone: payload.customer.phone, ...buildShopScope(req) },
+                customerUpdate
+              );
+            } else {
+              throw customerError;
+            }
           }
-        } else {
-          console.error("Non-fatal: failed to sync customer contact info during createOrder", customerError);
-          customerSyncWarning = "The order was saved, but this customer's info could not be saved to Customers/Ledger. Ask your admin to check the backend logs.";
         }
+        // else: brand-new phone, fully paid order - no khata needed, no
+        // Customer document created.
+      } catch (customerError) {
+        console.error("Non-fatal: failed to sync customer contact info during createOrder", customerError);
+        customerSyncWarning = "The order was saved, but this customer's info could not be saved to Customers/Ledger. Ask your admin to check the backend logs.";
       }
     }
 
@@ -845,17 +869,39 @@ exports.importOfflineOrders = async (req, res) => {
         });
 
         if (payload.customer?.phone && payload.customer.phone !== "03000000000") {
+          // Same "only create a khata for a customer who actually has a
+          // due" rule as the online createOrder path above - see that
+          // block's own comment for the full reasoning. Kept consistent
+          // between the two so a cash sale never gets a Customer record
+          // regardless of which path (online vs. offline-then-synced) it
+          // came in through.
+          const customerUpdate = {
+            name: payload.customer.name,
+            phone: payload.customer.phone,
+            address: payload.customer.address || payload.address || "",
+            shopId: req.user.shopId,
+          };
           try {
-            await Customer.findOneAndUpdate(
-              { phone: payload.customer.phone, ...buildShopScope(req) },
-              {
-                name: payload.customer.name,
-                phone: payload.customer.phone,
-                address: payload.customer.address || payload.address || "",
-                shopId: req.user.shopId,
-              },
-              { upsert: true, new: true, setDefaultsOnInsert: true }
-            );
+            const existingCustomer = await Customer.findOne({ phone: payload.customer.phone, ...buildShopScope(req) });
+            if (existingCustomer) {
+              await Customer.findOneAndUpdate(
+                { phone: payload.customer.phone, ...buildShopScope(req) },
+                customerUpdate
+              );
+            } else if (order.remainingAmount > 0) {
+              try {
+                await Customer.create({ ...customerUpdate, ...buildShopScope(req) });
+              } catch (customerError) {
+                if (customerError?.code === 11000) {
+                  await Customer.findOneAndUpdate(
+                    { phone: payload.customer.phone, ...buildShopScope(req) },
+                    customerUpdate
+                  );
+                } else {
+                  throw customerError;
+                }
+              }
+            }
           } catch (customerError) {
             console.error("Non-fatal: customer contact-info sync failed during offline import", customerError);
           }

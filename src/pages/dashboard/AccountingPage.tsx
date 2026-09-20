@@ -5,8 +5,8 @@ import {
   ArrowUpCircle, ArrowDownCircle, Scale,
   ChevronRight, Download, Plus, FileText, Trash2, X, AlertCircle,
 } from 'lucide-react';
-import { fetchDayEndReport, fetchExpenses, createExpense, deleteExpense } from '@/lib/pos-api';
-import { DayEndReport, Expense } from '@/lib/pos-types';
+import { fetchDayEndReport, fetchExpenses, createExpense, deleteExpense, fetchLedgerTransactions } from '@/lib/pos-api';
+import { DayEndReport, Expense, LedgerTransaction } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 
@@ -185,6 +185,13 @@ export default function AccountingPage() {
 
   const [report, setReport] = useState<DayEndReport | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  // Shop Ledger (feature 6): the unified transaction list (cash sales,
+  // credit sales, due payments, purchases, expenses) backing the General
+  // Ledger table below - kept separate from `expenses` above, which stays
+  // exactly as it was (still what Add Entry/delete actually operate on).
+  const [ledgerTransactions, setLedgerTransactions] = useState<LedgerTransaction[]>([]);
+  type LedgerFilter = 'all' | 'sale' | 'credit' | 'due_payment' | 'purchase' | 'expense';
+  const [ledgerFilter, setLedgerFilter] = useState<LedgerFilter>('all');
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -203,9 +210,14 @@ export default function AccountingPage() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const [reportData, expenseData] = await Promise.all([fetchDayEndReport(rangeFrom, rangeTo), fetchExpenses()]);
+      const [reportData, expenseData, ledgerData] = await Promise.all([
+        fetchDayEndReport(rangeFrom, rangeTo),
+        fetchExpenses(),
+        fetchLedgerTransactions(rangeFrom, rangeTo),
+      ]);
       if (reportData) setReport(reportData);
       setExpenses(expenseData || []);
+      setLedgerTransactions(ledgerData?.rows || []);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not load accounting data.');
     } finally {
@@ -232,6 +244,31 @@ export default function AccountingPage() {
       })
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [expenses, rangeFrom, rangeTo]);
+
+  // Shop Ledger tabs (feature 6): filters the unified transaction list by
+  // category so cash sales / credit sales / due payments / purchases /
+  // expenses can each be viewed on their own, on top of the existing
+  // Daily/Monthly/Yearly/Custom date presets above (ledgerTransactions is
+  // already scoped to rangeFrom/rangeTo server-side - see loadAll).
+  const filteredLedgerTransactions = useMemo(() => {
+    return ledgerTransactions
+      .filter((row) => {
+        if (ledgerFilter === 'all') return true;
+        if (ledgerFilter === 'sale') return row.type === 'sale' && !row.isCredit;
+        if (ledgerFilter === 'credit') return row.type === 'sale' && row.isCredit;
+        return row.type === ledgerFilter;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [ledgerTransactions, ledgerFilter]);
+
+  const LEDGER_FILTER_TABS: { key: 'all' | 'sale' | 'credit' | 'due_payment' | 'purchase' | 'expense'; label: string }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'sale', label: 'Cash Sales' },
+    { key: 'credit', label: 'Credit Sales' },
+    { key: 'due_payment', label: 'Due Payments' },
+    { key: 'purchase', label: 'Purchases' },
+    { key: 'expense', label: 'Expenses' },
+  ];
 
   const revenue = report?.revenue ?? 0;
   const otherExpenses = report?.otherExpenses ?? 0;
@@ -473,7 +510,32 @@ export default function AccountingPage() {
             </div>
           </div>
 
+          {/* Category tabs (feature 6) - cash sales / credit sales / due
+              payments / purchases / expenses, all sourced from the one
+              unified GET /reports/ledger-transactions endpoint, filtered
+              by the SAME Daily/Monthly/Yearly/Custom range already picked
+              above. "Expenses" renders the ORIGINAL Expense-only table
+              below (with Add Entry's delete action still wired up exactly
+              as before) - every other tab is a read-only view of real
+              transactions, since only manual Expense entries are ever
+              deletable from here. */}
+          <div className="flex flex-wrap gap-2 border-b border-slate-50 px-8 py-4">
+            {LEDGER_FILTER_TABS.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setLedgerFilter(tab.key)}
+                className={`rounded-full px-4 py-2 text-[11px] font-black uppercase tracking-wide transition-colors ${
+                  ledgerFilter === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
           <div className="overflow-x-auto">
+            {ledgerFilter === 'expense' ? (
             <table className="w-full text-left">
               <thead>
                 <tr className="text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black">
@@ -524,6 +586,45 @@ export default function AccountingPage() {
                 ))}
               </tbody>
             </table>
+            ) : (
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black">
+                  <th className="px-8 py-6">Date</th>
+                  <th className="px-8 py-6">Description</th>
+                  <th className="px-8 py-6">Type</th>
+                  <th className="px-8 py-6 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {isLoading ? (
+                  <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400">Loading...</td></tr>
+                ) : filteredLedgerTransactions.length === 0 ? (
+                  <tr><td colSpan={4} className="px-8 py-10 text-center text-sm font-bold text-slate-400">No transactions in this period.</td></tr>
+                ) : filteredLedgerTransactions.map((row) => (
+                  <tr key={`${row.type}-${row.refId}-${row.date}`} className="group hover:bg-slate-50/80 transition-all">
+                    <td className="px-8 py-6">
+                        <span className="text-sm font-bold text-slate-400">{new Date(row.date).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                    </td>
+                    <td className="px-8 py-6">
+                        <div className="flex flex-col">
+                            <span className="text-sm font-extrabold text-slate-800">{row.label}</span>
+                            {row.detail ? <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">{row.detail}</span> : null}
+                        </div>
+                    </td>
+                    <td className="px-8 py-6">
+                        <span className="px-3 py-1.5 bg-slate-100 rounded-lg text-[10px] font-black text-slate-500 uppercase italic">
+                            {row.type === 'sale' ? (row.isCredit ? 'Credit Sale' : 'Cash Sale') : row.type === 'due_payment' ? 'Due Payment' : row.type}
+                        </span>
+                    </td>
+                    <td className={`px-8 py-6 text-right font-black text-sm ${row.direction === 'in' ? 'text-emerald-500' : 'text-rose-500'}`}>
+                        {row.direction === 'in' ? '+' : '-'} {formatMoney(row.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            )}
           </div>
         </div>
 

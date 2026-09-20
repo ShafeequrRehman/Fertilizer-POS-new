@@ -3,6 +3,7 @@ const Order = require("../models/Order");
 const Expense = require("../models/Expense");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const StaffPayment = require("../models/StaffPayment");
+const Customer = require("../models/Customer");
 const { shopScope } = require("../middleware/attachShopScope");
 
 // The fixed category heading every ingredient-purchase batch is grouped
@@ -413,6 +414,142 @@ exports.getInventoryReport = async (req, res) => {
       })),
       supplierDues,
       totalSupplierDue: supplierDues.reduce((sum, row) => sum + row.totalDue, 0),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/reports/ledger-transactions?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+//
+// Shop Ledger / financial records (feature 6): a single, flat, date-sorted
+// list of every real money-in/money-out event in the given range, so
+// AccountingPage.tsx's "General Ledger" table can show actual transactions
+// (cash sales, credit sales, due payments, purchases, expenses) instead of
+// only Expense documents. Deliberately its own endpoint rather than
+// folding this into getDayEndReport above - that one already has its own
+// well-established shape (summary cards, budgeting breakdown) that other
+// callers depend on; this returns raw rows instead, one per transaction,
+// for a table to render directly.
+//
+// Same non-cancelled / date-range conventions getDayEndReport and
+// getInventoryReport already use for Orders/IngredientPurchase, so the
+// numbers here always agree with the rest of the Reports section.
+exports.getLedgerTransactions = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+    const { start, end } = resolveRange(req.query);
+
+    const [orders, purchases, expenses, customers] = await Promise.all([
+      // Cash sales in / credit sales: one row per non-cancelled order in
+      // range. `paidAmount` is what actually came in at/after creation
+      // (money in); `remainingAmount > 0` marks it as carrying a credit
+      // component - no separate collection needed, an order IS the credit
+      // sale the moment it leaves a due.
+      Order.find({ shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } })
+        .select("dailyOrderNumber shopSequenceNumber total paidAmount remainingAmount paymentMethod customer orderType createdAt status")
+        .sort({ createdAt: 1 })
+        .lean(),
+      // Shop purchases out: same status:"received" + receivedAt convention
+      // getDayEndReport's kitchenStockPurchaseDocs query already uses (see
+      // that query's own comment on why receivedAt, not purchaseDate).
+      IngredientPurchase.find({ shopId: shopObjectId, status: "received", receivedAt: { $gte: start, $lte: end } })
+        .select("companyName ingredientName productDetails totalAmount paidAmount remainingAmount receivedAt")
+        .sort({ receivedAt: 1 })
+        .lean(),
+      // General expenses out.
+      Expense.find({ shopId: shopObjectId, date: { $gte: start, $lte: end } })
+        .select("category description amount date")
+        .sort({ date: 1 })
+        .lean(),
+      // Customer due payments in: duesHistory is a subdocument array on
+      // each Customer, not its own collection - same flatten-in-JS
+      // approach customerController.getCustomerLedger already uses for
+      // this exact field, rather than an $unwind aggregate for what's a
+      // relatively small array per customer.
+      Customer.find({ shopId: shopObjectId }).select("name phone duesHistory").lean(),
+    ]);
+
+    const rows = [];
+
+    for (const order of orders) {
+      const isCredit = Number(order.remainingAmount || 0) > 0;
+      rows.push({
+        type: "sale",
+        isCredit,
+        date: order.createdAt,
+        amount: Number(order.total || 0),
+        direction: "in",
+        label: `Order #${order.dailyOrderNumber ?? order.shopSequenceNumber ?? String(order._id).slice(-4)}`,
+        detail: [
+          order.customer?.name || "Walk-in Customer",
+          order.paymentMethod || "Cash",
+          isCredit ? `Rs ${order.remainingAmount} still due` : "Fully paid",
+        ].filter(Boolean).join(" · "),
+        refId: String(order._id),
+        paidAmount: Number(order.paidAmount || 0),
+        remainingAmount: Number(order.remainingAmount || 0),
+        paymentMethod: order.paymentMethod || "Cash",
+      });
+    }
+
+    for (const purchase of purchases) {
+      rows.push({
+        type: "purchase",
+        isCredit: false,
+        date: purchase.receivedAt,
+        amount: Number(purchase.totalAmount || 0),
+        direction: "out",
+        label: purchase.ingredientName || purchase.productDetails || "Stock purchase",
+        detail: purchase.companyName ? `From ${purchase.companyName}` : "",
+        refId: String(purchase._id),
+      });
+    }
+
+    for (const expense of expenses) {
+      rows.push({
+        type: "expense",
+        isCredit: false,
+        date: expense.date,
+        amount: Number(expense.amount || 0),
+        direction: "out",
+        label: expense.category || "Expense",
+        detail: expense.description || "",
+        refId: String(expense._id),
+      });
+    }
+
+    for (const customer of customers) {
+      for (const entry of customer.duesHistory || []) {
+        if (entry.type !== "settle") continue;
+        const entryDate = entry.createdAt ? new Date(entry.createdAt) : null;
+        if (!entryDate || Number.isNaN(entryDate.getTime()) || entryDate < start || entryDate > end) continue;
+        rows.push({
+          type: "due_payment",
+          isCredit: false,
+          date: entry.createdAt,
+          amount: Number(entry.amount || 0),
+          direction: "in",
+          label: `Due payment - ${customer.name || customer.phone}`,
+          detail: entry.note || "",
+          refId: String(customer._id),
+        });
+      }
+    }
+
+    rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    const totalIn = rows.filter((r) => r.direction === "in").reduce((sum, r) => sum + r.amount, 0);
+    const totalOut = rows.filter((r) => r.direction === "out").reduce((sum, r) => sum + r.amount, 0);
+
+    res.json({
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      rows,
+      totalIn,
+      totalOut,
+      net: totalIn - totalOut,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -763,6 +763,41 @@ export default function SalesPage() {
     setShowPayment(true);
   }
 
+  // Instant Checkout arriving from POS: POSPage.tsx's handleSaveOrder
+  // navigates here with `?instantCheckout=<orderId>` right after placing
+  // a new order, so the cashier lands straight on that order's Complete
+  // Payment modal instead of having to find it in the list themselves.
+  // Runs once on mount (empty deps - the query param is a one-shot
+  // handoff, not something to keep re-reacting to) and fetches the order
+  // directly by id rather than waiting on this page's own order list to
+  // load, since that list may take a moment and the order might not even
+  // be on the current page/filter. The param is stripped from the URL
+  // right after (history.replaceState, no extra navigation entry) so a
+  // manual refresh of Sales afterward doesn't re-open the same popup.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const orderId = params.get('instantCheckout');
+    if (!orderId) return;
+    params.delete('instantCheckout');
+    const nextSearch = params.toString();
+    window.history.replaceState(null, '', `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}`);
+    void (async () => {
+      try {
+        const order = await fetchOrder(orderId);
+        if (order.status === 'pending') {
+          setOrders((previous) => (previous.some((o) => o.id === order.id) ? previous : [order, ...previous]));
+          openInstantCheckout(order);
+        }
+      } catch {
+        // The order may already have synced into the normal list by the
+        // time this runs, or simply be gone (e.g. cancelled elsewhere) -
+        // either way this is a best-effort convenience hand-off, not
+        // something worth surfacing an error toast for.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Instant Checkout on Enter (search bar): typing an order number and
   // hitting Enter fetches that exact pending order and opens the payment
   // popup immediately, no mouse needed. Prefers an exact order-number match
@@ -1530,7 +1565,13 @@ export default function SalesPage() {
                     <button disabled={!isSelectedOrderHydrated} type="button" onClick={() => printCustomerReceipt(selectedOrder)} className="glass-pill rounded-2xl px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] text-gray-700 disabled:opacity-50">{t('sales.printReceipt')}</button>
                     <Link to={`/dashboard/sales/print/${selectedOrder.id}`} className="glass-pill rounded-2xl p-2.5 text-gray-500"><Printer size={16} /></Link>
                     <button type="button" onClick={() => void refreshOne(selectedOrder.id)} className="glass-pill rounded-2xl p-2.5 text-gray-500"><RefreshCcw size={16} /></button>
-                    {selectedOrder.status === 'pending' ? (
+                    {/* A completed order stays editable here too (not
+                        just pending) - EditOrderPage.tsx's own patch call
+                        already recomputes paidAmount/remainingAmount
+                        correctly for a completed order's item changes, and
+                        the backend never restricted edits by status; only
+                        a cancelled order actually locks. */}
+                    {selectedOrder.status !== 'cancelled' ? (
                       <Link to={`/dashboard/sales/${selectedOrder.id}/edit`} className="glass-pill rounded-2xl px-3 py-2.5 text-xs font-black text-gray-600">{t('common.edit')}</Link>
                     ) : (
                       <span className="glass-pill cursor-not-allowed rounded-2xl px-3 py-2.5 text-xs font-black text-gray-400">{t('sales.editLocked')}</span>
