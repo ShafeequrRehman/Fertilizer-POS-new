@@ -127,11 +127,13 @@ export const record = {
     noAmountNoPending: 'Enter a payment amount, or check "Put in Pending" to confirm this order with no payment collected.',
     needCustomerInfo: "Add the customer's name and phone number before confirming a partial payment - dues need a real customer to track them against.",
     completeFailed: "Could not complete this order.",
+    cancelFailed: "Could not cancel this order.",
   },
   toast: {
     orderCompleted: "Order completed.",
     orderCompletedOffline: "Order completed. Will sync once back online.",
     orderCompletedSyncing: "Order completed. Syncing to the cloud...",
+    orderCancelled: "Order cancelled.",
   },
   autoPrintFrameTitle: "Auto Print Frame",
   export: {

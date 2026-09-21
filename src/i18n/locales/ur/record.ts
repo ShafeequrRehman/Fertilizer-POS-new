@@ -125,11 +125,13 @@ export const record = {
     noAmountNoPending: 'ادائیگی کی رقم درج کریں، یا کوئی ادائیگی وصول کیے بغیر اس آرڈر کی تصدیق کے لیے "پینڈنگ میں رکھیں" کو نشان زد کریں۔',
     needCustomerInfo: "جزوی ادائیگی کی تصدیق سے پہلے کسٹمر کا نام اور فون نمبر شامل کریں - بقایا رقم کو ٹریک کرنے کے لیے حقیقی کسٹمر درکار ہے۔",
     completeFailed: "یہ آرڈر مکمل نہیں ہو سکا۔",
+    cancelFailed: "یہ آرڈر منسوخ نہیں ہو سکا۔",
   },
   toast: {
     orderCompleted: "آرڈر مکمل ہو گیا۔",
     orderCompletedOffline: "آرڈر مکمل ہو گیا۔ آن لائن آتے ہی ہم آہنگ ہو جائے گا۔",
     orderCompletedSyncing: "آرڈر مکمل ہو گیا۔ کلاؤڈ سے ہم آہنگ ہو رہا ہے...",
+    orderCancelled: "آرڈر منسوخ ہو گیا۔",
   },
   autoPrintFrameTitle: "آٹو پرنٹ فریم",
   export: {

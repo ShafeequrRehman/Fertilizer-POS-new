@@ -2,19 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { Link } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, Trash2, WifiOff, X, XCircle } from 'lucide-react';
-import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
-import { SavedOrder, ShopSession } from '@/lib/pos-types';
+import { AlertCircle, CheckCircle2, Download, Eye, Printer, Search, Trash2, WifiOff, X, XCircle } from 'lucide-react';
+import { cancelOrder, fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
+import { SavedOrder, ShopSession, Product } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
-import { hasPermission } from '@/lib/auth';
+import { hasPermission, getAuthUser } from '@/lib/auth';
 import { getBusinessWindow, filterOrdersInBusinessWindow, filterOrdersInBusinessWindows, getSessionDateKey, useShopSession } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
-import { getLocalHubStartDiagnostics, pushOrdersCache } from '@/lib/local-hub-api';
-import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
+import { getLocalHubStartDiagnostics, getReferenceData, pushOrdersCache } from '@/lib/local-hub-api';
+import { loadOrdersFromLocalHub, saveOrderCancelOffline } from '@/lib/offline-order-helpers';
+import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { buildCategoryLookup, dispatchKitchenPrints } from '@/lib/kitchen-print-routing';
 import { reportPrintOutcome, ToastLike } from '@/lib/print-notify';
 import { useToast } from '@/lib/toast';
-import CancelOrderModal from '@/components/CancelOrderModal';
 import CompleteOrderModal from '@/components/CompleteOrderModal';
 import { resolveProductImage } from '@/lib/food-images';
 import { downloadExcelWorkbook, ExcelCell, ExcelCellStyle, ExcelSheet } from '@/lib/excel-export';
@@ -57,6 +58,57 @@ function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: Toa
     }
   } else {
     setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+  }
+}
+
+// Same reasoning as CancelOrderModal.tsx's own getCancelCategoryLookup -
+// fetched fresh only when a cancellation actually happens, falling back to
+// an empty lookup (every item routes to the kitchen printer) if it fails,
+// never letting a catalog hiccup block the cancellation itself.
+async function getCancelCategoryLookup(useLocalCache: boolean): Promise<Map<string, string>> {
+  try {
+    if (useLocalCache) {
+      const snapshot = await getReferenceData();
+      return buildCategoryLookup((snapshot.products || []) as Product[]);
+    }
+    const result = await fetchProducts();
+    return buildCategoryLookup(result.products || []);
+  } catch {
+    return new Map();
+  }
+}
+
+// Fires the "stop preparation" kitchen ticket the instant an order is
+// cancelled/deleted - same as CancelOrderModal.tsx's own version (the shop
+// owner asked to drop that confirm popup entirely for delete, in favor of
+// this instant direct-cancel path, so this is duplicated here rather than
+// still routing through that modal).
+function printKitchenCancelTicket(order: SavedOrder, toast: ToastLike, categoryLookup: Map<string, string>) {
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
+  if (!isElectron) return;
+
+  try {
+    const electronRequire = (window as ElectronWindow).require;
+    if (!electronRequire) return;
+    const { ipcRenderer } = electronRequire('electron');
+    const settings = getStoreSettings();
+    const printLogo = localStorage.getItem('preferred-print-logo');
+
+    if (settings.kitchenPrinter || settings.counterPrinter) {
+      void dispatchKitchenPrints(
+        order.items,
+        categoryLookup,
+        settings,
+        (groupItems, printerName, label) =>
+          reportPrintOutcome(
+            ipcRenderer.invoke('print-kitchen-cancel-receipt-data', { ...order, items: groupItems }, printerName, printLogo, settings),
+            `${label} cancellation`,
+            toast,
+          ),
+      );
+    }
+  } catch (err) {
+    console.error('Electron print error (kitchen cancel ticket):', err);
   }
 }
 
@@ -160,8 +212,11 @@ export default function RecordPage() {
   // window.
   const localEditVersionRef = useRef(0);
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
-  const [cancelOrderTarget, setCancelOrderTarget] = useState<SavedOrder | null>(null);
   const [completeOrderTarget, setCompleteOrderTarget] = useState<SavedOrder | null>(null);
+  // Guards Delete against a rapid double-click firing two real
+  // cancellations for the same order, now that this is a direct one-click
+  // action with no confirm popup in between to naturally absorb that.
+  const [deletingOrderIds, setDeletingOrderIds] = useState<Set<string>>(new Set());
   // name::variation -> category, used to roll the per-item breakdown up
   // into per-category totals below it. Products rarely change mid-shift,
   // so this is only refetched on mount/manual reload, not on the same
@@ -825,11 +880,44 @@ export default function RecordPage() {
 
   const canCancel = hasPermission('sales.delete');
 
-  function handleOrderCancelled(updated: SavedOrder) {
-    localEditVersionRef.current += 1;
-    setOrders((previous) => previous.map((order) => (order.id === updated.id ? updated : order)));
-    setCancelOrderTarget(null);
-    setViewOrder(updated);
+  // Delete = cancel this order directly, no confirm popup and no reason
+  // prompt - the shop owner explicitly asked for a one-click delete with
+  // just a toast, dropping the CancelOrderModal step entirely for this
+  // flow (see backend/controllers/orderController.js's cancelOrderCore,
+  // which already restores stock and keeps dues/reports consistent for
+  // any order status - this just calls it immediately instead of via that
+  // modal). Access control is unchanged: only staff with the sales.delete
+  // permission ever see the Delete button that calls this (canCancel
+  // below), and the backend enforces that same permission independently.
+  async function handleDeleteOrder(order: SavedOrder) {
+    if (deletingOrderIds.has(order.id)) return;
+    setDeletingOrderIds((previous) => new Set(previous).add(order.id));
+    try {
+      let updated: SavedOrder;
+      if (isDesktopApp()) {
+        const actor = { name: getAuthUser()?.name || getAuthUser()?.username };
+        updated = await saveOrderCancelOffline(order, '', undefined, actor);
+        const categoryLookup = await getCancelCategoryLookup(true);
+        printKitchenCancelTicket(updated, toast, categoryLookup);
+        triggerBackgroundSync();
+      } else {
+        updated = await cancelOrder(order.id, {});
+        const categoryLookup = await getCancelCategoryLookup(false);
+        printKitchenCancelTicket(updated, toast, categoryLookup);
+      }
+      localEditVersionRef.current += 1;
+      setOrders((previous) => previous.map((existing) => (existing.id === updated.id ? updated : existing)));
+      setViewOrder((current) => (current && current.id === updated.id ? updated : current));
+      toast.success(t('record.toast.orderCancelled'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('record.errors.cancelFailed'));
+    } finally {
+      setDeletingOrderIds((previous) => {
+        const next = new Set(previous);
+        next.delete(order.id);
+        return next;
+      });
+    }
   }
 
   // Closing an order out from here is the whole point of this page's
@@ -1093,7 +1181,8 @@ export default function RecordPage() {
                 order={order}
                 onView={() => setViewOrder(order)}
                 onComplete={() => setCompleteOrderTarget(order)}
-                onDelete={() => setCancelOrderTarget(order)}
+                onDelete={() => void handleDeleteOrder(order)}
+                deleting={deletingOrderIds.has(order.id)}
                 toast={toast}
                 setPrintReadyUrl={setPrintReadyUrl}
               />
@@ -1117,14 +1206,11 @@ export default function RecordPage() {
         <OrderDetailModal
           order={viewOrder}
           canCancel={canCancel}
+          deleting={deletingOrderIds.has(viewOrder.id)}
           onClose={() => setViewOrder(null)}
-          onCancelRequested={() => setCancelOrderTarget(viewOrder)}
+          onCancelRequested={() => void handleDeleteOrder(viewOrder)}
           onCompleteRequested={() => setCompleteOrderTarget(viewOrder)}
         />
-      ) : null}
-
-      {cancelOrderTarget ? (
-        <CancelOrderModal order={cancelOrderTarget} onClose={() => setCancelOrderTarget(null)} onCancelled={handleOrderCancelled} />
       ) : null}
 
       {completeOrderTarget ? (
@@ -1147,6 +1233,7 @@ function RecordRow({
   onView,
   onComplete,
   onDelete,
+  deleting,
   toast,
   setPrintReadyUrl,
 }: {
@@ -1154,6 +1241,7 @@ function RecordRow({
   onView: () => void;
   onComplete: () => void;
   onDelete: () => void;
+  deleting: boolean;
   toast: ToastLike;
   setPrintReadyUrl: (url: string | null) => void;
 }) {
@@ -1226,18 +1314,20 @@ function RecordRow({
           <Printer size={13} />
         </button>
         {/* Delete = cancel this order (any status except already-cancelled)
-            through the exact same Cancel Order Key + reason flow used
-            everywhere else - see CancelOrderModal.tsx. The backend
-            (cancelOrderCore) already restores this order's stock and keeps
-            dues/reports consistent whether it was pending or already
-            completed, so no extra wiring is needed here beyond opening the
-            same modal used elsewhere. */}
+            immediately, one click, no confirm popup or reason prompt - the
+            shop owner explicitly asked for this instead of the earlier
+            Cancel Order Key/reason modal. The backend (cancelOrderCore)
+            already restores this order's stock and keeps dues/reports
+            consistent whether it was pending or already completed, so this
+            button just calls that directly (see handleDeleteOrder above)
+            and a toast confirms it. */}
         {order.status !== 'cancelled' ? (
           <button
             type="button"
             onClick={onDelete}
+            disabled={deleting}
             title={t('record.actions.deleteOrderTitle')}
-            className="flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-2 text-[11px] font-black text-rose-700 transition hover:bg-rose-100"
+            className="flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-2 text-[11px] font-black text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Trash2 size={13} />
           </button>
@@ -1270,12 +1360,14 @@ function StatusBadge({ status }: { status: SavedOrder['status'] }) {
 function OrderDetailModal({
   order,
   canCancel,
+  deleting,
   onClose,
   onCancelRequested,
   onCompleteRequested,
 }: {
   order: SavedOrder;
   canCancel: boolean;
+  deleting: boolean;
   onClose: () => void;
   onCancelRequested: () => void;
   onCompleteRequested: () => void;
@@ -1377,9 +1469,10 @@ function OrderDetailModal({
               <button
                 type="button"
                 onClick={onCancelRequested}
-                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105"
+                disabled={deleting}
+                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Lock size={16} /> {t('record.actions.cancelOrder')}
+                <Trash2 size={16} /> {t('record.actions.cancelOrder')}
               </button>
             ) : null}
           </div>
