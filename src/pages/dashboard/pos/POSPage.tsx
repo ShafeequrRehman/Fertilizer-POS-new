@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Banknote, Barcode, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
 import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
@@ -18,6 +17,7 @@ import { buildCategoryLookup, dispatchKitchenPrints, isCategoryPrintRoutingEnabl
 import { Store } from 'lucide-react';
 import { isTypingTarget, useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 import { useLanguage } from '@/i18n';
+import CompleteOrderModal from '@/components/CompleteOrderModal';
 
 type ElectronWindow = Window & typeof globalThis & {
   require?: (moduleName: 'electron') => {
@@ -59,10 +59,6 @@ export default function POSPage() {
   const { toast: shopToast, popup } = useToast();
   const { notify } = useNotifications();
   const { isOnline } = useNetworkStatus();
-  // Instant Checkout (see handleSaveOrder's end): hands off to Sales'
-  // own Complete Payment modal for the order this screen just created,
-  // instead of duplicating that modal/payment logic here.
-  const navigate = useNavigate();
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
@@ -94,6 +90,17 @@ export default function POSPage() {
   const isSavingOrderRef = useRef(false);
   const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', billTid: '', billName: '', cashRecipientName: '' });
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
+  // Shows the same Complete Payment popup RecordPage's own Complete Order
+  // action uses, right after Save - see the user request this was built
+  // for: skip the extra trip through Sales just to collect payment on an
+  // order placed here a moment ago. The order itself is still created as
+  // "pending" first, exactly as before (see handleSaveOrder below) - this
+  // popup only ever flips it to "completed" through an explicit Confirm
+  // Payment/Pay Full click, same safeguard as everywhere else this modal
+  // is used. Dismissing it without paying just leaves the order pending,
+  // same as before this popup existed - nothing is lost, it can still be
+  // completed later from Record/Sales like before.
+  const [completePaymentTarget, setCompletePaymentTarget] = useState<SavedOrder | null>(null);
   const [suggestions, setSuggestions] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showNewCustomerPrompt, setShowNewCustomerPrompt] = useState(false);
@@ -720,12 +727,6 @@ export default function POSPage() {
   // (whose price only ever comes from Manage Products), these two need
   // their price typed in fresh on the cart row itself. See the cart row's
   // own conditional input below (gated on item.specialType).
-  //
-  // This same handler now also backs the plain-product price input below
-  // it (added so a cashier can override an ordinary item's price per cart
-  // line, e.g. a one-off discount) - it never actually depended on
-  // specialType, it just sets item.price on the given row, so no new
-  // handler was needed for that, only a second <input> wired to it.
   function handleItemPriceChange(index: number, value: string) {
     const nextPrice = Math.max(0, Number(value) || 0);
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, price: nextPrice } : item)));
@@ -1220,6 +1221,9 @@ export default function POSPage() {
       // product cards that were just used to build it.
       void loadPendingItemQuantities();
       orderFinalized = true;
+      // Bring up the Complete Payment popup right away for this order -
+      // see completePaymentTarget's own comment above for why.
+      setCompletePaymentTarget(savedOrder);
       // A customer-sync failure gets its own warning-toned popup instead of
       // pretending everything went perfectly - the order itself is still
       // saved fine either way.
@@ -1322,34 +1326,6 @@ export default function POSPage() {
       } else if (!isOfflineOrder) {
         setPrintReadyUrl(`/dashboard/sales/print/${savedOrder.id}?auto=true&type=kitchen`);
         void sendOrderPlacedMessage(savedOrder, getStoreSettings());
-      }
-
-      // Instant Checkout: the shop owner asked for Save to "instantly
-      // trigger the final Complete Order popup right there" instead of
-      // leaving the order sitting pending until someone separately opens
-      // Sales and finds it. Note this is NOT the auto-complete-at-Save
-      // behavior that was tried before and explicitly reverted (see the
-      // orderPayload comment above) - the order still goes through the
-      // exact same create-pending-order path as always, with the exact
-      // same payment validation; this only jumps the cashier straight to
-      // the real Complete Payment modal (Sales page's own
-      // openInstantCheckout, reused as-is - no payment/discount logic is
-      // duplicated here) so they can confirm it right away. Closing that
-      // modal without confirming just leaves the order pending, same as
-      // today - Sales' own modal already works that way.
-      //
-      // Only for an order that actually has a real cloud id to look up
-      // (never for an offline-queued one, which only exists as
-      // `local-<id>` in the Local Hub until it syncs - Sales can't fetch
-      // that by id yet). A short delay lets the kitchen-ticket printing
-      // just above (Electron IPC, or the hidden auto-print iframe for a
-      // browser/tablet till) actually fire before the screen navigates
-      // away - jumping instantly could otherwise cut off the iframe's
-      // print before it ever loads.
-      if (!isOfflineOrder && savedOrder.id) {
-        setTimeout(() => {
-          navigate(`/dashboard/sales?instantCheckout=${encodeURIComponent(savedOrder.id)}`);
-        }, 900);
       }
     } catch (error) {
       popup({ tone: 'error', title: t("pos.orderNotSavedTitle"), message: error instanceof Error ? error.message : t('pos.orderSaveFailedFallback') });
@@ -1781,26 +1757,7 @@ export default function POSPage() {
                       />
                     </div>
                   ) : (
-                    // Ordinary products: still start out at whatever
-                    // Manage Products has as the catalog price (see
-                    // addToCart - unchanged), but a cashier can override
-                    // it per cart line right here before Save, e.g. a
-                    // negotiated/discounted rate for this one sale. This
-                    // is deliberately the SAME handleItemPriceChange the
-                    // specialType input above already uses - it never
-                    // validated specialType itself, it just set
-                    // item.price - so no new handler was needed, only
-                    // widening which rows render the input.
-                    <div className="mt-1 flex items-center gap-1">
-                      <span className="text-[10px] font-semibold text-gray-500">PKR</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={item.price}
-                        onChange={(event) => handleItemPriceChange(index, event.target.value)}
-                        className="w-20 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-[10px] font-semibold text-gray-500 shadow-none outline-none transition focus:border-white/60 focus:bg-white/70 focus:text-gray-900 focus:shadow-inner [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                      />
-                    </div>
+                    <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
                   )}
                 </div>
                 {/* Electricity Bill / Cash are one-off, open-amount
@@ -1872,6 +1829,17 @@ export default function POSPage() {
             setVariationPickerGroup(null);
           }}
           onClose={() => setVariationPickerGroup(null)}
+        />
+      ) : null}
+
+      {completePaymentTarget ? (
+        <CompleteOrderModal
+          order={completePaymentTarget}
+          isOnline={isOnline}
+          toast={shopToast}
+          onClose={() => setCompletePaymentTarget(null)}
+          onCompleted={() => setCompletePaymentTarget(null)}
+          setPrintReadyUrl={setPrintReadyUrl}
         />
       ) : null}
     </div>

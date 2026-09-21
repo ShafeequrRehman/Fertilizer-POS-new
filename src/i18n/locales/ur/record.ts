@@ -15,6 +15,7 @@ export const record = {
     completeOrder: "آرڈر مکمل کریں",
     completeOrderTitle: "آرڈر مکمل کریں",
     cancelOrder: "آرڈر منسوخ کریں",
+    deleteOrderTitle: "آرڈر ڈیلیٹ کریں (منسوخ کریں، اسٹاک واپس کریں، بقایا درست کریں)",
     viewOrderTitle: "آرڈر دیکھیں",
     editOrderTitle: "آرڈر ایڈٹ کریں",
     printReceiptTitle: "رسید پرنٹ کریں",

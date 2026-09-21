@@ -17,6 +17,7 @@ export const record = {
     completeOrder: "Complete Order",
     completeOrderTitle: "Complete order",
     cancelOrder: "Cancel Order",
+    deleteOrderTitle: "Delete order (cancel, restore stock, adjust dues)",
     viewOrderTitle: "View order",
     editOrderTitle: "Edit order",
     printReceiptTitle: "Print receipt",

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
-import { Link, useNavigate } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Download, Edit3, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
-import { fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory, updateOrder } from '@/lib/pos-api';
+import { Link } from 'react-router-dom';
+import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, Trash2, WifiOff, X, XCircle } from 'lucide-react';
+import { fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission } from '@/lib/auth';
@@ -11,11 +11,11 @@ import { getBusinessWindow, filterOrdersInBusinessWindow, filterOrdersInBusiness
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { getLocalHubStartDiagnostics, pushOrdersCache } from '@/lib/local-hub-api';
-import { loadOrdersFromLocalHub, saveOrderEditOffline } from '@/lib/offline-order-helpers';
-import { triggerBackgroundSync } from '@/lib/offline-sync';
+import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 import { reportPrintOutcome, ToastLike } from '@/lib/print-notify';
 import { useToast } from '@/lib/toast';
 import CancelOrderModal from '@/components/CancelOrderModal';
+import CompleteOrderModal from '@/components/CompleteOrderModal';
 import { resolveProductImage } from '@/lib/food-images';
 import { downloadExcelWorkbook, ExcelCell, ExcelCellStyle, ExcelSheet } from '@/lib/excel-export';
 // NOTE: intentionally NOT a static top-level import - see the matching
@@ -358,7 +358,13 @@ export default function RecordPage() {
   const filteredOrders = useMemo(() => {
     const base = statusFilter === 'pending' ? allPendingOrders : dayOrders;
     return base
-      .filter((order) => statusFilter === 'All' || order.status === statusFilter)
+      // 'All' is the default/main view - a cancelled order is already
+      // fully reversed (stock restored, dues excluded) the moment it's
+      // cancelled, so leaving it visible here by default would make it
+      // look like it's still an active order. It isn't lost - the
+      // dedicated "Cancelled" tab (still in STATUS_TABS below) keeps the
+      // full audit trail one click away, same as the Khata/Ledger pages.
+      .filter((order) => (statusFilter === 'All' ? order.status !== 'cancelled' : order.status === statusFilter))
       .filter((order) => {
         const term = search.trim().toLowerCase();
         if (!term) return true;
@@ -723,8 +729,11 @@ export default function RecordPage() {
     // allPendingOrders above) rather than dayOrders' shift-scoped one - so
     // this badge always matches exactly what clicking the Pending tab
     // actually shows, old shifts included.
-    const base: Record<StatusFilter, number> = { All: dayOrders.length, pending: allPendingOrders.length, completed: 0, paid: 0, cancelled: 0 };
+    const base: Record<StatusFilter, number> = { All: 0, pending: allPendingOrders.length, completed: 0, paid: 0, cancelled: 0 };
     dayOrders.forEach((order) => {
+      // Kept in sync with filteredOrders' own 'All' filter above - cancelled
+      // orders don't count toward the All badge either.
+      if (order.status !== 'cancelled') base.All += 1;
       if (order.status === 'pending') return;
       if (order.status in base) base[order.status as StatusFilter] += 1;
     });
@@ -814,20 +823,7 @@ export default function RecordPage() {
   const visibleCategorySales = categorySales.slice(0, visibleCategorySalesCount);
   const visibleOrders = filteredOrders.slice(0, visibleOrdersCount);
 
-  const navigate = useNavigate();
   const canCancel = hasPermission('sales.delete');
-  // Same permission gate as the route itself (sales/:id/edit is gated by
-  // <RequirePermission permission={['sales.create', 'sales.edit']}>) -
-  // mirrored here purely for UX (don't show a button that would just
-  // redirect/block), never a substitute for that route guard.
-  const canEditOrders = hasPermission('sales.create') || hasPermission('sales.edit');
-
-  // Single place both new Edit entry points (the row icon and the
-  // OrderDetailModal button) route through - navigates to the same
-  // per-item editor SalesPage.tsx already links into.
-  function handleEditOrder(order: SavedOrder) {
-    navigate(`/dashboard/sales/${order.id}/edit`);
-  }
 
   function handleOrderCancelled(updated: SavedOrder) {
     localEditVersionRef.current += 1;
@@ -1075,11 +1071,9 @@ export default function RecordPage() {
       </div>
 
       <div className="glass overflow-hidden rounded-[28px]">
-        <div className="hidden grid-cols-[90px_70px_1.1fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_110px] gap-2 border-b border-white/40 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
+        <div className="hidden grid-cols-[90px_1.6fr_0.9fr_0.9fr_0.9fr_0.9fr_150px] gap-2 border-b border-white/40 px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 lg:grid">
           <span>{t('record.tableHeaders.order')}</span>
-          <span>{t('record.tableHeaders.table')}</span>
           <span>{t('record.tableHeaders.customer')}</span>
-          <span>{t('record.tableHeaders.type')}</span>
           <span>{t('common.total')}</span>
           <span>{t('record.paid')}</span>
           <span>{t('record.remaining')}</span>
@@ -1097,10 +1091,9 @@ export default function RecordPage() {
               <RecordRow
                 key={order.id}
                 order={order}
-                canEdit={canEditOrders}
                 onView={() => setViewOrder(order)}
                 onComplete={() => setCompleteOrderTarget(order)}
-                onEdit={() => handleEditOrder(order)}
+                onDelete={() => setCancelOrderTarget(order)}
                 toast={toast}
                 setPrintReadyUrl={setPrintReadyUrl}
               />
@@ -1124,11 +1117,9 @@ export default function RecordPage() {
         <OrderDetailModal
           order={viewOrder}
           canCancel={canCancel}
-          canEdit={canEditOrders}
           onClose={() => setViewOrder(null)}
           onCancelRequested={() => setCancelOrderTarget(viewOrder)}
           onCompleteRequested={() => setCompleteOrderTarget(viewOrder)}
-          onEditRequested={() => handleEditOrder(viewOrder)}
         />
       ) : null}
 
@@ -1153,18 +1144,16 @@ export default function RecordPage() {
 
 function RecordRow({
   order,
-  canEdit,
   onView,
   onComplete,
-  onEdit,
+  onDelete,
   toast,
   setPrintReadyUrl,
 }: {
   order: SavedOrder;
-  canEdit: boolean;
   onView: () => void;
   onComplete: () => void;
-  onEdit: () => void;
+  onDelete: () => void;
   toast: ToastLike;
   setPrintReadyUrl: (url: string | null) => void;
 }) {
@@ -1176,27 +1165,22 @@ function RecordRow({
   const date = new Date(order.createdAt).toLocaleDateString('en-PK', { day: '2-digit', month: 'short' });
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
   const customerName = order.orderType === 'DineIn' ? (order.table ? t('record.tableLabel', { table: order.table }) : t('record.dineInCustomer')) : order.customer?.name || t('record.walkInCustomer');
-  const orderType = order.orderType === 'DineIn' ? t('record.orderType.dineIn') : order.orderType === 'TakeAway' ? t('record.orderType.takeAway') : t('record.orderType.delivery');
 
   return (
-    <div className="grid grid-cols-2 gap-2 px-6 py-4 text-sm lg:grid-cols-[90px_70px_1.1fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_110px] lg:items-center">
+    <div className="grid grid-cols-2 gap-2 px-6 py-4 text-sm lg:grid-cols-[90px_1.6fr_0.9fr_0.9fr_0.9fr_0.9fr_150px] lg:items-center">
       <div>
         <p className="font-black text-gray-900">#{orderLabel}</p>
         <p className="text-[11px] font-semibold text-gray-400">{time}</p>
         <p className="text-[10px] font-semibold text-gray-400">{date}</p>
       </div>
-      {/* Its own dedicated column - separate from the Customer cell below,
-          which already falls back to showing "Table N" as the DISPLAY name
-          when no customer name was entered, but that's a label, not
-          something scannable/searchable at a glance across a long list the
-          way a real column is - see the user request this was added for:
-          finding a specific table's still-open bill quickly. */}
-      <span className="font-black text-gray-900">{order.orderType === 'DineIn' ? (order.table || '—') : '—'}</span>
+      {/* Table (for DineIn) and Type were dropped from this main list per
+          the shop owner's request - both are still shown in full inside
+          the View/Order Detail modal below, just not as their own top-
+          level columns here any more. */}
       <div className="truncate">
         <p className="truncate font-bold text-gray-800">{customerName}</p>
         <p className="truncate text-[11px] text-gray-400">{order.customer?.phone || '—'}</p>
       </div>
-      <span className="text-gray-600">{orderType}</span>
       <div>
         <span className="font-black text-gray-900">Rs {order.total}</span>
         {order.discount && order.discount.amount > 0 ? (
@@ -1217,16 +1201,6 @@ function RecordRow({
             className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-2 text-[11px] font-black text-emerald-700 transition hover:bg-emerald-100"
           >
             <CheckCircle2 size={13} />
-          </button>
-        ) : null}
-        {order.status !== 'cancelled' && canEdit ? (
-          <button
-            type="button"
-            onClick={onEdit}
-            title={t('record.actions.editOrderTitle')}
-            className="flex items-center gap-1.5 rounded-full bg-sky-50 px-3 py-2 text-[11px] font-black text-sky-700 transition hover:bg-sky-100"
-          >
-            <Edit3 size={13} />
           </button>
         ) : null}
         <button
@@ -1251,6 +1225,23 @@ function RecordRow({
         >
           <Printer size={13} />
         </button>
+        {/* Delete = cancel this order (any status except already-cancelled)
+            through the exact same Cancel Order Key + reason flow used
+            everywhere else - see CancelOrderModal.tsx. The backend
+            (cancelOrderCore) already restores this order's stock and keeps
+            dues/reports consistent whether it was pending or already
+            completed, so no extra wiring is needed here beyond opening the
+            same modal used elsewhere. */}
+        {order.status !== 'cancelled' ? (
+          <button
+            type="button"
+            onClick={onDelete}
+            title={t('record.actions.deleteOrderTitle')}
+            className="flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-2 text-[11px] font-black text-rose-700 transition hover:bg-rose-100"
+          >
+            <Trash2 size={13} />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -1279,19 +1270,15 @@ function StatusBadge({ status }: { status: SavedOrder['status'] }) {
 function OrderDetailModal({
   order,
   canCancel,
-  canEdit,
   onClose,
   onCancelRequested,
   onCompleteRequested,
-  onEditRequested,
 }: {
   order: SavedOrder;
   canCancel: boolean;
-  canEdit: boolean;
   onClose: () => void;
   onCancelRequested: () => void;
   onCompleteRequested: () => void;
-  onEditRequested: () => void;
 }) {
   const { t } = useLanguage();
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
@@ -1377,27 +1364,16 @@ function OrderDetailModal({
           {order.cashRecipientName ? <DetailBox label={t('record.orderDetail.cashRecipientName')} value={order.cashRecipientName} /> : null}
         </div>
 
-        {order.status !== 'cancelled' ? (
+        {order.status === 'pending' ? (
           <div className="flex shrink-0 gap-2 border-t border-white/40 p-6">
-            {order.status === 'pending' ? (
-              <button
-                type="button"
-                onClick={onCompleteRequested}
-                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-emerald-500 to-emerald-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(6,78,59,0.45)] transition hover:brightness-105"
-              >
-                <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
-              </button>
-            ) : null}
-            {canEdit ? (
-              <button
-                type="button"
-                onClick={onEditRequested}
-                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-sky-500 to-sky-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(30,64,175,0.45)] transition hover:brightness-105"
-              >
-                <Edit3 size={16} /> {t('common.edit')}
-              </button>
-            ) : null}
-            {order.status === 'pending' && canCancel ? (
+            <button
+              type="button"
+              onClick={onCompleteRequested}
+              className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-emerald-500 to-emerald-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(6,78,59,0.45)] transition hover:brightness-105"
+            >
+              <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
+            </button>
+            {canCancel ? (
               <button
                 type="button"
                 onClick={onCancelRequested}
@@ -1431,211 +1407,7 @@ function DetailRow({ label, value, strong = false }: { label: string; value: str
   );
 }
 
-// The whole point this page's Complete Order action was built for: a
-// pending order - however old, from whatever previous shift - is exactly
-// what's keeping one of POSPage's DineIn tables marked occupied. Settling
-// it here (mirroring SalesPage.tsx's own Complete Payment flow: same
-// completeAndSettle action, same claim-before-print invariant online, same
-// saveOrderEditOffline split offline) is what frees that table back up.
-function CompleteOrderModal({
-  order,
-  isOnline,
-  toast,
-  onClose,
-  onCompleted,
-  setPrintReadyUrl,
-}: {
-  order: SavedOrder;
-  isOnline: boolean;
-  toast: ToastLike;
-  onClose: () => void;
-  onCompleted: (updated: SavedOrder) => void;
-  setPrintReadyUrl: (url: string | null) => void;
-}) {
-  const { t } = useLanguage();
-  const [paymentAmount, setPaymentAmount] = useState('');
-  const [customerDue, setCustomerDue] = useState(0);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  // Same reasoning as SalesPage.tsx's Complete Payment panel - required
-  // before "Confirm Payment" is allowed through with nothing typed, so an
-  // accidental click can't silently leave the whole order unpaid.
-  const [confirmPending, setConfirmPending] = useState(false);
-
-  // trulyOffline only gates the live "what else does this customer owe"
-  // lookup below (a cloud-only read, and only ever useful when it can be
-  // trusted right now) - completing the order itself is always local-first
-  // (see localFirst / settle() below), independent of actual connectivity.
-  const trulyOffline = isDesktopApp() && !isOnline;
-  const localFirst = isDesktopApp();
-
-  useEffect(() => {
-    async function loadDue() {
-      // Same "true outstanding balance" reasoning as SalesPage's own
-      // Complete Payment panel - a customer can have more than one order
-      // open at once, so this rolls every OTHER unpaid order of theirs in
-      // too, not just this one. Cloud-only lookup, so skipped while
-      // offline - completing this order still works fine without it, it
-      // just won't also collect other unrelated dues in the same payment.
-      if (trulyOffline || !order.customer?.phone || order.customer.phone === '03000000000') {
-        setCustomerDue(0);
-        return;
-      }
-      try {
-        const result = await fetchCustomerOutstanding(order.customer.phone, order.id);
-        setCustomerDue(Number(result?.outstanding ?? 0));
-      } catch {
-        setCustomerDue(0);
-      }
-    }
-    void loadDue();
-  }, [order, trulyOffline]);
-
-  const owed = Number(order.remainingAmount ?? order.total ?? 0);
-  const payable = owed + customerDue;
-
-  async function settle(full: boolean) {
-    const paid = full ? payable : Number(paymentAmount || 0);
-    if (!full && (paid < 0 || paid > payable)) {
-      setError(t('record.errors.invalidAmount'));
-      return;
-    }
-    // Same reasoning as SalesPage.tsx's completeOrder - nothing typed in
-    // Amount Paid is only allowed through with "Put in Pending" explicitly
-    // ticked, so a stray Confirm Payment click can't silently complete the
-    // order with paid=0. Typing any real amount never needs the tick.
-    if (!full && paid === 0 && !confirmPending) {
-      setError(t('record.errors.noAmountNoPending'));
-      return;
-    }
-    // Same reasoning as SalesPage.tsx's completeOrder - a due left on the
-    // walk-in placeholder phone (03000000000) can never be found again by
-    // Customer Dues/Ledger (both look orders up by customer.phone and
-    // explicitly skip that placeholder), so it's a permanently untrackable
-    // debt the moment this modal closes. Require a real name + phone
-    // before allowing anything less than full payment; a full payment
-    // never leaves a due, so that's still unrestricted.
-    if (paid < payable && (!order.customer?.phone || order.customer.phone === '03000000000' || !order.customer?.name?.trim())) {
-      setError(t('record.errors.needCustomerInfo'));
-      return;
-    }
-    setSaving(true);
-    setError('');
-
-    const payload: Parameters<typeof updateOrder>[1] = { status: 'completed', action: 'completeAndSettle', paidAmount: paid };
-
-    try {
-      if (localFirst) {
-        // Always local-first, online or not - queues to the Local Hub and
-        // returns instantly instead of waiting on a live cloud round trip
-        // (see SalesPage.tsx's saveUpdate for the same pattern). `false` as
-        // receiptPrinted below keeps customerReceiptPrintedAt unset so the
-        // printer icon still works as an on-demand reprint even after the
-        // auto-print just below.
-        const updated = await saveOrderEditOffline(order, payload, false, false);
-        triggerBackgroundSync();
-        // No auto-print here any more, for any order type - see
-        // SalesPage.tsx's completeOrder for the full reasoning. Printing a
-        // customer receipt is now always a deliberate, on-demand action via
-        // the printer icon/button.
-        toast.success(trulyOffline ? t('record.toast.orderCompletedOffline') : t('record.toast.orderCompletedSyncing'));
-        onCompleted(updated);
-        return;
-      }
-
-      // Only ever reached from a plain browser tab now (no Local Hub to
-      // queue into).
-      const updated = await updateOrder(order.id, payload);
-      toast.success(t('record.toast.orderCompleted'));
-      onCompleted(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('record.errors.completeFailed'));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
-  const heading = order.orderType === 'DineIn' && order.table ? t('record.tableLabel', { table: order.table }) : t('record.orderHeading', { label: orderLabel });
-
-  return (
-    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-[32px] bg-white p-6 shadow-2xl">
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">{t('record.actions.completeOrder')}</p>
-            <h2 className="mt-1 text-xl font-black text-gray-900">{heading}</h2>
-          </div>
-          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
-            <XCircle size={18} />
-          </button>
-        </div>
-
-        {trulyOffline ? (
-          <div className="mt-3 flex items-center gap-2 rounded-[14px] bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-            <WifiOff size={14} className="shrink-0" /> {t('record.completeOrder.offlineNotice')}
-          </div>
-        ) : null}
-
-        <div className="mt-4 rounded-[20px] bg-[#F8F9FB] p-4 text-sm">
-          <DetailRow label={t('record.completeOrder.orderTotal')} value={`Rs ${order.total}`} />
-          <DetailRow label={t('record.completeOrder.alreadyPaid')} value={`Rs ${order.paidAmount ?? 0}`} />
-          {customerDue > 0 ? <DetailRow label={t('record.completeOrder.otherOutstandingDues')} value={`Rs ${customerDue}`} /> : null}
-          <DetailRow label={t('record.completeOrder.payableNow')} value={`Rs ${payable}`} strong />
-        </div>
-
-        <div className="mt-4">
-          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.partialPaymentAmount')}</label>
-          <input
-            value={paymentAmount}
-            onChange={(event) => {
-              if (!/^\d*$/.test(event.target.value)) return;
-              // Clamped to Payable Now as they type - same fix as
-              // SalesPage.tsx's Complete Payment modal, so this field can
-              // never hold an amount above what's actually owed.
-              const digitsOnly = event.target.value;
-              const clamped = digitsOnly === '' ? '' : String(Math.min(Number(digitsOnly), payable));
-              setPaymentAmount(clamped);
-              if (clamped) setConfirmPending(false);
-            }}
-            placeholder={t('record.completeOrder.upToAmount', { amount: payable })}
-            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
-          />
-        </div>
-
-        {!paymentAmount ? (
-          <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-[16px] bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">
-            <input
-              type="checkbox"
-              checked={confirmPending}
-              onChange={(event) => setConfirmPending(event.target.checked)}
-              className="mt-0.5"
-            />
-            {t('record.completeOrder.putInPending', { amount: payable })}
-          </label>
-        ) : null}
-
-        {error ? <p className="mt-2 text-xs font-bold text-rose-600">{error}</p> : null}
-
-        <div className="mt-5 grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => void settle(false)}
-            className="rounded-[20px] bg-black px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t('record.actions.confirmPayment')}
-          </button>
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => void settle(true)}
-            className="rounded-[20px] bg-[#E2F33C] px-4 py-3 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t('record.actions.payFull')}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// CompleteOrderModal now lives in its own shared file
+// (src/components/CompleteOrderModal.tsx) so POSPage.tsx can show the exact
+// same "collect payment" popup right after Save - see that file's own
+// header comment for the full reasoning.
