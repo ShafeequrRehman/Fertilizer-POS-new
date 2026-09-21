@@ -38,6 +38,11 @@ router.get("/", canReadCustomers, customerController.getAllCustomers);
 router.post("/", canWriteCustomer, customerController.createCustomer);
 router.post("/:phone/settle-dues", requirePermission("dues.manage"), customerController.settleCustomerDues);
 router.patch("/dues/:phone", requirePermission("dues.manage"), customerController.updateCustomerDues);
+// Delete-a-manual-dues-entry (Khata History timeline's own "+ Add"/"- Pay"
+// rows) - same dues.manage gate as the writes above, since removing one
+// of these directly changes what the customer owes exactly like adding
+// or settling one does.
+router.delete("/:phone/dues-history", requirePermission("dues.manage"), customerController.deleteDuesHistoryEntry);
 router.patch("/:id", canWriteCustomer, customerController.updateCustomer);
 
 module.exports = router;

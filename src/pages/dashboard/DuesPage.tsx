@@ -1,11 +1,24 @@
 
 import React, { useState, useEffect } from 'react';
-import { fetchCustomerLedger, createCustomer, updateCustomerDues, settleCustomerDues, sendWhatsappMessage, sendWhatsappDocument, fetchWhatsappStatus, fetchOrder } from '@/lib/pos-api';
-import { LedgerCustomer, LedgerPurchase, SavedOrder } from '@/lib/pos-types';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2 } from 'lucide-react';
+import {
+  fetchCustomerLedger,
+  createCustomer,
+  updateCustomerDues,
+  settleCustomerDues,
+  sendWhatsappMessage,
+  sendWhatsappDocument,
+  fetchWhatsappStatus,
+  fetchOrder,
+  cancelOrder,
+  cancelIngredientPurchase,
+  deleteDuesHistoryEntry,
+} from '@/lib/pos-api';
+import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry } from '@/lib/pos-types';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer } from 'lucide-react';
 import { useToast } from '@/lib/toast';
-import CancelOrderModal from '@/components/CancelOrderModal';
-import CancelPurchaseModal from '@/components/CancelPurchaseModal';
+import OrderDetailModal from '@/components/OrderDetailModal';
+import PurchaseDetailModal from '@/components/PurchaseDetailModal';
+import DuesHistoryDetailModal from '@/components/DuesHistoryDetailModal';
 
 // This page used to source its list from fetchAllCustomers(), which only
 // ever carries the OLD, manually-set lump-sum Customer.previousDues field -
@@ -452,7 +465,13 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
       orderId: undefined as string | undefined,
+      viewOrderId: undefined as string | undefined,
       purchaseId: undefined as string | undefined,
+      viewPurchase: undefined as LedgerPurchase | undefined,
+      // Manual "+ Add"/"- Pay" rows are the one entry type that isn't an
+      // Order or a Purchase - View/Print/Delete for these read straight
+      // off this entry itself, no extra fetch needed.
+      duesEntry: entry as DuesHistoryEntry | undefined,
     })),
     // Audit trail: a cancelled order is NOT excluded from this History
     // list anymore - it still counts toward totalOrderBalance/totalDue as
@@ -487,7 +506,13 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
           // that isn't already cancelled) vs. which can't (a manual dues
           // add/settle entry, or an already-cancelled order).
           orderId: !isCancelled ? (order.id as string | undefined) : undefined,
+          // View/Print stay available even on an already-cancelled order -
+          // seeing what was cancelled (and printing that record) is still
+          // useful, only Delete is order-status-gated.
+          viewOrderId: order.id as string | undefined,
           purchaseId: undefined as string | undefined,
+          viewPurchase: undefined as LedgerPurchase | undefined,
+          duesEntry: undefined as DuesHistoryEntry | undefined,
         };
       }),
     // Unified Khata: this contact's linked purchases (the shop buying FROM
@@ -511,53 +536,183 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
         tone: isCancelled ? 'text-slate-400 line-through' : purchase.remainingAmount > 0 ? 'text-blue-600' : 'text-slate-400',
         by: isCancelled ? purchase.cancelledBy : '',
         orderId: undefined as string | undefined,
+        viewOrderId: undefined as string | undefined,
         // Only a still-"received" (not yet cancelled) purchase carries a
         // purchaseId - lets the History row below know which entries can
         // offer the Cancel-Purchase action (see the orderId/purchaseId
         // convention this same object already uses for orders above).
         purchaseId: !isCancelled ? (purchase.id as string | undefined) : undefined,
+        // View/Print stay available even on a cancelled purchase - see the
+        // matching viewOrderId comment above for the same reasoning.
+        viewPurchase: purchase as LedgerPurchase | undefined,
+        duesEntry: undefined as DuesHistoryEntry | undefined,
       };
     }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  // Delete-order-from-Khata (feature 4): reuses the exact same guarded
-  // Cancel Order flow (shop's Cancel Order Key + POST /api/orders/:id/
-  // cancel, which restores stock via restoreStockForOrder) already used
-  // everywhere else in the app - no separate unguarded delete path. The
-  // ledger's own order rows are lean (LedgerOrder - no items array), so
-  // the full order is fetched fresh right before opening the modal, since
-  // CancelOrderModal needs the real items to print the kitchen "order
-  // cancelled" ticket.
-  const [orderPendingCancel, setOrderPendingCancel] = useState<SavedOrder | null>(null);
-  const [loadingOrderId, setLoadingOrderId] = useState<string | null>(null);
+  // View/Print/Delete for every History row (feature 4) - orders,
+  // purchases and manual dues entries all get the same three actions, in
+  // the same instant-action-plus-toast style RecordPage.tsx's own Delete
+  // now uses (the shop owner asked for the Cancel Order Key AND the
+  // reason-prompt popup both dropped in favour of a single click + a
+  // toast - see this file's own history for that request). `busyKeys`
+  // guards every action button against a double-click the same way
+  // RecordPage's `deletingOrderIds` does.
+  const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
+  const [viewPurchase, setViewPurchase] = useState<LedgerPurchase | null>(null);
+  const [viewDuesEntry, setViewDuesEntry] = useState<DuesHistoryEntry | null>(null);
+  const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set());
 
-  async function handleDeleteOrderClick(orderId: string) {
-    setLoadingOrderId(orderId);
+  function setBusy(key: string, busy: boolean) {
+    setBusyKeys((previous) => {
+      const next = new Set(previous);
+      if (busy) next.add(key); else next.delete(key);
+      return next;
+    });
+  }
+
+  async function handleViewOrder(orderId: string) {
+    setBusy(`view-order-${orderId}`, true);
     try {
       const fullOrder = await fetchOrder(orderId);
-      setOrderPendingCancel(fullOrder);
+      setViewOrder(fullOrder);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not load this order.');
     } finally {
-      setLoadingOrderId(null);
+      setBusy(`view-order-${orderId}`, false);
     }
   }
 
-  // Delete-a-purchase-from-Khata: the same guarded flow as
-  // handleDeleteOrderClick above, just for a linked IngredientPurchase
-  // instead of an Order - see CancelPurchaseModal.tsx. Unlike an order,
-  // the ledger already carries every field the modal needs (id,
-  // purchaseOrderNumber, quantity/unit/ingredientName for its confirmation
-  // copy) - no extra fetch required before opening it.
-  const [purchasePendingCancel, setPurchasePendingCancel] = useState<LedgerPurchase | null>(null);
+  // Same hidden-iframe auto-print page RecordPage.tsx's own
+  // printCustomerReceipt uses for its Print button - this page has no
+  // counter-printer/Electron context of its own, so it always goes
+  // through that page rather than trying to duplicate the direct-IPC path.
+  function handlePrintOrder(orderId: string) {
+    setPrintReadyUrl(`/dashboard/sales/print/${orderId}?auto=true&type=cashier`);
+  }
 
-  function handleDeletePurchaseClick(purchaseId: string) {
+  // Direct-cancel-no-popup, same as RecordPage.tsx's own handleDeleteOrder
+  // - fetches the order fresh (the ledger's own row is lean, no items),
+  // cancels it (restores stock, adjusts dues server-side), then reloads
+  // the whole ledger so this card's balance/History reflect it at once.
+  async function handleDeleteOrderClick(orderId: string) {
+    const key = `order-${orderId}`;
+    if (busyKeys.has(key)) return;
+    setBusy(key, true);
+    try {
+      await cancelOrder(orderId, {});
+      toast.success('Order cancelled.');
+      onOrderCancelled();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not cancel this order.');
+    } finally {
+      setBusy(key, false);
+    }
+  }
+
+  function handleViewPurchase(purchaseId: string) {
     const purchase = (customer.purchases || []).find((p) => p.id === purchaseId);
     if (!purchase) {
       toast.error('Could not find this purchase.');
       return;
     }
-    setPurchasePendingCancel(purchase);
+    setViewPurchase(purchase);
+  }
+
+  // No print route/receipt exists for a purchase anywhere in the app yet,
+  // so this builds a small printable slip on the fly (same info as
+  // PurchaseDetailModal) and hands it straight to the browser's own print
+  // dialog - no new backend page needed for what's just a one-off record.
+  function handlePrintPurchase(purchase: LedgerPurchase) {
+    const printWindow = window.open('', '_blank', 'width=420,height=600');
+    if (!printWindow) {
+      toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      return;
+    }
+    const purchaseDate = new Date(purchase.purchaseDate).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    printWindow.document.write(`<!DOCTYPE html><html><head><title>${purchase.purchaseOrderNumber}</title>
+      <style>body{font-family:sans-serif;padding:24px;color:#111}h1{font-size:18px;margin:0 0 4px}
+      p{margin:2px 0;font-size:13px}table{width:100%;margin-top:12px;border-collapse:collapse}
+      td{padding:4px 0;font-size:13px}td:last-child{text-align:right;font-weight:bold}
+      .total{border-top:1px solid #ccc;margin-top:8px;padding-top:8px;font-size:15px}</style>
+      </head><body>
+      <h1>${purchase.purchaseOrderNumber}</h1>
+      <p>${purchaseDate}</p>
+      <p>${purchase.status === 'cancelled' ? 'CANCELLED PURCHASE' : ''}</p>
+      <table>
+        <tr><td>Ingredient</td><td>${purchase.ingredientName}</td></tr>
+        <tr><td>Quantity</td><td>${purchase.quantity} ${purchase.unit}</td></tr>
+        <tr><td>Paid</td><td>Rs ${purchase.paidAmount ?? 0}</td></tr>
+        <tr><td>Remaining</td><td>Rs ${purchase.remainingAmount ?? 0}</td></tr>
+        <tr class="total"><td>Total</td><td>Rs ${purchase.totalAmount}</td></tr>
+      </table>
+      </body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  }
+
+  // Same instant direct-cancel as handleDeleteOrderClick above, just
+  // against IngredientPurchase (reverses this batch's stock effect if it
+  // had been received, flips status to cancelled - see
+  // ingredientPurchaseController.cancelPurchase).
+  async function handleDeletePurchaseClick(purchaseId: string) {
+    const key = `purchase-${purchaseId}`;
+    if (busyKeys.has(key)) return;
+    setBusy(key, true);
+    try {
+      await cancelIngredientPurchase(purchaseId, {});
+      toast.success('Purchase cancelled.');
+      onOrderCancelled();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not cancel this purchase.');
+    } finally {
+      setBusy(key, false);
+    }
+  }
+
+  function handlePrintDuesEntry(entry: DuesHistoryEntry) {
+    const printWindow = window.open('', '_blank', 'width=380,height=500');
+    if (!printWindow) {
+      toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      return;
+    }
+    const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    printWindow.document.write(`<!DOCTYPE html><html><head><title>Dues Entry</title>
+      <style>body{font-family:sans-serif;padding:24px;color:#111}h1{font-size:18px;margin:0 0 4px}
+      p{margin:2px 0;font-size:13px}</style>
+      </head><body>
+      <h1>${customer.name}</h1>
+      <p>${date}</p>
+      <p>${entry.type === 'add' ? 'Dues Added' : 'Dues Paid'}: Rs ${entry.amount}</p>
+      <p>Balance After: Rs ${entry.balanceAfter}</p>
+      <p>Note: ${entry.note || 'No note'}</p>
+      <p>By: ${entry.createdBy || '—'}</p>
+      </body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  }
+
+  // Delete-a-manual-dues-entry: the one History row type that never had
+  // ANY delete path before - see backend's own
+  // customerController.deleteDuesHistoryEntry comment for exactly how it
+  // reverses this entry's effect (undoing the previousDues move, and any
+  // order payment it made) before removing it.
+  async function handleDeleteDuesEntry(entry: DuesHistoryEntry) {
+    const key = `dues-${entry.createdAt}-${entry.amount}`;
+    if (busyKeys.has(key)) return;
+    setBusy(key, true);
+    try {
+      await deleteDuesHistoryEntry(customer.phone, { createdAt: entry.createdAt, amount: entry.amount, type: entry.type });
+      toast.success('Dues entry deleted.');
+      onOrderCancelled();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete this dues entry.');
+    } finally {
+      setBusy(key, false);
+    }
   }
 
   // Shared by both the Download and Send buttons below - one
@@ -774,29 +929,105 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
                     </div>
                     <p className="mt-0.5 text-slate-500 font-semibold">{entry.detail}</p>
                     {entry.by ? <p className="mt-0.5 text-slate-400">by {entry.by}</p> : null}
-                    {entry.orderId ? (
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteOrderClick(entry.orderId as string)}
-                        disabled={loadingOrderId === entry.orderId}
-                        className="mt-1 flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
-                        title="Cancel this order (requires the shop's Cancel Order Key) and restore its stock"
-                      >
-                        <Trash2 size={11} />
-                        {loadingOrderId === entry.orderId ? 'Loading...' : 'Delete'}
-                      </button>
-                    ) : null}
-                    {entry.purchaseId ? (
-                      <button
-                        type="button"
-                        onClick={() => handleDeletePurchaseClick(entry.purchaseId as string)}
-                        className="mt-1 flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
-                        title="Cancel this purchase (requires the shop's Cancel Order Key) and reverse its stock"
-                      >
-                        <Trash2 size={11} />
-                        Delete
-                      </button>
-                    ) : null}
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      {entry.viewOrderId ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleViewOrder(entry.viewOrderId as string)}
+                          disabled={busyKeys.has(`view-order-${entry.viewOrderId}`)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700 disabled:opacity-50"
+                          title="View this order"
+                        >
+                          <Eye size={11} /> {busyKeys.has(`view-order-${entry.viewOrderId}`) ? 'Loading...' : 'View'}
+                        </button>
+                      ) : null}
+                      {entry.viewOrderId ? (
+                        <button
+                          type="button"
+                          onClick={() => handlePrintOrder(entry.viewOrderId as string)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
+                          title="Print this order's receipt"
+                        >
+                          <Printer size={11} /> Print
+                        </button>
+                      ) : null}
+                      {entry.orderId ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteOrderClick(entry.orderId as string)}
+                          disabled={busyKeys.has(`order-${entry.orderId}`)}
+                          className="flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
+                          title="Cancel this order and restore its stock"
+                        >
+                          <Trash2 size={11} />
+                          {busyKeys.has(`order-${entry.orderId}`) ? 'Loading...' : 'Delete'}
+                        </button>
+                      ) : null}
+                      {entry.viewPurchase ? (
+                        <button
+                          type="button"
+                          onClick={() => handleViewPurchase((entry.viewPurchase as LedgerPurchase).id)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
+                          title="View this purchase"
+                        >
+                          <Eye size={11} /> View
+                        </button>
+                      ) : null}
+                      {entry.viewPurchase ? (
+                        <button
+                          type="button"
+                          onClick={() => handlePrintPurchase(entry.viewPurchase as LedgerPurchase)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
+                          title="Print this purchase"
+                        >
+                          <Printer size={11} /> Print
+                        </button>
+                      ) : null}
+                      {entry.purchaseId ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeletePurchaseClick(entry.purchaseId as string)}
+                          disabled={busyKeys.has(`purchase-${entry.purchaseId}`)}
+                          className="flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
+                          title="Cancel this purchase and reverse its stock"
+                        >
+                          <Trash2 size={11} />
+                          {busyKeys.has(`purchase-${entry.purchaseId}`) ? 'Loading...' : 'Delete'}
+                        </button>
+                      ) : null}
+                      {entry.duesEntry ? (
+                        <button
+                          type="button"
+                          onClick={() => setViewDuesEntry(entry.duesEntry as DuesHistoryEntry)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
+                          title="View this dues entry"
+                        >
+                          <Eye size={11} /> View
+                        </button>
+                      ) : null}
+                      {entry.duesEntry ? (
+                        <button
+                          type="button"
+                          onClick={() => handlePrintDuesEntry(entry.duesEntry as DuesHistoryEntry)}
+                          className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
+                          title="Print this dues entry"
+                        >
+                          <Printer size={11} /> Print
+                        </button>
+                      ) : null}
+                      {entry.duesEntry ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteDuesEntry(entry.duesEntry as DuesHistoryEntry)}
+                          disabled={busyKeys.has(`dues-${entry.duesEntry.createdAt}-${entry.duesEntry.amount}`)}
+                          className="flex items-center gap-1 text-[10px] font-black text-rose-500 hover:text-rose-700 disabled:opacity-50"
+                          title="Delete this dues entry"
+                        >
+                          <Trash2 size={11} />
+                          {busyKeys.has(`dues-${entry.duesEntry.createdAt}-${entry.duesEntry.amount}`) ? 'Loading...' : 'Delete'}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -805,32 +1036,10 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
         ) : null}
       </div>
 
-      {orderPendingCancel ? (
-        <CancelOrderModal
-          order={orderPendingCancel}
-          onClose={() => setOrderPendingCancel(null)}
-          onCancelled={() => {
-            setOrderPendingCancel(null);
-            // Refresh the whole ledger (parent's loadCustomers) so this
-            // card's balance, order list and History all reflect the
-            // stock-reversed, now-cancelled order immediately.
-            onOrderCancelled();
-          }}
-        />
-      ) : null}
-      {purchasePendingCancel ? (
-        <CancelPurchaseModal
-          purchase={purchasePendingCancel}
-          onClose={() => setPurchasePendingCancel(null)}
-          onCancelled={() => {
-            setPurchasePendingCancel(null);
-            // Same reload as a cancelled order above - the ledger's
-            // totalPurchaseBalance/netBalance and this card's History both
-            // need the freshly-cancelled purchase's status reflected.
-            onOrderCancelled();
-          }}
-        />
-      ) : null}
+      {viewOrder ? <OrderDetailModal order={viewOrder} onClose={() => setViewOrder(null)} /> : null}
+      {viewPurchase ? <PurchaseDetailModal purchase={viewPurchase} onClose={() => setViewPurchase(null)} /> : null}
+      {viewDuesEntry ? <DuesHistoryDetailModal customerName={customer.name} entry={viewDuesEntry} onClose={() => setViewDuesEntry(null)} /> : null}
+      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" onLoad={() => window.setTimeout(() => setPrintReadyUrl(null), 4000)} /> : null}
     </div>
   );
 }

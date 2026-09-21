@@ -525,3 +525,79 @@ exports.settleCustomerDues = async (req, res) => {
     res.status(500).json({ message: "Failed to settle dues", detail: error.message });
   }
 };
+
+// DELETE /api/customers/:phone/dues-history  body: { createdAt, amount, type }
+// Deletes ONE manual "+ Add Dues" / "- Pay Dues" entry from Customer Dues
+// page's History timeline (updateCustomerDues/settleCustomerDues above are
+// the only two places that ever push one). duesHistorySchema deliberately
+// has no _id (see Customer.js), so the entry to remove is identified by
+// its own (createdAt, amount, type) triple instead - for one shop's
+// single-cashier-at-a-time usage this is unambiguous in practice, and it
+// is still verified against the live document (not trusted blindly from
+// the client) before anything is touched.
+//
+// Deleting the entry must undo exactly what creating it did:
+//  - a plain "add"/"settle" from updateCustomerDues only ever moved the
+//    manual previousDues lump sum, so undoing it is just the inverse move.
+//  - a "settle" from settleCustomerDues can have paid down real Orders
+//    too (recorded in its own note as "Applied to orders: #12 (Rs 300)") -
+//    those specific orders' paidAmount/remainingAmount/status are reversed
+//    the same way a payment applied them, and only the leftover portion
+//    (if any) is put back onto previousDues. An order that was separately
+//    cancelled since is left alone rather than reopened.
+exports.deleteDuesHistoryEntry = async (req, res) => {
+  try {
+    const { phone } = req.params;
+    const { createdAt, amount, type } = req.body || {};
+    const targetAmount = Number(amount);
+    if (!createdAt || !Number.isFinite(targetAmount) || !["add", "settle"].includes(type)) {
+      return res.status(400).json({ message: "createdAt, amount and type are required" });
+    }
+
+    const customer = await Customer.findOne({ phone, ...shopScope(req) });
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    const targetTime = new Date(createdAt).getTime();
+    const index = customer.duesHistory.findIndex((entry) => {
+      const entryTime = entry.createdAt ? new Date(entry.createdAt).getTime() : NaN;
+      return entryTime === targetTime && Number(entry.amount) === targetAmount && entry.type === type;
+    });
+    if (index === -1) {
+      return res.status(404).json({ message: "This dues history entry could not be found - it may have already been removed." });
+    }
+
+    const entry = customer.duesHistory[index];
+
+    // Reverse any order payments this "settle" entry's note says it made.
+    let orderPortion = 0;
+    const orderRefs = [...String(entry.note || "").matchAll(/#(\S+)\s*\(Rs\s*([\d.]+)\)/g)];
+    for (const match of orderRefs) {
+      const dailyOrderNumber = Number(match[1]);
+      const appliedAmount = Number(match[2]);
+      if (!Number.isFinite(dailyOrderNumber) || !Number.isFinite(appliedAmount) || appliedAmount <= 0) continue;
+      const order = await Order.findOne({ dailyOrderNumber, "customer.phone": phone, ...shopScope(req) });
+      if (!order || order.status === "cancelled") continue;
+      const revert = Math.min(appliedAmount, Number(order.paidAmount || 0));
+      order.paidAmount = Number(order.paidAmount || 0) - revert;
+      order.remainingAmount = Number(order.remainingAmount || 0) + revert;
+      if (order.status === "completed" && order.remainingAmount > 0) order.status = "pending";
+      order.version = Number(order.version || 0) + 1;
+      await order.save();
+      orderPortion += revert;
+    }
+
+    const previousDuesPortion = Number(entry.amount) - orderPortion;
+    let nextPreviousDues = Number(customer.previousDues || 0);
+    nextPreviousDues = entry.type === "add" ? Math.max(0, nextPreviousDues - previousDuesPortion) : nextPreviousDues + previousDuesPortion;
+
+    customer.previousDues = nextPreviousDues;
+    customer.duesHistory.splice(index, 1);
+    await customer.save();
+
+    res.json({ success: true, previousDues: nextPreviousDues });
+  } catch (error) {
+    res.status(500).json({ message: "Could not delete this dues history entry.", detail: error.message });
+  }
+};

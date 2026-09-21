@@ -162,6 +162,21 @@ export async function updateCustomerDues(phone: string, previousDues: number, no
   }
 }
 
+// Deletes one manual "+ Add Dues"/"- Pay Dues" row from a customer's Khata
+// History timeline (DuesPage.tsx) - identifies the entry by its own
+// createdAt/amount/type (duesHistory entries have no _id - see
+// backend/models/Customer.js) and reverses its effect on previousDues (and
+// any order it had paid down), same as backend's own comment on
+// customerController.deleteDuesHistoryEntry.
+export async function deleteDuesHistoryEntry(phone: string, entry: { createdAt: string; amount: number; type: 'add' | 'settle' }) {
+  try {
+    const response = await api.delete<{ success: boolean; previousDues: number }>(`/customers/${phone}/dues-history`, { data: entry });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
 // A real payment collected against everything a customer owes - the
 // manual previousDues lump-sum AND their unpaid orders, oldest-first (same
 // distribution backend/controllers/orderController.js's completeAndSettle
