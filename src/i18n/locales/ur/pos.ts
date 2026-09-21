@@ -34,7 +34,7 @@ export const pos = {
   customerNameLabel: "کسٹمر کا نام",
   customerNamePlaceholder: "کسٹمر کا نام *",
   searchingCustomers: "کسٹمرز تلاش کیے جا رہے ہیں...",
-  dueAmount: "بقایا PKR {{amount}}",
+  dueAmount: "-PKR {{amount}} بقایا",
   addNewCustomer: "نیا کسٹمر شامل کریں",
   usePhone: "فون استعمال کریں: {{phone}}",
   useName: "نام استعمال کریں: {{name}}",

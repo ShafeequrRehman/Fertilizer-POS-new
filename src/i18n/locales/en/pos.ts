@@ -38,7 +38,7 @@ export const pos = {
   customerNameLabel: "Customer Name",
   customerNamePlaceholder: "Customer name *",
   searchingCustomers: "Searching customers...",
-  dueAmount: "Due PKR {{amount}}",
+  dueAmount: "-PKR {{amount}} Due",
   addNewCustomer: "Add New Customer",
   usePhone: "Use phone: {{phone}}",
   useName: "Use name: {{name}}",

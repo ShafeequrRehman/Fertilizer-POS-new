@@ -472,6 +472,11 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
       // Order or a Purchase - View/Print/Delete for these read straight
       // off this entry itself, no extra fetch needed.
       duesEntry: entry as DuesHistoryEntry | undefined,
+      // Only order/purchase rows carry raw amounts (below) - the Dues
+      // Statement PDF's Pay/Add/Balance columns read off these, not the
+      // free-text `detail` string, so they stay numerically exact.
+      orderAmounts: undefined as { total: number; paid: number; remaining: number } | undefined,
+      purchaseAmounts: undefined as { total: number; paid: number; remaining: number } | undefined,
     })),
     // Audit trail: a cancelled order is NOT excluded from this History
     // list anymore - it still counts toward totalOrderBalance/totalDue as
@@ -513,6 +518,11 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
           purchaseId: undefined as string | undefined,
           viewPurchase: undefined as LedgerPurchase | undefined,
           duesEntry: undefined as DuesHistoryEntry | undefined,
+          // A cancelled order no longer counts toward anything owed (see
+          // getCustomerLedger's own `billable` filter) so it contributes
+          // nothing to the Statement's running Pay/Add/Balance either.
+          orderAmounts: !isCancelled ? { total: order.total, paid: order.paidAmount, remaining: order.remainingAmount } : undefined,
+          purchaseAmounts: undefined as { total: number; paid: number; remaining: number } | undefined,
         };
       }),
     // Unified Khata: this contact's linked purchases (the shop buying FROM
@@ -546,6 +556,8 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
         // matching viewOrderId comment above for the same reasoning.
         viewPurchase: purchase as LedgerPurchase | undefined,
         duesEntry: undefined as DuesHistoryEntry | undefined,
+        orderAmounts: undefined as { total: number; paid: number; remaining: number } | undefined,
+        purchaseAmounts: !isCancelled ? { total: purchase.totalAmount, paid: purchase.paidAmount, remaining: purchase.remainingAmount } : undefined,
       };
     }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -723,8 +735,42 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
   // imported the same way LedgerPage.tsx's own downloadLedgerPdf does -
   // react-pdf is a sizeable chunk of code no card needs to pull in until
   // one of these buttons is actually pressed.
+  // Running Pay/Add/Balance columns for the Statement below - replayed
+  // oldest-first (historyEntries itself is newest-first, for the on-screen
+  // list) so each row's Balance is the running total right after it, in
+  // the same minus-if-they-owe-you/plus-if-you-owe-them convention as this
+  // card's own headline balance above. Approximated from each row's
+  // CURRENT total/paid/remaining (there's no separate ledger of every
+  // partial payment's own date), which still reconciles exactly to
+  // totalDue/totalPurchaseBalance by the most recent row.
+  function computeRunningBalances() {
+    const chronological = [...historyEntries].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const balanceByKey = new Map<string, number>();
+    let running = 0;
+    for (const entry of chronological) {
+      if (entry.duesEntry) {
+        // "add" = customer's due to the shop went up (bad for them, so
+        // this display balance moves down); "settle" is the reverse.
+        running += entry.duesEntry.type === 'add' ? -entry.duesEntry.amount : entry.duesEntry.amount;
+      } else if (entry.orderAmounts) {
+        running -= entry.orderAmounts.remaining;
+      } else if (entry.purchaseAmounts) {
+        running += entry.purchaseAmounts.remaining;
+      }
+      balanceByKey.set(entry.key, running);
+    }
+    return balanceByKey;
+  }
+
+  function formatBalanceCell(balance: number) {
+    if (balance > 0) return `+Rs ${balance}`;
+    if (balance < 0) return `-Rs ${Math.abs(balance)}`;
+    return 'Rs 0';
+  }
+
   async function buildDuesStatementDoc() {
     const { ReportPdfDocument } = await import('@/lib/pdf-export');
+    const balanceByKey = computeRunningBalances();
     return (
       <ReportPdfDocument
         title="Customer Dues Statement"
@@ -739,16 +785,41 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
             title: 'Dues History',
             columns: [
               { label: 'Date', width: 1 },
-              { label: 'Entry', width: 2 },
-              { label: 'Detail', width: 2.5 },
-              { label: 'By', width: 1 },
+              { label: 'Entry', width: 1.7 },
+              { label: 'Detail', width: 2 },
+              { label: 'By', width: 0.8 },
+              { label: 'Pay', width: 0.9 },
+              { label: 'Add', width: 0.9 },
+              { label: 'Balance', width: 1.1 },
             ],
-            rows: historyEntries.map((entry) => [
-              new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-              entry.label,
-              entry.detail,
-              entry.by || '—',
-            ]),
+            rows: historyEntries.map((entry) => {
+              // Pay = money that reduced what the customer owes (a "- Pay
+              // Dues" entry, or what's already been paid on an order).
+              // Add = money that increased it (a "+ Add Dues" entry, or a
+              // new sale's own total). A purchase FROM this contact isn't
+              // one of "their" pay/add moves - its own Detail column
+              // already spells out what was paid/still owed on it, and
+              // its effect still lands in the running Balance column.
+              let payCell = '—';
+              let addCell = '—';
+              if (entry.duesEntry) {
+                if (entry.duesEntry.type === 'add') addCell = `Rs ${entry.duesEntry.amount}`;
+                else payCell = `Rs ${entry.duesEntry.amount}`;
+              } else if (entry.orderAmounts) {
+                addCell = `Rs ${entry.orderAmounts.total}`;
+                if (entry.orderAmounts.paid > 0) payCell = `Rs ${entry.orderAmounts.paid}`;
+              }
+              const balance = balanceByKey.get(entry.key) ?? 0;
+              return [
+                new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+                entry.label,
+                entry.detail,
+                entry.by || '—',
+                payCell,
+                addCell,
+                formatBalanceCell(balance),
+              ];
+            }),
             emptyMessage: 'No dues activity recorded for this customer yet.',
           },
         ]}
@@ -795,8 +866,15 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
       <div className="flex justify-between items-end border-y border-slate-100 py-3">
         <div>
           <p className="text-xs font-black uppercase text-slate-400 tracking-wider">Net Outstanding Balance</p>
-          <p className={`text-2xl font-black ${netBalance > 0 ? 'text-green-600' : netBalance < 0 ? 'text-red-600' : 'text-slate-800'}`}>
-            {netBalance > 0 ? `Owes you ₨${netBalance}` : netBalance < 0 ? `You owe them ₨${Math.abs(netBalance)}` : 'Settled'}
+          {/* Khata convention the shop owner asked for: money still to be
+              COLLECTED from this contact is shown as a minus figure in red
+              (unka humpar udhaar), money the shop itself owes them is a
+              plus figure in green - the opposite of netBalance's own raw
+              sign (see LedgerCustomer.netBalance's own comment: positive
+              netBalance = they owe the shop), so this deliberately negates
+              it purely for display. */}
+          <p className={`text-2xl font-black ${netBalance > 0 ? 'text-red-600' : netBalance < 0 ? 'text-green-600' : 'text-slate-800'}`}>
+            {netBalance > 0 ? `-₨${netBalance} (they owe you)` : netBalance < 0 ? `+₨${Math.abs(netBalance)} (you owe them)` : 'Settled'}
           </p>
           {fromOrders > 0 || fromLumpSum > 0 ? (
             <p className="text-[11px] font-bold text-slate-400 mt-1">

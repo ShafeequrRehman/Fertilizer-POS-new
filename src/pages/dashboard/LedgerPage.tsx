@@ -535,7 +535,7 @@ function LedgerRow({
         <span className="text-sm font-bold text-gray-600">{formatMoney(customer.totalBilled)}</span>
         <span className="text-sm font-bold text-emerald-600">{formatMoney(customer.totalPaid)}</span>
         <span className={`text-sm font-black ${hasDue ? 'text-rose-600' : 'text-gray-400'}`}>
-          {formatMoney(customer.totalDue)}
+          {hasDue ? `-${formatMoney(customer.totalDue)}` : formatMoney(customer.totalDue)}
         </span>
         <span className="text-gray-400">{expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}</span>
       </button>
