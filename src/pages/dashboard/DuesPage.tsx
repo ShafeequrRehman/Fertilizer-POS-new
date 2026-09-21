@@ -874,7 +874,7 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
               netBalance = they owe the shop), so this deliberately negates
               it purely for display. */}
           <p className={`text-2xl font-black ${netBalance > 0 ? 'text-red-600' : netBalance < 0 ? 'text-green-600' : 'text-slate-800'}`}>
-            {netBalance > 0 ? `-₨${netBalance} (they owe you)` : netBalance < 0 ? `+₨${Math.abs(netBalance)} (you owe them)` : 'Settled'}
+            {netBalance > 0 ? `-₨${netBalance}` : netBalance < 0 ? `+₨${Math.abs(netBalance)}` : 'Settled'}
           </p>
           {fromOrders > 0 || fromLumpSum > 0 ? (
             <p className="text-[11px] font-bold text-slate-400 mt-1">
