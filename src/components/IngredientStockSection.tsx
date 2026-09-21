@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Boxes, Plus, Edit, Trash2, Search, PackagePlus, ShoppingCart, AlertTriangle, X, Building2, Download, FileSpreadsheet, MessageCircle, History, Clock, CheckCircle2 } from "lucide-react";
 import {
   fetchIngredients,
@@ -14,8 +14,9 @@ import {
   fetchIngredientPurchases,
   fetchProducts,
   sendWhatsappDocument,
+  fetchCustomerSearch,
 } from "@/lib/pos-api";
-import { Ingredient, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product, Recipe, Supplier } from "@/lib/pos-types";
+import { Customer, Ingredient, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product, Recipe, Supplier } from "@/lib/pos-types";
 import { getAuthShop } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { ReportPdfDocument, downloadPdfDocument, pdfDocumentToBase64 } from "@/lib/pdf-export";
@@ -190,6 +191,23 @@ export function IngredientStockSection({
   // company's credit ledger via IngredientPurchase.remainingAmount.
   const [purchasePaid, setPurchasePaid] = useState("");
 
+  // Unified Khata / Customer-Supplier Netting - "Link to Khata contact"
+  // search box, alongside (not replacing) the plain Supplier <select>
+  // above. Mirrors PurchasePage.tsx's New Purchase Order modal (see that
+  // file's own comment on orderContactQuery/pickOrderContact): fully
+  // optional, same debounced-search-as-you-type UX. Picking a contact
+  // auto-fills purchaseCompany from the contact's name (so the existing
+  // display/status-message logic that already reads purchaseCompany keeps
+  // working untouched) and clears purchaseSupplierId, since a purchase is
+  // either from a registered Supplier or from a linked Khata contact,
+  // never both.
+  const [purchaseCustomerId, setPurchaseCustomerId] = useState<string | null>(null);
+  const [purchaseLinkedCustomer, setPurchaseLinkedCustomer] = useState<Customer | null>(null);
+  const [purchaseContactQuery, setPurchaseContactQuery] = useState("");
+  const [purchaseContactResults, setPurchaseContactResults] = useState<Customer[]>([]);
+  const [purchaseContactSearching, setPurchaseContactSearching] = useState(false);
+  const purchaseContactSearchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function resetPurchaseForm() {
     setPurchasingId(null);
     setPurchaseSupplierId("");
@@ -198,6 +216,53 @@ export function IngredientStockSection({
     setPurchaseQty("");
     setPurchaseRate("");
     setPurchasePaid("");
+    setPurchaseCustomerId(null);
+    setPurchaseLinkedCustomer(null);
+    setPurchaseContactQuery("");
+    setPurchaseContactResults([]);
+  }
+
+  // Debounced name search against the same GET /api/customers/search
+  // endpoint PurchasePage.tsx's own Khata-contact picker uses - min-length-2
+  // guard mirrors customerController.searchCustomers' own.
+  function searchPurchaseContacts(query: string) {
+    setPurchaseContactQuery(query);
+    if (purchaseContactSearchTimeoutRef.current) clearTimeout(purchaseContactSearchTimeoutRef.current);
+    if (query.trim().length < 2) {
+      setPurchaseContactResults([]);
+      setPurchaseContactSearching(false);
+      return;
+    }
+    setPurchaseContactSearching(true);
+    purchaseContactSearchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const result = await fetchCustomerSearch(query, 'name');
+        setPurchaseContactResults(result || []);
+      } catch {
+        setPurchaseContactResults([]);
+      } finally {
+        setPurchaseContactSearching(false);
+      }
+    }, 250);
+  }
+
+  function pickPurchaseContact(customer: Customer) {
+    setPurchaseLinkedCustomer(customer);
+    setPurchaseCustomerId(customer.id);
+    setPurchaseCompany(customer.name);
+    setPurchaseContactQuery("");
+    setPurchaseContactResults([]);
+    // A linked contact is who this purchase is really with - clear any
+    // separately-picked plain Supplier so the two can't silently disagree
+    // about which company name gets sent (same mutual-exclusivity as
+    // PurchasePage.tsx's pickOrderContact).
+    setPurchaseSupplierId("");
+  }
+
+  function clearPurchaseContact() {
+    setPurchaseLinkedCustomer(null);
+    setPurchaseCustomerId(null);
+    setPurchaseCompany("");
   }
 
   useEffect(() => {
@@ -447,6 +512,7 @@ export function IngredientStockSection({
         companyName: purchaseCompany.trim(),
         productDetails: purchaseProductDetails.trim(),
         supplierId: purchaseSupplierId || null,
+        customerId: purchaseCustomerId || null,
       });
       if (result) {
         setIngredients((prev) => prev.map((i) => (i.id === ingredient.id ? result.ingredient : i)));
@@ -1442,6 +1508,52 @@ export function IngredientStockSection({
                           className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
                         />
                       </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Or link to an existing Khata contact (optional)</label>
+                      {purchaseLinkedCustomer ? (
+                        <div className="flex items-center justify-between rounded-2xl bg-indigo-50 border border-indigo-200 px-4 py-2.5">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-black text-indigo-900">{purchaseLinkedCustomer.name}</p>
+                            <p className="truncate text-[11px] font-bold text-indigo-500">{purchaseLinkedCustomer.phone}</p>
+                          </div>
+                          <button type="button" onClick={clearPurchaseContact} className="shrink-0 rounded-full p-1.5 text-indigo-400 hover:bg-indigo-100 hover:text-indigo-700">
+                            <X size={16} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="relative">
+                          <input
+                            value={purchaseContactQuery}
+                            onChange={(e) => searchPurchaseContacts(e.target.value)}
+                            placeholder="Search a customer by name..."
+                            className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+                          />
+                          {purchaseContactQuery.trim().length >= 2 ? (
+                            <div className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                              {purchaseContactSearching ? (
+                                <p className="px-3 py-2 text-xs font-bold text-slate-400">Searching...</p>
+                              ) : purchaseContactResults.length === 0 ? (
+                                <p className="px-3 py-2 text-xs font-bold text-slate-400">No matching customers.</p>
+                              ) : (
+                                purchaseContactResults.map((customer) => (
+                                  <button
+                                    key={customer.id}
+                                    type="button"
+                                    onClick={() => pickPurchaseContact(customer)}
+                                    className="block w-full px-3 py-2 text-left text-xs font-bold text-slate-700 hover:bg-indigo-50"
+                                  >
+                                    {customer.name} <span className="text-slate-400">· {customer.phone}</span>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                      <p className="text-[10px] font-bold text-slate-400">
+                        Links this purchase to a Khata contact's account so their sales and purchase dues net into one balance on the Unified Khata page. Leave this empty for a plain supplier who isn't a shop customer.
+                      </p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div className="space-y-1.5">
