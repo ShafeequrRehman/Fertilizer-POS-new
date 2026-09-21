@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
 const ShopSession = require("../models/ShopSession");
@@ -1627,14 +1626,21 @@ exports.importOfflineOrderUpdates = async (req, res) => {
 // Shared by the online POST /orders/:id/cancel handler below and the
 // offline bulk replay path (exports.importOfflineCancellations) - the
 // exact same "one real implementation, never a second copy that could
-// quietly drift" reasoning as applyOrderPatch above. `key` is checked
-// against the shop's cancelOrderKeyHash (set by the Super Admin - see
-// superAdminController.exports.createShop / resetCancelOrderKey) with
-// bcrypt.compare, exactly like a login password check. Never hardcoded,
-// never compared as plaintext, and scoped to this shop only. Throws an
-// Error with `.status` (and optional `.reason`) attached, same convention
-// as applyOrderPatch, so callers can distinguish e.g. "already cancelled"
+// quietly drift" reasoning as applyOrderPatch above. Throws an Error with
+// `.status` (and optional `.reason`) attached, same convention as
+// applyOrderPatch, so callers can distinguish e.g. "already cancelled"
 // from a genuine failure.
+// `key` is accepted but no longer required/verified - the shop owner
+// explicitly asked to drop the Cancel Order Key step from this flow so
+// staff can just delete/cancel an order directly. The real access control
+// is now exactly the same "defense in depth" permission check the routes
+// already apply on top of this (requirePermission("sales.delete") on both
+// POST /:id/cancel and, as of this change, POST /import-offline-
+// cancellations too - see orderRoutes.js) - a Cashier/role without
+// sales.delete still can't reach this at all. Left as a parameter (rather
+// than removed everywhere) so existing callers (CancelOrderModal.tsx, the
+// offline sync queue, Super Admin's shop.cancelOrderKeyHash setup) don't
+// all need to change in lockstep; it's simply ignored now.
 async function cancelOrderCore(orderId, key, reason, req) {
   if (!mongoose.Types.ObjectId.isValid(orderId)) {
     throw Object.assign(new Error("Order not found"), { status: 404 });
@@ -1646,22 +1652,6 @@ async function cancelOrderCore(orderId, key, reason, req) {
   }
   if (order.status === "cancelled") {
     throw Object.assign(new Error("This order is already cancelled."), { status: 400, reason: "already_cancelled" });
-  }
-  if (!key) {
-    throw Object.assign(new Error("The shop's Cancel Order Key is required."), { status: 400 });
-  }
-
-  const shop = await Shop.findById(req.user.shopId).select("cancelOrderKeyHash").lean();
-  if (!shop || !shop.cancelOrderKeyHash) {
-    throw Object.assign(
-      new Error("No Cancel Order Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one."),
-      { status: 409 }
-    );
-  }
-
-  const matches = await bcrypt.compare(String(key), shop.cancelOrderKeyHash);
-  if (!matches) {
-    throw Object.assign(new Error("Incorrect Cancel Order Key."), { status: 401, reason: "wrong_key" });
   }
 
   const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
@@ -1701,10 +1691,11 @@ exports.cancelOrder = async (req, res) => {
 // The Cancel-specific counterpart to importOfflineOrderUpdates above -
 // replays a Cancel Order made while offline (see CancelOrderModal.tsx +
 // backend/localHub/localOrders.js's queueOrderCancellation) against the
-// REAL, bcrypt-gated cancelOrderCore - deliberately never applyOrderPatch,
-// which rejects status:"cancelled" outright (see its own comment on why).
-// A wrong key comes back in `failed`, not `applied`: the till already
-// showed this order as cancelled the moment it was entered offline (see
+// real cancelOrderCore - deliberately never applyOrderPatch, which rejects
+// status:"cancelled" outright (see its own comment on why). A failure here
+// (e.g. the order was already cancelled by another till in the meantime)
+// comes back in `failed`, not `applied`: the till already showed this
+// order as cancelled the moment it was entered offline (see
 // CancelOrderModal.tsx), but that was only ever an optimistic guess, never
 // authoritative - the next fresh orders-cache pull corrects the display
 // back to whatever the cloud actually has once this fails.

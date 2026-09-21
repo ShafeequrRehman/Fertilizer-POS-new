@@ -59,7 +59,14 @@ router.post("/", requirePermission("sales.create"), createOrder);
 // routes. Left ungated - see the comment above canReadOrders.
 router.post("/import-offline", importOfflineOrders);
 router.post("/import-offline-updates", importOfflineOrderUpdates);
-router.post("/import-offline-cancellations", importOfflineCancellations);
+// Gated by sales.delete, same as the live POST /:id/cancel below - this is
+// the offline-replay path for the exact same action, so it needs the same
+// permission. This one used to lean on the Cancel Order Key itself as the
+// real authorization here; now that cancelOrderCore no longer requires
+// that key (the shop owner asked to drop it - see cancelOrderCore's own
+// comment), this permission check is what actually stops a till without
+// sales.delete from cancelling orders through this route.
+router.post("/import-offline-cancellations", requirePermission("sales.delete"), importOfflineCancellations);
 router.get("/pending/:phone", canReadOrders, checkPendingOrder);
 // Must come before the generic "/:id" GET below, or Express would try to
 // treat "kitchen"/"receipts"/"kitchen-updates" as an order id. Left
@@ -79,10 +86,10 @@ router.patch("/:id/claim-kitchen-update-print", claimKitchenUpdatePrint);
 router.patch("/:id/tracking-status", requireAnyPermission("sales.create", "sales.edit"), updateTrackingStatus);
 router.patch("/:id/assign-rider", requireAnyPermission("sales.create", "sales.edit"), assignRider);
 router.patch("/:id/change-request", requireAnyPermission("sales.create", "sales.edit"), respondToChangeRequest);
-// Cancelling a sale is its own catalog permission - separate from (and on
-// top of) the shop-wide Cancel Order Key already required inside
-// cancelOrderCore itself (see orderController.js) - defense in depth, not
-// a replacement for it.
+// Cancelling a sale is its own catalog permission. This used to sit on top
+// of the shop-wide Cancel Order Key required inside cancelOrderCore itself
+// as a second, defense-in-depth layer - the shop owner asked to drop that
+// key step, so this permission check is now the real (and only) gate.
 router.post("/:id/cancel", requirePermission("sales.delete"), cancelOrder);
 
 module.exports = router;

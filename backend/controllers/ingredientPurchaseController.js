@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const Ingredient = require("../models/Ingredient");
 const Shop = require("../models/Shop");
@@ -476,17 +475,19 @@ exports.recordPayment = async (req, res) => {
 // gets corrected going forward (a new batch, or a manual stock adjustment
 // via ingredientController.updateIngredient), not erased from history.
 //
-// POST /api/ingredient-purchases/:id/cancel  body: { key, reason? }
+// POST /api/ingredient-purchases/:id/cancel  body: { reason? }
 // Unified Khata: the audited alternative to ever actually deleting a
 // received purchase (see this file's own comment right above, and
 // IngredientPurchase.js's header comment) - mirrors
 // orderController.cancelOrderCore as closely as this model's own shape
-// allows: same bcrypt.compare check against the shop's OWN
-// cancelOrderKeyHash (there is deliberately no separate purchase-side key -
-// the owner manages exactly one Cancel Order Key for both sales and
-// purchases), same "already cancelled" guard, same cancelledAt/cancelledBy/
+// allows: same "already cancelled" guard, same cancelledAt/cancelledBy/
 // cancelReason fields, same non-fatal stock-reversal-never-blocks-the-
-// cancellation reasoning.
+// cancellation reasoning. Used to also require the shop's Cancel Order Key
+// (bcrypt-checked against cancelOrderKeyHash, shared with order
+// cancellation) - the shop owner asked to drop that step everywhere, so
+// this route now relies solely on the purchases.manage/stock.manage
+// permission already required for every route in this controller (see
+// backend/routes/ingredientPurchaseRoutes.js) as its access control.
 //
 // Stock reversal: a RECEIVED purchase added `quantity` of this ingredient
 // to Ingredient.currentStock at receive time (applyPurchaseToIngredientStock
@@ -506,20 +507,7 @@ exports.cancelPurchase = async (req, res) => {
       return res.status(400).json({ error: "This purchase is already cancelled.", reason: "already_cancelled" });
     }
 
-    const { key, reason } = req.body || {};
-    if (!key) {
-      return res.status(400).json({ error: "The shop's Cancel Order Key is required." });
-    }
-
-    const shop = await Shop.findById(req.user.shopId).select("cancelOrderKeyHash").lean();
-    if (!shop || !shop.cancelOrderKeyHash) {
-      return res.status(409).json({ error: "No Cancel Order Key has been set up for this shop yet. Ask your software provider (Super Admin) to set one." });
-    }
-
-    const matches = await bcrypt.compare(String(key), shop.cancelOrderKeyHash);
-    if (!matches) {
-      return res.status(401).json({ error: "Incorrect Cancel Order Key.", reason: "wrong_key" });
-    }
+    const { reason } = req.body || {};
 
     const user = req.user?.id ? await User.findById(req.user.id).select("name username").lean() : null;
 

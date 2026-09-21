@@ -111,16 +111,15 @@ export interface LedgerPurchase {
   paidAmount: number;
   remainingAmount: number;
   purchaseDate: string;
-  // Unified Khata purchase cancellation (audited "delete") - "received" is
-  // the normal case; "cancelled" is what a purchase becomes after
-  // cancelIngredientPurchase, never removed from this list so the History
-  // timeline can still show it (see DuesPage.tsx) with who cancelled it and
-  // why, same audit-trail spirit as a cancelled Order's own cancelledBy/
-  // cancelReason.
-  status: 'received' | 'cancelled';
-  cancelledAt: string | null;
-  cancelledBy: string;
-  cancelReason: string;
+  // Present on rows from getCustomerLedger (which deliberately also fetches
+  // cancelled purchases, unlike getCompanyLedger - see that controller's
+  // own comment) so DuesPage.tsx's merged History timeline can show a
+  // linked purchase as "Cancelled" with who/why instead of it silently
+  // disappearing. Optional since getCompanyLedger's own rows never carry
+  // these (it excludes linked/cancelled purchases already).
+  status?: 'pending' | 'received' | 'cancelled';
+  cancelledBy?: string;
+  cancelReason?: string;
 }
 
 export interface LedgerCustomer {
@@ -797,7 +796,10 @@ export interface SavedOrder extends OrderPayload {
 }
 
 export interface CancelOrderPayload {
-  key: string;
+  // No longer required by the backend (the shop owner asked to drop the
+  // Cancel Order Key step) - kept optional, not removed, so any caller
+  // that still happens to pass one (or a future one) doesn't break.
+  key?: string;
   reason?: string;
 }
 

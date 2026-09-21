@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Lock, WifiOff, XCircle } from 'lucide-react';
+import { Trash2, WifiOff, XCircle } from 'lucide-react';
 import { cancelOrder, fetchProducts } from '@/lib/pos-api';
 import { Product, SavedOrder } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -80,13 +80,16 @@ function printKitchenCancelTicket(order: SavedOrder, toast: ToastLike, categoryL
   }
 }
 
-// Shared by SalesPage and RecordPage so both places cancel an order the
-// same way: the shop's Cancel Order Key (set per-shop by the Super Admin -
-// see backend/controllers/superAdminController.js exports.createShop /
-// resetCancelOrderKey) is required, never a hardcoded PIN. The backend is
-// the real gate (backend/controllers/orderController.js exports.cancelOrder)
-// - this modal just collects the key and reason and surfaces any error the
-// server sends back (wrong key, already cancelled, no key configured yet).
+// Shared by SalesPage and RecordPage so both places cancel/delete an order
+// the same way. Previously also required the shop's Cancel Order Key
+// (bcrypt-checked server-side) before this would go through - the shop
+// owner asked to drop that step, so this is now a plain confirm-and-cancel
+// action with just an optional reason. Access control still exists: only
+// staff with the sales.delete permission ever see the Delete/Cancel button
+// that opens this modal, and the backend enforces that same permission
+// independently on both the live and offline-replay cancel endpoints (see
+// backend/routes/orderRoutes.js) - a Cashier/role without that permission
+// can't reach this even by calling the API directly.
 export default function CancelOrderModal({
   order,
   onClose,
@@ -98,51 +101,39 @@ export default function CancelOrderModal({
 }) {
   const { toast } = useToast();
   const { isOnline } = useNetworkStatus();
-  // Always local-first inside the desktop app, online or not - the key is
-  // trusted immediately either way (it never reaches the till - see
-  // localOrders.js's "Cancelling an ALREADY-SYNCED order while offline"
-  // section) so the kitchen can stop cooking this right now instead of
-  // waiting on a live cloud round trip. Replayed for real against the
-  // actual gated endpoint moments later, once triggerBackgroundSync's
-  // immediate sync attempt lands (typically a second or two if actually
-  // online) or, if genuinely offline, once back online - a wrong key
-  // surfaces there either way (see OfflineSyncPage.tsx), never here.
+  // Always local-first inside the desktop app, online or not - cancels
+  // instantly on this till (see localOrders.js's "Cancelling an ALREADY-
+  // SYNCED order while offline" section) so the kitchen can stop cooking
+  // this right now instead of waiting on a live cloud round trip, then
+  // syncs for real moments later via triggerBackgroundSync (or once back
+  // online, if genuinely offline right now).
   const localFirst = isDesktopApp();
   const trulyOffline = isDesktopApp() && !isOnline;
-  const [key, setKey] = useState('');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   async function submit() {
-    if (!key.trim()) {
-      setError("Enter the shop's Cancel Order Key.");
-      return;
-    }
     setSubmitting(true);
     setError('');
     try {
       if (localFirst) {
         const actor = { name: getAuthUser()?.name || getAuthUser()?.username };
-        const updated = await saveOrderCancelOffline(order, key.trim(), reason.trim() || undefined, actor);
+        const updated = await saveOrderCancelOffline(order, '', reason.trim() || undefined, actor);
         // Local Hub reference-data cache, not a live fetchProducts() call -
         // same "don't wait on the network for something this fast"
         // reasoning as everything else in this local-first branch.
         const categoryLookup = await getCancelCategoryLookup(true);
         printKitchenCancelTicket(updated, toast, categoryLookup);
         triggerBackgroundSync();
-        toast.success(
-          trulyOffline
-            ? 'Order cancelled offline - the key will be verified once back online.'
-            : 'Order cancelled - the key is being verified now.',
-        );
+        toast.success(trulyOffline ? 'Order cancelled offline - will sync once back online.' : 'Order cancelled.');
         onCancelled(updated);
         return;
       }
 
       // Only ever reached from a plain browser tab now (no Local Hub to
       // queue into).
-      const updated = await cancelOrder(order.id, { key: key.trim(), reason: reason.trim() || undefined });
+      const updated = await cancelOrder(order.id, { reason: reason.trim() || undefined });
       if (updated) {
         const categoryLookup = await getCancelCategoryLookup(false);
         printKitchenCancelTicket(updated, toast, categoryLookup);
@@ -167,7 +158,7 @@ export default function CancelOrderModal({
           <div>
             <h2 className="text-xl font-black text-gray-900">Cancel Order #{orderLabel}</h2>
             <p className="mt-1 text-xs font-bold text-gray-400">
-              Ask the Shop Owner for the Cancel Order Key set up in the Super Admin panel.
+              This restores this order's stock and adjusts dues automatically - it is never deleted, just marked Cancelled.
             </p>
           </div>
           <button type="button" onClick={onClose} className="glass-pill rounded-full p-2.5 text-gray-500 transition hover:bg-white/70 hover:text-gray-900">
@@ -178,29 +169,18 @@ export default function CancelOrderModal({
         {localFirst ? (
           <div className="mt-3 flex items-center gap-2 rounded-[14px] bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
             <WifiOff size={14} className="shrink-0" />
-            {trulyOffline
-              ? 'Offline - the key will be verified once back online. If it turns out wrong, this will show up as a failed sync to review.'
-              : "Cancels instantly - the key is verified moments later in the background. If it turns out wrong, this will show up as a failed sync to review."}
+            {trulyOffline ? 'Offline - will sync once back online.' : 'Cancels instantly - syncing to the cloud now.'}
           </div>
         ) : null}
 
         <div className="mt-4 space-y-3">
-          <div>
-            <label className="mb-1 block text-sm font-semibold text-gray-700">Cancel Order Key</label>
-            <input
-              type="password"
-              value={key}
-              onChange={(event) => setKey(event.target.value)}
-              className="w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
-              autoFocus
-            />
-          </div>
           <div>
             <label className="mb-1 block text-sm font-semibold text-gray-700">Reason (optional)</label>
             <textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               className="min-h-24 w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
+              autoFocus
             />
           </div>
         </div>
@@ -217,7 +197,7 @@ export default function CancelOrderModal({
             onClick={() => void submit()}
             className="flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 py-3 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <Lock size={14} />
+            <Trash2 size={14} />
             {submitting ? 'Cancelling...' : 'Confirm Cancellation'}
           </button>
         </div>

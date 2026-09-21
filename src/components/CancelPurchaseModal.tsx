@@ -1,12 +1,17 @@
 import { useState } from 'react';
-import { Lock, XCircle } from 'lucide-react';
+import { Trash2, XCircle } from 'lucide-react';
 import { cancelIngredientPurchase } from '@/lib/pos-api';
 import { LedgerPurchase } from '@/lib/pos-types';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 
-// The purchase-side sibling of CancelOrderModal.tsx - same shop Cancel
-// Order Key gate, same key+reason UI, deliberately visually matching it so
-// there's one consistent "cancel this" experience in the app. Kept as its
+// The purchase-side sibling of CancelOrderModal.tsx - deliberately visually
+// matching it so there's one consistent "cancel this" experience in the
+// app. Previously also required the shop's Cancel Order Key (the same one
+// shared with order cancellation); the shop owner asked to drop that step
+// everywhere, so this is now a plain confirm-and-cancel action with just an
+// optional reason - access control is the existing purchases.manage/
+// stock.manage permission already required for every route on this
+// controller (see backend/routes/ingredientPurchaseRoutes.js). Kept as its
 // own component rather than generalizing CancelOrderModal itself: that
 // modal is tightly wired to Order-specific concerns this purchase-side
 // cancel has none of - the offline-first Local Hub queue path
@@ -25,20 +30,15 @@ export default function CancelPurchaseModal({
   onClose: () => void;
   onCancelled: (updated: LedgerPurchase) => void;
 }) {
-  const [key, setKey] = useState('');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   async function submit() {
-    if (!key.trim()) {
-      setError("Enter the shop's Cancel Order Key.");
-      return;
-    }
     setSubmitting(true);
     setError('');
     try {
-      const updated = await cancelIngredientPurchase(purchase.id, { key: key.trim(), reason: reason.trim() || undefined });
+      const updated = await cancelIngredientPurchase(purchase.id, { reason: reason.trim() || undefined });
       if (updated) {
         onCancelled(updated as unknown as LedgerPurchase);
       }
@@ -69,21 +69,12 @@ export default function CancelPurchaseModal({
 
         <div className="mt-4 space-y-3">
           <div>
-            <label className="mb-1 block text-sm font-semibold text-gray-700">Cancel Order Key</label>
-            <input
-              type="password"
-              value={key}
-              onChange={(event) => setKey(event.target.value)}
-              className="w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
-              autoFocus
-            />
-          </div>
-          <div>
             <label className="mb-1 block text-sm font-semibold text-gray-700">Reason (optional)</label>
             <textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               className="min-h-24 w-full rounded-2xl border border-white/60 bg-white/50 px-4 py-3 shadow-inner outline-none focus:border-black/40"
+              autoFocus
             />
           </div>
         </div>
@@ -100,7 +91,7 @@ export default function CancelPurchaseModal({
             onClick={() => void submit()}
             className="flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/40 bg-gradient-to-b from-rose-500 to-rose-700 py-3 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(136,19,55,0.45)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <Lock size={14} />
+            <Trash2 size={14} />
             {submitting ? 'Cancelling...' : 'Confirm Cancellation'}
           </button>
         </div>
