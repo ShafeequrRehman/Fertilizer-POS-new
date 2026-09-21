@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
-import { Link } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Download, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { AlertCircle, CheckCircle2, Download, Edit3, Eye, Lock, Printer, Search, WifiOff, X, XCircle } from 'lucide-react';
 import { fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory, updateOrder } from '@/lib/pos-api';
 import { SavedOrder, ShopSession } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -814,7 +814,20 @@ export default function RecordPage() {
   const visibleCategorySales = categorySales.slice(0, visibleCategorySalesCount);
   const visibleOrders = filteredOrders.slice(0, visibleOrdersCount);
 
+  const navigate = useNavigate();
   const canCancel = hasPermission('sales.delete');
+  // Same permission gate as the route itself (sales/:id/edit is gated by
+  // <RequirePermission permission={['sales.create', 'sales.edit']}>) -
+  // mirrored here purely for UX (don't show a button that would just
+  // redirect/block), never a substitute for that route guard.
+  const canEditOrders = hasPermission('sales.create') || hasPermission('sales.edit');
+
+  // Single place both new Edit entry points (the row icon and the
+  // OrderDetailModal button) route through - navigates to the same
+  // per-item editor SalesPage.tsx already links into.
+  function handleEditOrder(order: SavedOrder) {
+    navigate(`/dashboard/sales/${order.id}/edit`);
+  }
 
   function handleOrderCancelled(updated: SavedOrder) {
     localEditVersionRef.current += 1;
@@ -1084,8 +1097,10 @@ export default function RecordPage() {
               <RecordRow
                 key={order.id}
                 order={order}
+                canEdit={canEditOrders}
                 onView={() => setViewOrder(order)}
                 onComplete={() => setCompleteOrderTarget(order)}
+                onEdit={() => handleEditOrder(order)}
                 toast={toast}
                 setPrintReadyUrl={setPrintReadyUrl}
               />
@@ -1109,9 +1124,11 @@ export default function RecordPage() {
         <OrderDetailModal
           order={viewOrder}
           canCancel={canCancel}
+          canEdit={canEditOrders}
           onClose={() => setViewOrder(null)}
           onCancelRequested={() => setCancelOrderTarget(viewOrder)}
           onCompleteRequested={() => setCompleteOrderTarget(viewOrder)}
+          onEditRequested={() => handleEditOrder(viewOrder)}
         />
       ) : null}
 
@@ -1136,14 +1153,18 @@ export default function RecordPage() {
 
 function RecordRow({
   order,
+  canEdit,
   onView,
   onComplete,
+  onEdit,
   toast,
   setPrintReadyUrl,
 }: {
   order: SavedOrder;
+  canEdit: boolean;
   onView: () => void;
   onComplete: () => void;
+  onEdit: () => void;
   toast: ToastLike;
   setPrintReadyUrl: (url: string | null) => void;
 }) {
@@ -1198,6 +1219,16 @@ function RecordRow({
             <CheckCircle2 size={13} />
           </button>
         ) : null}
+        {order.status !== 'cancelled' && canEdit ? (
+          <button
+            type="button"
+            onClick={onEdit}
+            title={t('record.actions.editOrderTitle')}
+            className="flex items-center gap-1.5 rounded-full bg-sky-50 px-3 py-2 text-[11px] font-black text-sky-700 transition hover:bg-sky-100"
+          >
+            <Edit3 size={13} />
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onView}
@@ -1248,15 +1279,19 @@ function StatusBadge({ status }: { status: SavedOrder['status'] }) {
 function OrderDetailModal({
   order,
   canCancel,
+  canEdit,
   onClose,
   onCancelRequested,
   onCompleteRequested,
+  onEditRequested,
 }: {
   order: SavedOrder;
   canCancel: boolean;
+  canEdit: boolean;
   onClose: () => void;
   onCancelRequested: () => void;
   onCompleteRequested: () => void;
+  onEditRequested: () => void;
 }) {
   const { t } = useLanguage();
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
@@ -1342,16 +1377,27 @@ function OrderDetailModal({
           {order.cashRecipientName ? <DetailBox label={t('record.orderDetail.cashRecipientName')} value={order.cashRecipientName} /> : null}
         </div>
 
-        {order.status === 'pending' ? (
+        {order.status !== 'cancelled' ? (
           <div className="flex shrink-0 gap-2 border-t border-white/40 p-6">
-            <button
-              type="button"
-              onClick={onCompleteRequested}
-              className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-emerald-500 to-emerald-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(6,78,59,0.45)] transition hover:brightness-105"
-            >
-              <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
-            </button>
-            {canCancel ? (
+            {order.status === 'pending' ? (
+              <button
+                type="button"
+                onClick={onCompleteRequested}
+                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-emerald-500 to-emerald-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(6,78,59,0.45)] transition hover:brightness-105"
+              >
+                <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
+              </button>
+            ) : null}
+            {canEdit ? (
+              <button
+                type="button"
+                onClick={onEditRequested}
+                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-sky-500 to-sky-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(30,64,175,0.45)] transition hover:brightness-105"
+              >
+                <Edit3 size={16} /> {t('common.edit')}
+              </button>
+            ) : null}
+            {order.status === 'pending' && canCancel ? (
               <button
                 type="button"
                 onClick={onCancelRequested}

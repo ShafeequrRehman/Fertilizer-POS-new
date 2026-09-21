@@ -1,4 +1,4 @@
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { ApiError, claimKitchenUpdatePrint, fetchCustomerSearch, fetchOrder, fetchProducts, updateOrder } from '@/lib/pos-api';
@@ -111,6 +111,23 @@ export default function EditOrderPage() {
   const { toast } = useToast();
   const { notify } = useNotifications();
   const navigate = useNavigate();
+  const location = useLocation();
+  // This editor is reached both from Sales (SalesPage.tsx's own Edit
+  // link) and now from Record (RecordPage.tsx's row icon / order-detail
+  // Edit button) - always snapping back to Sales after a save used to be
+  // fine when Sales was the only opener, but would strand a Record user
+  // on Sales instead of back where they started. location.key is
+  // 'default' only when this page was reached with no in-app history to
+  // go back to (a direct URL load, a fresh tab/refresh) - in every other
+  // case navigate(-1) lands back on whichever page actually opened this
+  // editor.
+  function goBackToOrigin() {
+    if (location.key !== 'default') {
+      navigate(-1);
+    } else {
+      navigate('/dashboard/sales');
+    }
+  }
   const params = useParams<{ id: string }>();
   const [order, setOrder] = useState<SavedOrder | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -336,7 +353,7 @@ export default function EditOrderPage() {
         // though they'd started from Sales.
         notify('info', `Order #${orderNumberLabel(updated)} saved. ${isOnline ? 'Syncing to the cloud...' : 'Will sync once back online.'}`);
         setOrder(updated);
-        navigate('/dashboard/sales');
+        goBackToOrigin();
       } catch (err) {
         setStatus(err instanceof Error ? err.message : 'Could not save this change.');
       }
@@ -372,7 +389,7 @@ export default function EditOrderPage() {
     // notify + return to the Sales page this editor was opened from.
     notify('info', `Order #${orderNumberLabel(updated)} saved successfully.`);
     setOrder(updated);
-    navigate('/dashboard/sales');
+    goBackToOrigin();
   }
 
   const visibleProducts = useMemo(
