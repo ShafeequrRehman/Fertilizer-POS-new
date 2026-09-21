@@ -541,7 +541,11 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
       return {
         key: `purchase-${purchase.id}`,
         date: purchase.purchaseDate,
-        label: `${isCancelled ? 'Cancelled Purchase' : 'Purchase'} ${purchase.purchaseOrderNumber} - Rs ${purchase.totalAmount} (${purchase.ingredientName})`,
+        // Quantity + unit alongside the ingredient name - without it a
+        // Statement row like "Rs 1350000 (Urea)" gives no idea how much
+        // Urea that actually was (the shop owner's own point: the amount
+        // alone doesn't say how many bags/kg it was).
+        label: `${isCancelled ? 'Cancelled Purchase' : 'Purchase'} ${purchase.purchaseOrderNumber} - Rs ${purchase.totalAmount} (${purchase.quantity} ${purchase.unit} ${purchase.ingredientName})`,
         detail: paidStatus,
         tone: isCancelled ? 'text-slate-400 line-through' : purchase.remainingAmount > 0 ? 'text-blue-600' : 'text-slate-400',
         by: isCancelled ? purchase.cancelledBy : '',
