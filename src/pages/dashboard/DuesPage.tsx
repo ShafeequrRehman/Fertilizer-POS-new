@@ -485,7 +485,15 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
       // Bank-routed entries say so right in the History row - "took/gave
       // via <bank>" - not just on the Bank page's own history (see
       // customerController.js's updateCustomerDues/settleCustomerDues).
-      detail: entry.paymentMethod === 'bank' && entry.bankName
+      // A handful of OLD "- Pay Dues" entries (from before Pay Dues was
+      // fixed to never touch orders) carry an auto-note like
+      // "Applied to orders: #8 (Rs 500)" - that wording no longer matches
+      // how Pay Dues works today (it's now a pure ledger move, see
+      // settleCustomerDues) and only confuses the statement, so it's
+      // shown here as a plain payment instead of repeating the stale note.
+      detail: /applied to orders/i.test(entry.note || '')
+        ? 'Payment received'
+        : entry.paymentMethod === 'bank' && entry.bankName
         ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.bankName}`
         : (entry.note || 'No note'),
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
@@ -779,9 +787,19 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
     let running = 0;
     for (const entry of chronological) {
       if (entry.duesEntry) {
-        // "add" = customer's due to the shop went up (bad for them, so
-        // this display balance moves down); "settle" is the reverse.
-        running += entry.duesEntry.type === 'add' ? -entry.duesEntry.amount : entry.duesEntry.amount;
+        // OLD "- Pay Dues" entries (before the fix that stopped Pay Dues
+        // from ever touching orders) both wrote "Applied to orders: #N
+        // (Rs X)" on this entry AND reduced that order's own
+        // remainingAmount by the same amount. That order's row (below)
+        // already subtracts its (now-lower) remainingAmount, so counting
+        // this entry too would subtract the same payment a second time -
+        // skip it here; its effect is already reflected in the order row.
+        const isLegacyOrderLinkedSettle = entry.duesEntry.type === 'settle' && /applied to orders/i.test(entry.duesEntry.note || '');
+        if (!isLegacyOrderLinkedSettle) {
+          // "add" = customer's due to the shop went up (bad for them, so
+          // this display balance moves down); "settle" is the reverse.
+          running += entry.duesEntry.type === 'add' ? -entry.duesEntry.amount : entry.duesEntry.amount;
+        }
       } else if (entry.orderAmounts) {
         running -= entry.orderAmounts.remaining;
       } else if (entry.purchaseAmounts) {
