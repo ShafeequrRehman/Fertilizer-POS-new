@@ -121,6 +121,9 @@ export const record = {
     partialPaymentAmount: "Partial Payment Amount",
     upToAmount: "Up to Rs {{amount}}",
     putInPending: 'Put in Pending - confirm with no payment collected right now (this leaves the full Rs {{amount}} as a due).',
+    cashReceived: "Cash Received (Calculator)",
+    cashReceivedPlaceholder: "e.g. how much cash the customer handed over",
+    returnAmount: "Return Rs {{amount}} to the customer",
   },
   errors: {
     invalidAmount: "Enter a valid payment amount.",

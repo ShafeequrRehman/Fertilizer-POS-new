@@ -40,6 +40,13 @@ export default function CompleteOrderModal({
 }) {
   const { t } = useLanguage();
   const [paymentAmount, setPaymentAmount] = useState('');
+  // Cashier's own change calculator - purely informational, never sent to
+  // the server. The Partial Payment Amount field above is clamped to
+  // Payable Now (it's what actually gets recorded as paid), so it can't
+  // hold the real cash a customer physically handed over when that's more
+  // than the bill - this lets the cashier type that real amount and see
+  // how much change to hand back, without it touching what gets saved.
+  const [cashReceived, setCashReceived] = useState('');
   const [customerDue, setCustomerDue] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -79,6 +86,7 @@ export default function CompleteOrderModal({
 
   const owed = Number(order.remainingAmount ?? order.total ?? 0);
   const payable = owed + customerDue;
+  const changeDue = cashReceived && Number(cashReceived) > payable ? Number(cashReceived) - payable : 0;
 
   async function settle(full: boolean) {
     const paid = full ? payable : Number(paymentAmount || 0);
@@ -171,6 +179,30 @@ export default function CompleteOrderModal({
           <DetailRow label={t('record.completeOrder.alreadyPaid')} value={`Rs ${order.paidAmount ?? 0}`} />
           {customerDue > 0 ? <DetailRow label={t('record.completeOrder.otherOutstandingDues')} value={`Rs ${customerDue}`} /> : null}
           <DetailRow label={t('record.completeOrder.payableNow')} value={`Rs ${payable}`} strong />
+        </div>
+
+        {/* Change calculator - the cashier types the REAL cash handed over
+            here (can be more than Payable Now), and this shows how much
+            to give back. Deliberately a separate field from Partial
+            Payment Amount below (which stays clamped to Payable Now,
+            since that's the number that actually gets recorded as paid) -
+            this one never affects what gets saved. */}
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.cashReceived')}</label>
+          <input
+            value={cashReceived}
+            onChange={(event) => {
+              if (!/^\d*$/.test(event.target.value)) return;
+              setCashReceived(event.target.value);
+            }}
+            placeholder={t('record.completeOrder.cashReceivedPlaceholder')}
+            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
+          />
+          {changeDue > 0 ? (
+            <p className="mt-2 rounded-[14px] bg-emerald-50 px-4 py-2 text-sm font-black text-emerald-700">
+              {t('record.completeOrder.returnAmount', { amount: changeDue })}
+            </p>
+          ) : null}
         </div>
 
         <div className="mt-4">

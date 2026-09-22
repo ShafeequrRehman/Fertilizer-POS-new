@@ -119,6 +119,9 @@ export const record = {
     partialPaymentAmount: "جزوی ادائیگی کی رقم",
     upToAmount: "زیادہ سے زیادہ Rs {{amount}} تک",
     putInPending: "پینڈنگ میں رکھیں - ابھی کوئی ادائیگی وصول کیے بغیر تصدیق کریں (اس سے پوری Rs {{amount}} بقایا رہ جائے گی)۔",
+    cashReceived: "وصول شدہ نقدی (کیلکولیٹر)",
+    cashReceivedPlaceholder: "مثلاً کسٹمر نے کتنی نقدی دی",
+    returnAmount: "کسٹمر کو Rs {{amount}} واپس کریں",
   },
   errors: {
     invalidAmount: "ادائیگی کی درست رقم درج کریں۔",
