@@ -4,6 +4,9 @@ const Expense = require("../models/Expense");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const StaffPayment = require("../models/StaffPayment");
 const Customer = require("../models/Customer");
+const Product = require("../models/Product");
+const Bank = require("../models/Bank");
+const CashRegister = require("../models/CashRegister");
 const { shopScope } = require("../middleware/attachShopScope");
 
 // The fixed category heading every ingredient-purchase batch is grouped
@@ -414,6 +417,139 @@ exports.getInventoryReport = async (req, res) => {
       })),
       supplierDues,
       totalSupplierDue: supplierDues.reduce((sum, row) => sum + row.totalDue, 0),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/reports/dashboard-summary
+//
+// Home Dashboard's Accounting Overview - the one-shot "how's the shop
+// doing right now" widget row the shop owner asked for (mirroring the
+// Total Sale/Customer Balances/Cash in Hand/Balance on Bank/Stock Value/
+// Vendor Balance/Total Purchase/Total Expenses/Sale on Cash/Sale on
+// Credit/Sale on Bank/Total Recovery layout of the accounting software
+// screenshot they shared). Always scoped to TODAY (server's UTC calendar
+// day, same convention resolveRange's own default already uses) for every
+// "today" figure - this is a live dashboard card, not a date-range report.
+// Point-in-time figures (Cash in Hand, Balance on Bank, Stock Value,
+// Vendor Balance, Customer Udhar/Advance) are always all-time/current -
+// a balance doesn't reset at midnight.
+exports.getDashboardSummary = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+    const now = new Date();
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+
+    const [
+      todaysOrders,
+      products,
+      banks,
+      cashRegister,
+      vendorDueAgg,
+      todaysPurchaseAgg,
+      todaysExpenseAgg,
+      customers,
+      customerOrderDueAgg,
+    ] = await Promise.all([
+      // Today's Sale / Sale on Cash / Sale on Bank / Sale on Credit - one
+      // pass over today's non-cancelled orders, split by paymentMethod the
+      // same way getLedgerTransactions already reads it.
+      Order.find({ shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } })
+        .select("total paidAmount remainingAmount paymentMethod")
+        .lean(),
+      // Stock Value - selling-price x current stock across every product
+      // (there's no separate cost-price field on Product.js yet, so this is
+      // "what the shelf is worth at sale price", the closest available
+      // reading of the reference screenshot's STOCK VALUE card).
+      Product.find({ shopId: shopObjectId }).select("price stock").lean(),
+      // Balance on Bank - every named bank this shop has added (Bank page).
+      Bank.find({ shopId: shopObjectId }).select("balance").lean(),
+      CashRegister.findOne({ shopId: shopObjectId }).select("balance").lean(),
+      // Vendor Balance - total still owed to suppliers across every
+      // received (not pending/cancelled) stock batch ever logged, same
+      // status:"received" convention getCompanyLedger/getInventoryReport
+      // already use.
+      IngredientPurchase.aggregate([
+        { $match: { shopId: shopObjectId, status: "received" } },
+        { $group: { _id: null, total: { $sum: "$remainingAmount" } } },
+      ]),
+      // Total Purchase (today) - same receivedAt-scoped convention as
+      // getDayEndReport's kitchenStockPurchaseDocs.
+      IngredientPurchase.aggregate([
+        { $match: { shopId: shopObjectId, status: "received", receivedAt: { $gte: start, $lte: end } } },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
+      Expense.aggregate([
+        { $match: { shopId: shopObjectId, date: { $gte: start, $lte: end } } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+      // Customer Udhar (receivable) / Customer Advance - same
+      // previousDues + totalOrderBalance definition
+      // customerController.getCustomerLedger uses for one customer's own
+      // totalDue, just aggregated across every customer here. duesHistory
+      // also gives Total Recovery (today) below, off the very same read.
+      Customer.find({ shopId: shopObjectId }).select("previousDues duesHistory").lean(),
+      Order.aggregate([
+        { $match: { shopId: shopObjectId, status: { $ne: "cancelled" }, "customer.phone": { $exists: true, $ne: "" } } },
+        { $group: { _id: "$customer.phone", due: { $sum: "$remainingAmount" } } },
+      ]),
+    ]);
+
+    let saleOnCash = 0;
+    let saleOnBank = 0;
+    let saleOnCredit = 0;
+    let totalSaleToday = 0;
+    for (const order of todaysOrders) {
+      totalSaleToday += Number(order.total || 0);
+      saleOnCredit += Number(order.remainingAmount || 0);
+      if (order.paymentMethod === "Bank") saleOnBank += Number(order.paidAmount || 0);
+      else saleOnCash += Number(order.paidAmount || 0);
+    }
+
+    const stockValue = products.reduce((sum, p) => sum + Number(p.price || 0) * Number(p.stock || 0), 0);
+    const balanceOnBank = banks.reduce((sum, b) => sum + Number(b.balance || 0), 0);
+    const cashInHand = Number(cashRegister?.balance || 0);
+    const vendorBalance = vendorDueAgg[0]?.total || 0;
+    const totalPurchaseToday = todaysPurchaseAgg[0]?.total || 0;
+    const totalExpensesToday = todaysExpenseAgg[0]?.total || 0;
+
+    const orderDueByPhone = new Map(customerOrderDueAgg.map((row) => [row._id, row.due || 0]));
+    let customerUdharTotal = 0;
+    let customerAdvanceTotal = 0;
+    let totalRecoveryToday = 0;
+    for (const customer of customers) {
+      const totalDue = (orderDueByPhone.get(customer.phone) || 0) + Number(customer.previousDues || 0);
+      if (totalDue > 0) customerUdharTotal += totalDue;
+      else if (totalDue < 0) customerAdvanceTotal += Math.abs(totalDue);
+
+      for (const entry of customer.duesHistory || []) {
+        if (entry.type !== "settle") continue;
+        const entryDate = entry.createdAt ? new Date(entry.createdAt) : null;
+        if (entryDate && entryDate >= start && entryDate <= end) {
+          totalRecoveryToday += Number(entry.amount || 0);
+        }
+      }
+    }
+
+    res.json({
+      date: start.toISOString().slice(0, 10),
+      totalSaleToday,
+      saleOnCash,
+      saleOnBank,
+      saleOnCredit,
+      totalPurchaseToday,
+      totalExpensesToday,
+      totalRecoveryToday,
+      cashInHand,
+      balanceOnBank,
+      stockValue,
+      vendorBalance,
+      customerUdharTotal,
+      customerAdvanceTotal,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

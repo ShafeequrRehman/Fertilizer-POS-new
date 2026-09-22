@@ -86,13 +86,53 @@ export interface Bank {
   createdAt: string;
 }
 
+// "Cash in Hand" - the till's own khata, same shape as BankTransaction
+// above (see backend/models/CashRegister.js). Fed automatically by a
+// Cash-method order payment/due recovery, plus a manual "Adjust Cash"
+// correction from the Dashboard.
+export interface CashTransaction {
+  type: 'sale' | 'due_recovery' | 'purchase' | 'adjustment';
+  direction: 'in' | 'out';
+  amount: number;
+  note: string;
+  balanceAfter: number;
+  relatedCustomerName?: string;
+  relatedCustomerPhone?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface CashSummary {
+  balance: number;
+  history: CashTransaction[];
+}
+
+// Home Dashboard's Accounting Overview widgets - see
+// backend/controllers/reportController.js's getDashboardSummary.
+export interface DashboardSummary {
+  date: string;
+  totalSaleToday: number;
+  saleOnCash: number;
+  saleOnBank: number;
+  saleOnCredit: number;
+  totalPurchaseToday: number;
+  totalExpensesToday: number;
+  totalRecoveryToday: number;
+  cashInHand: number;
+  balanceOnBank: number;
+  stockValue: number;
+  vendorBalance: number;
+  customerUdharTotal: number;
+  customerAdvanceTotal: number;
+}
+
 export interface LedgerOrder {
   id: string;
   dailyOrderNumber?: number;
   createdAt: string;
   orderType: OrderType;
   status: 'pending' | 'completed' | 'cancelled' | 'paid';
-  paymentMethod: 'Cash' | 'Card' | 'E-Wallet';
+  paymentMethod: 'Cash' | 'Card' | 'E-Wallet' | 'Bank';
   total: number;
   paidAmount: number;
   remainingAmount: number;
@@ -750,7 +790,9 @@ export interface OrderPayload {
   billName?: string;
   cashRecipientName?: string;
   status: 'pending' | 'completed' | 'cancelled' | 'paid';
-  paymentMethod: 'Cash' | 'Card' | 'E-Wallet';
+  paymentMethod: 'Cash' | 'Card' | 'E-Wallet' | 'Bank';
+  bankId?: string;
+  bankName?: string;
   createdAt: string;
   updatedAt?: string;
   version?: number;
@@ -846,7 +888,11 @@ export interface OrderUpdatePayload {
   note?: string;
   waiter?: string;
   table?: string;
-  paymentMethod?: 'Cash' | 'Card' | 'E-Wallet';
+  paymentMethod?: 'Cash' | 'Card' | 'E-Wallet' | 'Bank';
+  // Which Bank (backend/models/Bank.js) a "Bank" paymentMethod payment
+  // actually landed in - see CompleteOrderModal.tsx's Cash/Bank toggle and
+  // orderController.js's applyOrderPatch completeAndSettle branch.
+  bankId?: string;
   customer?: SavedOrder['customer'];
   address?: string;
   status?: SavedOrder['status'];

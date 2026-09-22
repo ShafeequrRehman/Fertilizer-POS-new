@@ -7,16 +7,19 @@ import {
 } from 'recharts';
 import {
   Target, Users, CheckCircle2, Clock,
-  RotateCcw, XCircle
+  RotateCcw, XCircle, Wallet, Landmark, Package, Truck,
+  ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil,
 } from 'lucide-react';
-import { fetchOrdersSummary, fetchProducts, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
-import { Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { adjustCash, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
+import { DashboardSummary, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
 import { loadOrdersFromLocalHub } from '@/lib/offline-order-helpers';
 import { getIsDashboardHidden, hasPermission } from '@/lib/auth';
 import { getFirstAccessiblePage } from '@/lib/dashboard-pages';
+import { useToast } from '@/lib/toast';
+import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
 
 type EmployeeStat = { name: string; sales: number; count: number };
 type InventoryItem = { id: string | number; name: string; stock: number };
@@ -59,6 +62,7 @@ export default function DashboardPageClient() {
 }
 
 function DashboardPageClientInner() {
+  const { popup } = useToast();
   // SavedOrder from the Local Hub cache-first paint, or the narrower
   // OrderSummary shape from the live cloud poll below - stats/chart code in
   // this file only ever reads the fields both shapes have in common
@@ -138,6 +142,29 @@ function DashboardPageClientInner() {
         if (productsRes?.products) setProducts(productsRes.products);
       })
       .catch((error) => console.error('Dashboard products fetch error', error));
+  }, []);
+
+  // Accounting Overview widgets (Total Sale, Customer Udhar/Advance, Cash
+  // in Hand, Balance on Bank, Stock Value, Vendor Balance, Total Purchase/
+  // Expenses/Recovery today, Sale on Cash/Bank/Credit) - one summary
+  // endpoint (reportController.getDashboardSummary), refreshed on the same
+  // 45s cadence as orders/session above so it stays live through a shift.
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [showAdjustCash, setShowAdjustCash] = useState(false);
+
+  async function loadSummary() {
+    try {
+      const data = await fetchDashboardSummary();
+      if (data) setSummary(data);
+    } catch (error) {
+      console.error('Dashboard accounting summary fetch error', error);
+    }
+  }
+
+  useEffect(() => {
+    void loadSummary();
+    const intervalId = setInterval(() => void loadSummary(), 45000);
+    return () => clearInterval(intervalId);
   }, []);
 
   useEffect(() => {
@@ -296,6 +323,13 @@ function DashboardPageClientInner() {
         <p className={`text-xs font-bold uppercase tracking-[0.14em] ${businessWindow.isOpen ? 'text-emerald-600' : 'text-gray-500'}`}>{businessWindow.label}</p>
       </div>
 
+      <AccountingOverview
+        summary={summary}
+        formatter={formatter}
+        canAdjustCash={hasPermission('dues.manage')}
+        onAdjustCash={() => setShowAdjustCash(true)}
+      />
+
       <div className="grid grid-cols-12 gap-6">
         <div className="col-span-12 min-w-0 space-y-6 lg:col-span-7">
           <div className="rounded-[32px] bg-white p-6 shadow-sm">
@@ -396,6 +430,201 @@ function DashboardPageClientInner() {
 
           <InventoryCard products={lowStockProducts} />
         </div>
+      </div>
+
+      {showAdjustCash ? (
+        <AdjustCashModal
+          onClose={() => setShowAdjustCash(false)}
+          onSubmit={async (amount, direction, note) => {
+            try {
+              const updated = await adjustCash(amount, direction, note);
+              if (updated) {
+                setSummary((prev: DashboardSummary | null) => (prev ? { ...prev, cashInHand: updated.balance } : prev));
+                setShowAdjustCash(false);
+                popup({ tone: 'success', title: 'Cash in Hand updated', message: `New balance: Rs ${updated.balance.toLocaleString()}` });
+              }
+            } catch (error) {
+              popup({ tone: 'error', title: "Couldn't update Cash in Hand", message: error instanceof Error ? error.message : 'Failed to save.' });
+            }
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// Accounting Overview - the AccCountry-style summary row the shop owner
+// asked for (Total Sale, Customer Udhar/Advance, Cash in Hand, Balance on
+// Bank, Stock Value, Vendor Balance, Total Purchase/Expenses/Recovery
+// today, Sale on Cash/Bank/Credit). Cash in Hand is the one figure with no
+// other place to fix a mistake (unlike Bank/Dues, which are already
+// editable from their own pages), so it alone gets a Pencil/Adjust button
+// here - gated the same way Bank/Dues actions are (dues.manage).
+function AccountingOverview({
+  summary,
+  formatter,
+  canAdjustCash,
+  onAdjustCash,
+}: {
+  summary: DashboardSummary | null;
+  formatter: Intl.NumberFormat;
+  canAdjustCash: boolean;
+  onAdjustCash: () => void;
+}) {
+  const money = (value: number | undefined) => `Rs ${formatter.format(value ?? 0)}`;
+  return (
+    <div className="rounded-[32px] bg-white p-6 shadow-sm">
+      <div className="mb-6 flex items-center justify-between">
+        <h3 className="font-bold text-gray-800">Accounting Overview</h3>
+        <span className="text-[10px] font-bold uppercase text-gray-400">{summary?.date || '...'}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        <OverviewTile icon={<Target size={18} />} color="bg-orange-50 text-orange-500" label="Total Sale (Today)" value={money(summary?.totalSaleToday)} />
+        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Customer Udhar" value={money(summary?.customerUdharTotal)} valueColor="text-rose-600" />
+        <OverviewTile icon={<PiggyBank size={18} />} color="bg-emerald-50 text-emerald-500" label="Customer Advance" value={money(summary?.customerAdvanceTotal)} valueColor="text-emerald-600" />
+        <OverviewTile
+          icon={<Wallet size={18} />}
+          color="bg-blue-50 text-blue-500"
+          label="Cash in Hand"
+          value={money(summary?.cashInHand)}
+          action={canAdjustCash ? { icon: <Pencil size={12} />, onClick: onAdjustCash, label: 'Adjust' } : undefined}
+        />
+        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Balance on Bank" value={money(summary?.balanceOnBank)} />
+        <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} />
+        <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" />
+        <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label="Total Purchase (Today)" value={money(summary?.totalPurchaseToday)} />
+        <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label="Total Expenses (Today)" value={money(summary?.totalExpensesToday)} />
+        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label="Sale on Cash" value={money(summary?.saleOnCash)} />
+        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Sale on Bank" value={money(summary?.saleOnBank)} />
+        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Sale on Udhar (Credit)" value={money(summary?.saleOnCredit)} valueColor="text-rose-600" />
+        <OverviewTile icon={<CheckCircle2 size={18} />} color="bg-emerald-50 text-emerald-500" label="Total Recovery (Today)" value={money(summary?.totalRecoveryToday)} valueColor="text-emerald-600" />
+      </div>
+    </div>
+  );
+}
+
+function OverviewTile({
+  icon,
+  color,
+  label,
+  value,
+  valueColor = 'text-gray-900',
+  action,
+}: {
+  icon: React.ReactNode;
+  color: string;
+  label: string;
+  value: string;
+  valueColor?: string;
+  action?: { icon: React.ReactNode; onClick: () => void; label: string };
+}) {
+  return (
+    <div className="relative rounded-2xl border border-gray-50 bg-[#F8F9FB] p-4">
+      <div className="flex items-center justify-between">
+        <div className={`rounded-full p-2 ${color}`}>{icon}</div>
+        {action ? (
+          <button
+            type="button"
+            onClick={action.onClick}
+            title={action.label}
+            className="rounded-full bg-white p-1.5 text-gray-400 shadow-sm transition hover:bg-gray-100 hover:text-gray-700"
+          >
+            {action.icon}
+          </button>
+        ) : null}
+      </div>
+      <h4 className={`mt-3 truncate text-lg font-black xl:text-xl ${valueColor}`}>{value}</h4>
+      <p className="truncate text-[10px] font-bold uppercase tracking-wider text-gray-400">{label}</p>
+    </div>
+  );
+}
+
+// Manual Cash-in-Hand correction - the owner's own explicit ask: every
+// payment figure on the Dashboard must be editable so a mistake can be
+// fixed. Same in/out direction idea as Bank's own addTransaction popup.
+function AdjustCashModal({
+  onClose,
+  onSubmit,
+}: {
+  onClose: () => void;
+  onSubmit: (amount: number, direction: 'in' | 'out', note: string) => void;
+}) {
+  useBackspaceToClose(onClose);
+  const [amount, setAmount] = useState('');
+  const [direction, setDirection] = useState<'in' | 'out'>('in');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    const value = Number(amount);
+    if (!value || value <= 0) return;
+    setSaving(true);
+    try {
+      await onSubmit(value, direction, note.trim());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <h2 className="text-lg font-black text-gray-900">Adjust Cash in Hand</h2>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-gray-400">Use this only to correct a mistake in the till's cash figure.</p>
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setDirection('in')}
+            className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${direction === 'in' ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-500'}`}
+          >
+            Add (+)
+          </button>
+          <button
+            type="button"
+            onClick={() => setDirection('out')}
+            className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${direction === 'out' ? 'bg-rose-500 text-white' : 'bg-gray-100 text-gray-500'}`}
+          >
+            Remove (-)
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Amount</label>
+          <input
+            value={amount}
+            onChange={(event) => {
+              if (!/^\d*$/.test(event.target.value)) return;
+              setAmount(event.target.value);
+            }}
+            placeholder="0"
+            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
+          />
+        </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Note (optional)</label>
+          <input
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why is this being corrected?"
+            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
+          />
+        </div>
+
+        <button
+          type="button"
+          disabled={saving || !amount}
+          onClick={() => void submit()}
+          className="mt-5 w-full rounded-[20px] bg-black py-3.5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save Correction'}
+        </button>
       </div>
     </div>
   );

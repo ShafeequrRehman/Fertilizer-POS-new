@@ -8,6 +8,18 @@ const { shopScope } = require("../middleware/attachShopScope");
 const { notifyRiderForDelivery, notifyAssignedRider } = require("../services/riderNotificationService");
 const { notifyCustomerConfirmed, notifyCustomerCompleted } = require("../services/customerNotificationService");
 const { deductStockForItems, restoreStockForOrder, restoreStockForItems } = require("../services/stockService");
+const { recordCashMovement } = require("../controllers/cashController");
+const { recordCustomerBankMovement } = require("../controllers/bankController");
+
+// Same pattern as customerController.currentUserName/bankController's own
+// copy - the JWT never carries a display name, only id/role/shopId, so
+// tagging who collected a sale's payment on the Cash/Bank ledger needs one
+// extra lookup.
+async function currentUserDisplayName(req) {
+  if (!req.user?.id) return "";
+  const user = await User.findById(req.user.id).select("name username").lean();
+  return user?.name || user?.username || "";
+}
 
 // Discount is either a flat rupee amount (type "value") or a percentage of
 // the subtotal (type "percent"). The frontend only ever sends one type at a
@@ -1355,6 +1367,14 @@ async function applyOrderPatch(order, patch, req, options) {
       if (patch.customer) order.customer = patch.customer;
       const customerPhone = order.customer?.phone;
       let paidTotal = Math.max(Number(patch.paidAmount) || 0, 0);
+      // Cash-in-Hand / Balance-on-Bank dashboard routing: the FULL amount
+      // actually collected right now (before it gets distributed below
+      // across this order/previousDues/other orders) is exactly how much
+      // real cash or bank money just came into the shop - recorded once,
+      // at the very end of this branch, into whichever the cashier picked
+      // (Cash by default, or the Bank the payment method/bankId below
+      // names). Captured here, before paidTotal is mutated.
+      const totalCollectedNow = paidTotal;
 
       // This order's own remaining balance (not order.total on its own -
       // that ignores anything already paid toward it) is settled before
@@ -1418,6 +1438,56 @@ async function applyOrderPatch(order, patch, req, options) {
       // dues cascade above, which only ever works off paidAmount/paidTotal.
       if (typeof patch.cashReceived === "number") order.cashReceived = Math.max(0, patch.cashReceived);
       if (receiptPrinted) order.customerReceiptPrintedAt = new Date();
+
+      // Cash-in-Hand / Balance-on-Bank dashboard routing (continued from
+      // totalCollectedNow above): only fires when real money actually came
+      // in with this completion - a "Put in Pending" completeAndSettle
+      // (paidAmount 0) touches neither ledger. Bank only when the cashier
+      // both picked "Bank" AND a specific bank resolved for this shop -
+      // recordCustomerBankMovement silently no-ops otherwise, in which
+      // case this still falls back to Cash rather than silently losing
+      // track of money that was, in fact, collected.
+      if (totalCollectedNow > 0) {
+        const itemsSummary = (order.items || [])
+          .slice(0, 4)
+          .map((item) => `${item.name} x${item.quantity}`)
+          .join(", ");
+        const orderLabel = order.dailyOrderNumber ?? order.shopSequenceNumber ?? String(order._id).slice(-4);
+        const saleNote = `Sale #${orderLabel}${itemsSummary ? `: ${itemsSummary}` : ""} - Rs ${totalCollectedNow}`;
+        const wantsBank = order.paymentMethod === "Bank" && patch.bankId;
+        let bankMoved = null;
+        if (wantsBank) {
+          bankMoved = await recordCustomerBankMovement({
+            bankId: patch.bankId,
+            shopId: order.shopId,
+            type: "deposit",
+            amount: totalCollectedNow,
+            note: saleNote,
+            customerName: order.customer?.name || "",
+            customerPhone: order.customer?.phone || "",
+            createdBy: await currentUserDisplayName(req),
+          });
+          if (bankMoved) {
+            order.bankId = bankMoved._id;
+            order.bankName = bankMoved.name;
+          }
+        }
+        if (!bankMoved) {
+          if (wantsBank) order.paymentMethod = "Cash"; // bank pick didn't resolve - don't misreport where the money actually sits
+          await recordCashMovement({
+            shopId: order.shopId,
+            type: "sale",
+            direction: "in",
+            amount: totalCollectedNow,
+            note: saleNote,
+            relatedOrderId: order._id,
+            relatedCustomerName: order.customer?.name || "",
+            relatedCustomerPhone: order.customer?.phone || "",
+            createdBy: await currentUserDisplayName(req),
+          });
+        }
+      }
+
       order.version = Number(order.version || 0) + 1;
       await order.save();
       return order;

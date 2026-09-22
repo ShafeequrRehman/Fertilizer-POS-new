@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -246,6 +246,39 @@ export async function createBank(name: string, openingAmount: number, note?: str
 export async function addBankTransaction(bankId: string, type: 'deposit' | 'withdrawal', amount: number, note?: string) {
   try {
     const response = await api.post<Bank>(`/banks/${bankId}/transactions`, { type, amount, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Cash in Hand (the till's own khata - see backend/models/CashRegister.js) ---
+export async function fetchCashSummary() {
+  try {
+    const response = await api.get<CashSummary>('/cash');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Manual correction from the Dashboard's Cash in Hand card - the owner's
+// own explicit ask: every payment figure on the dashboard must be
+// editable so a mistake can be corrected.
+export async function adjustCash(amount: number, direction: 'in' | 'out', note?: string) {
+  try {
+    const response = await api.post<CashSummary>('/cash/adjust', { amount, direction, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Home Dashboard's Accounting Overview widgets - see
+// backend/controllers/reportController.js's getDashboardSummary.
+export async function fetchDashboardSummary() {
+  try {
+    const response = await api.get<DashboardSummary>('/reports/dashboard-summary');
     return response.data;
   } catch (error) {
     handleApiError(error);

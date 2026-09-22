@@ -16,8 +16,8 @@ import { useEffect, useState } from 'react';
 import { WifiOff, XCircle } from 'lucide-react';
 import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
-import { fetchCustomerOutstanding, updateOrder } from '@/lib/pos-api';
-import { SavedOrder } from '@/lib/pos-types';
+import { fetchBanks, fetchCustomerOutstanding, updateOrder } from '@/lib/pos-api';
+import { Bank, SavedOrder } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
 import { saveOrderEditOffline } from '@/lib/offline-order-helpers';
 import { triggerBackgroundSync } from '@/lib/offline-sync';
@@ -49,6 +49,16 @@ export default function CompleteOrderModal({
   const [customerDue, setCustomerDue] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Cash vs Bank (Dashboard's Cash in Hand / Balance on Bank routing) -
+  // same Cash/Bank toggle idea as DuesPage.tsx's Add/Pay Dues, just for
+  // the money collected at order completion instead. Cash by default, no
+  // extra tap needed for the common case; picking Bank requires choosing
+  // WHICH bank the payment actually landed in (see orderController.js's
+  // applyOrderPatch completeAndSettle branch, which records the movement
+  // into whichever this resolves to).
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank'>('cash');
+  const [banks, setBanks] = useState<Bank[]>([]);
+  const [bankId, setBankId] = useState('');
   // Same reasoning as SalesPage.tsx's Complete Payment panel - required
   // before "Confirm Payment" is allowed through with nothing typed, so an
   // accidental click can't silently leave the whole order unpaid.
@@ -82,6 +92,18 @@ export default function CompleteOrderModal({
     }
     void loadDue();
   }, [order, trulyOffline]);
+
+  useEffect(() => {
+    // Best-effort - offline or a failed fetch just leaves the Bank picker
+    // empty, which naturally forces Cash (see the settle() guard below);
+    // never blocks completing the order over this.
+    if (trulyOffline) return;
+    fetchBanks()
+      .then((list) => {
+        if (list) setBanks(list);
+      })
+      .catch(() => {});
+  }, [trulyOffline]);
 
   const owed = Number(order.remainingAmount ?? order.total ?? 0);
   const payable = owed + customerDue;
@@ -118,10 +140,22 @@ export default function CompleteOrderModal({
       setError(t('record.errors.needCustomerInfo'));
       return;
     }
+    // Bank picked but no specific bank chosen yet - same guard DuesPage.tsx
+    // uses for its own Cash/Bank toggle, so this never silently records a
+    // real payment as "Bank" with nothing to say which one.
+    if (paid > 0 && paymentMethod === 'bank' && !bankId) {
+      setError(t('record.completeOrder.pickBank'));
+      return;
+    }
     setSaving(true);
     setError('');
 
-    const payload: Parameters<typeof updateOrder>[1] = { status: 'completed', action: 'completeAndSettle', paidAmount: paid };
+    const payload: Parameters<typeof updateOrder>[1] = {
+      status: 'completed',
+      action: 'completeAndSettle',
+      paidAmount: paid,
+      ...(paid > 0 ? { paymentMethod: paymentMethod === 'bank' ? 'Bank' : 'Cash', ...(paymentMethod === 'bank' ? { bankId } : {}) } : {}),
+    };
 
     try {
       if (localFirst) {
@@ -184,6 +218,45 @@ export default function CompleteOrderModal({
           <DetailRow label={t('record.completeOrder.alreadyPaid')} value={`Rs ${order.paidAmount ?? 0}`} />
           {customerDue > 0 ? <DetailRow label={t('record.completeOrder.otherOutstandingDues')} value={`Rs ${customerDue}`} /> : null}
           <DetailRow label={t('record.completeOrder.payableNow')} value={`Rs ${payable}`} strong />
+        </div>
+
+        {/* Cash vs Bank - decides whether this payment lands in the
+            Dashboard's Cash in Hand or a specific Bank's balance (see
+            orderController.js's applyOrderPatch completeAndSettle branch). */}
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.paymentMethod')}</label>
+          <div className="mt-1.5 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('cash')}
+              className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${
+                paymentMethod === 'cash' ? 'bg-black text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}
+            >
+              {t('record.completeOrder.cash')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('bank')}
+              className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${
+                paymentMethod === 'bank' ? 'bg-black text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}
+            >
+              {t('record.completeOrder.bank')}
+            </button>
+          </div>
+          {paymentMethod === 'bank' ? (
+            <select
+              value={bankId}
+              onChange={(event) => setBankId(event.target.value)}
+              className="mt-2 w-full rounded-[14px] border border-gray-200 px-4 py-2.5 text-sm font-bold outline-none focus:border-gray-400"
+            >
+              <option value="">{t('record.completeOrder.selectBank')}</option>
+              {banks.map((bank) => (
+                <option key={bank.id} value={bank.id}>{bank.name}</option>
+              ))}
+            </select>
+          ) : null}
         </div>
 
         {/* One field: the cashier types the actual cash handed over (can be

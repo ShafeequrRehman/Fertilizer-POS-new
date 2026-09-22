@@ -149,7 +149,15 @@ const orderSchema = new mongoose.Schema(
     billName: { type: String, default: "" },
     cashRecipientName: { type: String, default: "" },
     status: { type: String, enum: ["pending", "completed", "cancelled", "paid"], default: "pending" },
-    paymentMethod: { type: String, enum: ["Cash", "Card", "E-Wallet"], default: "Cash" },
+    paymentMethod: { type: String, enum: ["Cash", "Card", "E-Wallet", "Bank"], default: "Cash" },
+    // Dashboard "Cash in Hand / Balance on Bank" routing: which Bank
+    // (backend/models/Bank.js) a Bank-method payment actually landed in -
+    // set alongside paymentMethod="Bank" at completion time (see
+    // orderController.applyOrderPatch's completeAndSettle branch), purely
+    // so this order's own record/receipt can show which bank collected it.
+    // Never touched for a Cash payment.
+    bankId: { type: mongoose.Schema.Types.ObjectId, ref: "Bank", default: null },
+    bankName: { type: String, default: "" },
     paidAmount: { type: Number, default: 0 },
     remainingAmount: { type: Number, default: 0 },
     // Change-Return Calculation: the raw cash amount the customer actually

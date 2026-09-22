@@ -4,7 +4,7 @@ const { requireShopMember } = require("../middleware/roleGuards");
 const requireLicenseValid = require("../middleware/requireLicenseValid");
 const requirePermission = require("../middleware/requirePermission");
 const requireAnyPermission = require("../middleware/requireAnyPermission");
-const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions } = require("../controllers/reportController");
+const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions, getDashboardSummary } = require("../controllers/reportController");
 
 const router = express.Router();
 
@@ -25,5 +25,13 @@ router.get("/ledger-transactions", requirePermission("reports.view"), getLedgerT
 // See reportController.js's own comments on exactly what each returns.
 router.get("/my-sales", requireAnyPermission("reports.view", "reports.view.own_sales"), getMySalesReport);
 router.get("/inventory", requireAnyPermission("reports.view", "reports.view.inventory"), getInventoryReport);
+
+// Home Dashboard's Accounting Overview widgets (Today's Sale, Cash in
+// Hand, Balance on Bank, Stock Value, Vendor Balance, Customer Udhar/
+// Advance, Total Purchase/Recovery/Expenses today, Sale on Cash/Bank/
+// Credit) - gated by "view.dashboard" (not "reports.view") since it's
+// meant for the same audience as the Dashboard page itself, which is a
+// wider group than who can open the full Reports section.
+router.get("/dashboard-summary", requirePermission("view.dashboard"), getDashboardSummary);
 
 module.exports = router;

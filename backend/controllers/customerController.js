@@ -6,6 +6,7 @@ const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { recordCustomerBankMovement } = require("./bankController");
+const { recordCashMovement } = require("./cashController");
 
 // The JWT (req.user) only ever carries id/role/shopId/permissions - never
 // a display name (see auth/tokenService.js) - so recording who made a
@@ -522,6 +523,26 @@ exports.settleCustomerDues = async (req, res) => {
         note,
         customerName: customer.name,
         customerPhone: customer.phone,
+        createdBy,
+      });
+    }
+
+    // Total Recovery / Cash in Hand (Dashboard): a Cash-method "Pay Dues"
+    // is real cash landing at the till right now, same as a Cash-method
+    // order payment (orderController.js's own completeAndSettle branch) -
+    // recorded here so the Dashboard's Cash in Hand figure and today's
+    // Total Recovery both reflect it. Only when the money did NOT already
+    // go into a bank above (paymentMethod:"bank" moves the bank's own
+    // balance instead, via recordCustomerBankMovement).
+    if (!bank) {
+      await recordCashMovement({
+        shopId: scope.shopId,
+        type: "due_recovery",
+        direction: "in",
+        amount,
+        note: note || `Due payment - ${customer.name || customer.phone}`,
+        relatedCustomerName: customer.name,
+        relatedCustomerPhone: customer.phone,
         createdBy,
       });
     }
