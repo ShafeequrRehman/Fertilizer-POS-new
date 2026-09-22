@@ -125,6 +125,12 @@ export const ingredientStock = {
     rateSuffix: "@ {{rate}}/{{unit}}",
     pdfTitle: "{{name}} — اسٹاک کھاتہ",
     pdfSubtitle: "موجودہ اسٹاک: {{qty}}{{unit}}",
+    rangeAll: "تمام",
+    rangeToday: "آج",
+    rangeMonth: "اس مہینے",
+    rangeCustom: "مخصوص تاریخ",
+    rangeCustomLabel: "{{from}} تا {{to}}",
+    toLabel: "تا",
   },
 
   purchaseForm: {

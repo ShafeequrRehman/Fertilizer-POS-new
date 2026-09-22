@@ -128,6 +128,12 @@ export const ingredientStock = {
     rateSuffix: "@ {{rate}}/{{unit}}",
     pdfTitle: "{{name}} — Stock Ledger",
     pdfSubtitle: "Current stock: {{qty}}{{unit}}",
+    rangeAll: "All",
+    rangeToday: "Today",
+    rangeMonth: "This Month",
+    rangeCustom: "Custom",
+    rangeCustomLabel: "{{from}} to {{to}}",
+    toLabel: "to",
   },
 
   purchaseForm: {

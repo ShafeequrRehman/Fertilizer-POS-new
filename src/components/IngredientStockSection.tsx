@@ -1617,6 +1617,24 @@ export function IngredientStockSection({
 // GET /ingredients/:id/ledger (backend/controllers/ingredientController.js's
 // getIngredientLedger), which already does all the merging/sorting/running-
 // balance math server-side - this component just renders it.
+// "Today"/"This Month"/"Custom" scope for the ledger view + its PDF - same
+// idea as the Purchase Order History panel's own Today/All toggle just above
+// in this file, and Record's PDF export date range, but self-contained here
+// (own from/to state) since a khata modal has no shared page-level range
+// picker to plug into. "All" (the default) shows the complete khata, same
+// as opening it always used to.
+type LedgerRangeMode = 'all' | 'today' | 'month' | 'custom';
+
+function isSameCalendarMonth(value: string, reference: Date) {
+  const d = new Date(value);
+  return d.getFullYear() === reference.getFullYear() && d.getMonth() === reference.getMonth();
+}
+
+function todayDateInputValue() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient; onClose: () => void }) {
   const { t } = useLanguage();
   useBackspaceToClose(onClose);
@@ -1624,6 +1642,9 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
   const [entries, setEntries] = useState<IngredientLedgerEntry[]>([]);
   const [currentStock, setCurrentStock] = useState(ingredient.currentStock);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [rangeMode, setRangeMode] = useState<LedgerRangeMode>('all');
+  const [customFrom, setCustomFrom] = useState(todayDateInputValue());
+  const [customTo, setCustomTo] = useState(todayDateInputValue());
 
   useEffect(() => {
     let cancelled = false;
@@ -1652,20 +1673,52 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
     return new Date(value).toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
+  // Scopes the full khata (already sorted newest-first, with each row's own
+  // `remaining` computed server-side over the COMPLETE history - see
+  // ingredientController.getIngredientLedger) down to whichever
+  // Today/This Month/Custom window is picked. Remaining is deliberately
+  // left untouched by this - it's each row's real running balance at that
+  // moment, not something that makes sense re-scoped to a range - only
+  // which rows are shown, and Total Purchased/Sold below, are.
+  const filteredEntries = useMemo(() => {
+    if (rangeMode === 'all') return entries;
+    if (rangeMode === 'today') {
+      const now = new Date();
+      return entries.filter((e) => isSameCalendarDay(e.date, now));
+    }
+    if (rangeMode === 'month') {
+      const now = new Date();
+      return entries.filter((e) => isSameCalendarMonth(e.date, now));
+    }
+    if (!customFrom || !customTo) return entries;
+    const from = new Date(`${customFrom}T00:00:00`);
+    const to = new Date(`${customTo}T23:59:59.999`);
+    return entries.filter((e) => {
+      const d = new Date(e.date);
+      return d >= from && d <= to;
+    });
+  }, [entries, rangeMode, customFrom, customTo]);
+
+  const rangeLabel =
+    rangeMode === 'today' ? t('ingredientStock.ledger.rangeToday')
+    : rangeMode === 'month' ? t('ingredientStock.ledger.rangeMonth')
+    : rangeMode === 'custom' ? t('ingredientStock.ledger.rangeCustomLabel', { from: customFrom, to: customTo })
+    : t('ingredientStock.ledger.rangeAll');
+
   const totals = useMemo(
     () =>
-      entries.reduce(
+      filteredEntries.reduce(
         (acc, e) => ({
           purchased: acc.purchased + (e.type === 'purchase' ? e.quantity : 0),
           sold: acc.sold + (e.type === 'sale' ? e.quantity : 0),
         }),
         { purchased: 0, sold: 0 }
       ),
-    [entries]
+    [filteredEntries]
   );
 
   function buildLedgerPdfRows(): Array<Array<string | number>> {
-    return entries.map((e) => [
+    return filteredEntries.map((e) => [
       formatLedgerDateTime(e.date),
       `${e.label} · ${e.detail}`,
       e.type === 'purchase' ? `${formatStockQty(e.quantity)}${ingredient.unit}` : '—',
@@ -1678,7 +1731,7 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
     const doc = (
       <ReportPdfDocument
         title={t('ingredientStock.ledger.pdfTitle', { name: ingredient.name })}
-        subtitle={t('ingredientStock.ledger.pdfSubtitle', { qty: formatStockQty(currentStock), unit: ingredient.unit })}
+        subtitle={`${rangeLabel} · ${t('ingredientStock.ledger.pdfSubtitle', { qty: formatStockQty(currentStock), unit: ingredient.unit })}`}
         stats={[
           { label: t('ingredientStock.ledger.totalPurchased'), value: `${formatStockQty(totals.purchased)}${ingredient.unit}` },
           { label: t('ingredientStock.ledger.totalSold'), value: `${formatStockQty(totals.sold)}${ingredient.unit}` },
@@ -1700,7 +1753,8 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
         ]}
       />
     );
-    void downloadPdfDocument(doc, `${ingredient.name.replace(/\s+/g, '_')}_stock_ledger.pdf`);
+    const rangeSuffix = rangeMode === 'custom' ? `_${customFrom}_to_${customTo}` : rangeMode === 'all' ? '' : `_${rangeMode}`;
+    void downloadPdfDocument(doc, `${ingredient.name.replace(/\s+/g, '_')}_stock_ledger${rangeSuffix}.pdf`);
   }
 
   return (
@@ -1718,7 +1772,7 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
             <button
               type="button"
               onClick={downloadLedgerPdf}
-              disabled={isLoading || entries.length === 0}
+              disabled={isLoading || filteredEntries.length === 0}
               title={t('ingredientStock.ledger.downloadPdf')}
               className="glass-pill inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-xs font-black uppercase tracking-wider text-gray-700 transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -1730,7 +1784,44 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
           </div>
         </div>
 
-        <div className="grid shrink-0 grid-cols-2 gap-3 px-6 pt-4 sm:grid-cols-2">
+        <div className="shrink-0 space-y-2 px-6 pt-4">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(['all', 'today', 'month', 'custom'] as LedgerRangeMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setRangeMode(mode)}
+                className={`rounded-full px-3.5 py-1.5 text-[11px] font-black uppercase tracking-wider transition-colors ${
+                  rangeMode === mode ? "bg-indigo-600 text-white shadow-sm" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                }`}
+              >
+                {mode === 'all' ? t('ingredientStock.ledger.rangeAll')
+                  : mode === 'today' ? t('ingredientStock.ledger.rangeToday')
+                  : mode === 'month' ? t('ingredientStock.ledger.rangeMonth')
+                  : t('ingredientStock.ledger.rangeCustom')}
+              </button>
+            ))}
+          </div>
+          {rangeMode === 'custom' ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                className="rounded-xl border-none ring-1 ring-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+              />
+              <span className="text-xs font-bold text-slate-400">{t('ingredientStock.ledger.toLabel')}</span>
+              <input
+                type="date"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                className="rounded-xl border-none ring-1 ring-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+              />
+            </div>
+          ) : null}
+        </div>
+
+        <div className="grid shrink-0 grid-cols-2 gap-3 px-6 pt-3 sm:grid-cols-2">
           <div className="rounded-2xl bg-emerald-50 px-4 py-3">
             <p className="text-[10px] font-black uppercase tracking-widest text-emerald-500">{t('ingredientStock.ledger.totalPurchased')}</p>
             <p className="mt-0.5 text-lg font-black text-emerald-700">{formatStockQty(totals.purchased)}{ingredient.unit}</p>
@@ -1748,13 +1839,13 @@ function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient
             </div>
           ) : loadError ? (
             <div className="rounded-2xl bg-rose-50 px-6 py-8 text-center text-sm font-bold text-rose-500">{loadError}</div>
-          ) : entries.length === 0 ? (
+          ) : filteredEntries.length === 0 ? (
             <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-400">
               {t('ingredientStock.ledger.noEntries')}
             </div>
           ) : (
             <div className="space-y-2">
-              {entries.map((entry, index) => (
+              {filteredEntries.map((entry, index) => (
                 <div key={index} className="flex items-center justify-between gap-3 rounded-2xl bg-white/60 px-4 py-3 shadow-sm ring-1 ring-slate-100">
                   <div className="flex min-w-0 items-center gap-3">
                     <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${entry.type === 'purchase' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
