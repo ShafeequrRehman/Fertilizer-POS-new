@@ -39,14 +39,13 @@ export default function CompleteOrderModal({
   setPrintReadyUrl: (url: string | null) => void;
 }) {
   const { t } = useLanguage();
+  // Single field, doubling as the change calculator - the cashier types the
+  // REAL cash the customer handed over here (can be more than Payable Now).
+  // Nothing is clamped as they type any more, so this can genuinely hold
+  // "5000" against a 4600 bill. What actually gets recorded as paid is
+  // capped at Payable Now down in settle() below - this field itself never
+  // gets rewritten, so the cashier's own typed number stays on screen.
   const [paymentAmount, setPaymentAmount] = useState('');
-  // Cashier's own change calculator - purely informational, never sent to
-  // the server. The Partial Payment Amount field above is clamped to
-  // Payable Now (it's what actually gets recorded as paid), so it can't
-  // hold the real cash a customer physically handed over when that's more
-  // than the bill - this lets the cashier type that real amount and see
-  // how much change to hand back, without it touching what gets saved.
-  const [cashReceived, setCashReceived] = useState('');
   const [customerDue, setCustomerDue] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -86,11 +85,17 @@ export default function CompleteOrderModal({
 
   const owed = Number(order.remainingAmount ?? order.total ?? 0);
   const payable = owed + customerDue;
-  const changeDue = cashReceived && Number(cashReceived) > payable ? Number(cashReceived) - payable : 0;
+  // How much change to hand back - shown live under the input, from the raw
+  // typed amount (not the capped one below).
+  const changeDue = paymentAmount && Number(paymentAmount) > payable ? Number(paymentAmount) - payable : 0;
 
   async function settle(full: boolean) {
-    const paid = full ? payable : Number(paymentAmount || 0);
-    if (!full && (paid < 0 || paid > payable)) {
+    // Cap at Payable Now - the cashier may have typed the full cash-in-hand
+    // amount (e.g. 5000 against a 4600 bill) to see the change due, but the
+    // amount actually recorded against the order/account is never more
+    // than what was really owed.
+    const paid = full ? payable : Math.min(Number(paymentAmount || 0), payable);
+    if (!full && paid < 0) {
       setError(t('record.errors.invalidAmount'));
       return;
     }
@@ -181,21 +186,21 @@ export default function CompleteOrderModal({
           <DetailRow label={t('record.completeOrder.payableNow')} value={`Rs ${payable}`} strong />
         </div>
 
-        {/* Change calculator - the cashier types the REAL cash handed over
-            here (can be more than Payable Now), and this shows how much
-            to give back. Deliberately a separate field from Partial
-            Payment Amount below (which stays clamped to Payable Now,
-            since that's the number that actually gets recorded as paid) -
-            this one never affects what gets saved. */}
+        {/* One field: the cashier types the actual cash handed over (can be
+            more than Payable Now - e.g. 5000 against a 4600 bill). The
+            Return line below shows the change to hand back, but only
+            Payable Now ever gets recorded as paid (capped in settle()
+            above) - the account never records more than what was owed. */}
         <div className="mt-4">
-          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.cashReceived')}</label>
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.partialPaymentAmount')}</label>
           <input
-            value={cashReceived}
+            value={paymentAmount}
             onChange={(event) => {
               if (!/^\d*$/.test(event.target.value)) return;
-              setCashReceived(event.target.value);
+              setPaymentAmount(event.target.value);
+              if (event.target.value) setConfirmPending(false);
             }}
-            placeholder={t('record.completeOrder.cashReceivedPlaceholder')}
+            placeholder={t('record.completeOrder.upToAmount', { amount: payable })}
             className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
           />
           {changeDue > 0 ? (
@@ -203,25 +208,6 @@ export default function CompleteOrderModal({
               {t('record.completeOrder.returnAmount', { amount: changeDue })}
             </p>
           ) : null}
-        </div>
-
-        <div className="mt-4">
-          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">{t('record.completeOrder.partialPaymentAmount')}</label>
-          <input
-            value={paymentAmount}
-            onChange={(event) => {
-              if (!/^\d*$/.test(event.target.value)) return;
-              // Clamped to Payable Now as they type - same fix as
-              // SalesPage.tsx's Complete Payment modal, so this field can
-              // never hold an amount above what's actually owed.
-              const digitsOnly = event.target.value;
-              const clamped = digitsOnly === '' ? '' : String(Math.min(Number(digitsOnly), payable));
-              setPaymentAmount(clamped);
-              if (clamped) setConfirmPending(false);
-            }}
-            placeholder={t('record.completeOrder.upToAmount', { amount: payable })}
-            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
-          />
         </div>
 
         {!paymentAmount ? (
