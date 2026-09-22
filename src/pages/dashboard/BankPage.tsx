@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { fetchBanks, createBank, addBankTransaction } from '@/lib/pos-api';
 import { Bank } from '@/lib/pos-types';
-import { Landmark, Plus, RefreshCcw, Save, X, ArrowDownCircle, ArrowUpCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Landmark, Plus, RefreshCcw, Save, X, ArrowDownCircle, ArrowUpCircle, ChevronDown, ChevronUp, Download } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 
 // The shop's own bank ledger - same "khata" idea as Customer Dues
@@ -167,8 +167,71 @@ function BankCard({ bank, onChanged, confirm, toast }: {
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
 
   const amountValue = Number(amount) || 0;
+
+  // Bank Statement PDF - same "title, stats, one table" ReportPdfDocument
+  // building block DuesPage.tsx's own Dues Statement PDF uses (see
+  // buildDuesStatementDoc there), just for this bank's own history instead
+  // of a customer's. Unlike that customer statement, no running-balance
+  // replay is needed here - each entry's balanceAfter was computed and
+  // stored server-side at the moment it happened (bankController.js), so
+  // it's already exactly right; this just reads it straight off.
+  async function handleDownloadPdf() {
+    setIsDownloadingPdf(true);
+    try {
+      const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
+      const totalDeposits = bank.history.filter(e => e.type === 'deposit').reduce((sum, e) => sum + e.amount, 0);
+      const totalWithdrawals = bank.history.filter(e => e.type === 'withdrawal').reduce((sum, e) => sum + e.amount, 0);
+      const doc = (
+        <ReportPdfDocument
+          title="Bank Statement"
+          subtitle={bank.name}
+          stats={[
+            { label: 'Current Balance', value: `Rs ${bank.balance.toLocaleString()}` },
+            { label: 'Total Payments Added', value: `Rs ${totalDeposits.toLocaleString()}` },
+            { label: 'Total Withdrawals', value: `Rs ${totalWithdrawals.toLocaleString()}` },
+          ]}
+          tables={[
+            {
+              title: 'History',
+              columns: [
+                { label: 'Date', width: 1 },
+                { label: 'Entry', width: 1.6 },
+                { label: 'Detail', width: 1.8 },
+                { label: 'Deposit', width: 1, align: 'right' },
+                { label: 'Withdrawal', width: 1, align: 'right' },
+                { label: 'Balance', width: 1.1, align: 'right' },
+              ],
+              // Newest-first, same order the on-screen History list above
+              // already shows (bank.history comes back sorted that way -
+              // see bankController.js's serializeBank).
+              rows: bank.history.map((entry) => {
+                const isIn = entry.type === 'deposit';
+                const who = entry.relatedCustomerName
+                  ? (isIn ? `Received from ${entry.relatedCustomerName}` : `Given to ${entry.relatedCustomerName}`)
+                  : (isIn ? 'Payment Added' : 'Withdrawal');
+                return [
+                  new Date(entry.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+                  who,
+                  entry.note || '—',
+                  isIn ? `Rs ${entry.amount.toLocaleString()}` : '—',
+                  isIn ? '—' : `Rs ${entry.amount.toLocaleString()}`,
+                  `Rs ${entry.balanceAfter.toLocaleString()}`,
+                ];
+              }),
+              footer: ['', '', 'Current Balance', `Rs ${totalDeposits.toLocaleString()}`, `Rs ${totalWithdrawals.toLocaleString()}`, `Rs ${bank.balance.toLocaleString()}`],
+              emptyMessage: 'No transactions recorded for this bank yet.',
+            },
+          ]}
+        />
+      );
+      await downloadPdfDocument(doc, `${bank.name.replace(/\s+/g, '_')}_bank_statement.pdf`);
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  }
 
   const record = async (type: 'deposit' | 'withdrawal') => {
     if (amountValue <= 0) return;
@@ -196,10 +259,21 @@ function BankCard({ bank, onChanged, confirm, toast }: {
 
   return (
     <div className="bg-white rounded-[28px] border border-slate-200 shadow-sm p-5 space-y-4">
-      <div>
-        <p className="text-lg font-black text-slate-900">{bank.name}</p>
-        <p className={`text-2xl font-black ${bank.balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>₨{bank.balance.toLocaleString()}</p>
-        <p className="text-[11px] font-bold text-slate-400">Current balance</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-lg font-black text-slate-900">{bank.name}</p>
+          <p className={`text-2xl font-black ${bank.balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>₨{bank.balance.toLocaleString()}</p>
+          <p className="text-[11px] font-bold text-slate-400">Current balance</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleDownloadPdf()}
+          disabled={isDownloadingPdf}
+          title="Download this bank's complete statement as a PDF"
+          className="flex shrink-0 items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
+        >
+          <Download size={13} /> {isDownloadingPdf ? 'Preparing...' : 'PDF'}
+        </button>
       </div>
 
       <div className="space-y-2">
