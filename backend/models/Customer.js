@@ -16,6 +16,14 @@ const duesHistorySchema = new mongoose.Schema(
     note: { type: String, default: "", trim: true },
     balanceAfter: { type: Number, required: true },
     createdBy: { type: String, default: "" },
+    // How this entry actually moved money - "bank" means it went through
+    // one of the shop's own Bank documents (see bankController.js's
+    // recordCustomerBankMovement, called from customerController.js's
+    // updateCustomerDues/settleCustomerDues) and bankName records which
+    // one, purely for display here (DuesPage.tsx's History row) - the
+    // Bank's own history is the source of truth for that side of it.
+    paymentMethod: { type: String, enum: ["cash", "bank"], default: "cash" },
+    bankName: { type: String, default: "" },
   },
   { timestamps: { createdAt: true, updatedAt: false }, _id: false }
 );
@@ -29,7 +37,12 @@ const customerSchema = new mongoose.Schema(
     // uniqueness is now scoped to (shopId, phone) instead.
     phone: { type: String, required: true, trim: true },
     address: { type: String, default: "" },
-    previousDues: { type: Number, default: 0, min: 0 },
+    // No longer floored at 0 - "- Pay Dues" (settleCustomerDues) can now
+    // push this negative, which means the CUSTOMER is in credit (they've
+    // paid the shop more than they currently owe, an advance) rather than
+    // the shop being owed. totalDue (previousDues + unpaid orders) simply
+    // goes negative too in that case - see getCustomerLedger's own comment.
+    previousDues: { type: Number, default: 0 },
     duesHistory: { type: [duesHistorySchema], default: [] },
   },
   { timestamps: true }

@@ -40,6 +40,10 @@ export default function DuesHistoryDetailModal({
             <DetailBox label="Amount" value={`Rs ${entry.amount}`} />
             <DetailBox label="Balance After" value={`Rs ${entry.balanceAfter}`} />
             <DetailBox label="By" value={entry.createdBy || '—'} />
+            <DetailBox
+              label="Payment Method"
+              value={entry.paymentMethod === 'bank' ? `Bank${entry.bankName ? ` - ${entry.bankName}` : ''}` : 'Cash'}
+            />
           </div>
           <div className="rounded-[20px] bg-white/50 p-4 text-sm shadow-inner">
             <DetailRow label="Note" value={entry.note || 'No note'} />

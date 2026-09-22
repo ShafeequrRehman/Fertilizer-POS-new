@@ -297,6 +297,8 @@ exports.getCustomerLedger = async (req, res) => {
             balanceAfter: entry.balanceAfter,
             createdBy: entry.createdBy || "",
             createdAt: entry.createdAt,
+            paymentMethod: entry.paymentMethod || "cash",
+            bankName: entry.bankName || "",
           })),
         orders: periodOrders.map((order) => ({
           id: String(order._id),
@@ -429,21 +431,15 @@ exports.updateCustomerDues = async (req, res) => {
   const delta = nextPreviousDues - Number(customer.previousDues || 0);
   customer.previousDues = nextPreviousDues;
   const createdBy = await currentUserName(req);
-  // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
-  // worth a history row - only a real change is.
-  if (delta !== 0) {
-    customer.duesHistory.push({
-      type: delta > 0 ? "add" : "settle",
-      amount: Math.abs(delta),
-      note,
-      balanceAfter: nextPreviousDues,
-      createdBy,
-    });
-  }
-  await customer.save();
 
+  // Move the bank's own money FIRST (if applicable) so its real name is
+  // known before building the duesHistory entry below - recordCustomerBankMovement
+  // returns null (a silent no-op on the bank side) if the id doesn't
+  // resolve, in which case this just falls back to recording a plain cash
+  // entry rather than failing the whole "+ Add Dues" action.
+  let bank = null;
   if (paymentMethod === "bank" && bankId && delta > 0) {
-    await recordCustomerBankMovement({
+    bank = await recordCustomerBankMovement({
       bankId,
       shopId: scope.shopId,
       type: "withdrawal",
@@ -455,27 +451,43 @@ exports.updateCustomerDues = async (req, res) => {
     });
   }
 
+  // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
+  // worth a history row - only a real change is.
+  if (delta !== 0) {
+    customer.duesHistory.push({
+      type: delta > 0 ? "add" : "settle",
+      amount: Math.abs(delta),
+      note,
+      balanceAfter: nextPreviousDues,
+      createdBy,
+      paymentMethod: bank ? "bank" : "cash",
+      bankName: bank?.name || "",
+    });
+  }
+  await customer.save();
+
   res.json(serializeCustomer(customer));
 };
 
 // POST /api/customers/:phone/settle-dues  body: { amount, note?, paymentMethod?, bankId? }
-// A real cash-in-hand payment against everything this customer owes -
-// unlike updateCustomerDues above (which only ever moves the manual
-// previousDues number and never touches an order), this is money actually
-// collected, so it has to land the same way completing an order's payment
-// does: the older lump-sum previousDues first, then this customer's
-// unpaid orders oldest-first, same distribution as completeAndSettle's own
-// cascade in orderController.js (kept deliberately identical so "pay
-// Rs500 off what they owe" behaves the same whether it's collected here or
-// alongside completing one of their orders). An order that reaches
-// remainingAmount 0 this way is marked "completed" the same way that
-// cascade already does - not a new kind of side effect, just the same one
-// reachable from a second place.
+// A real payment collected from the customer - "- Pay Dues"/"Clear" on
+// DuesPage.tsx. This is a pure manual-ledger move: it only ever adjusts
+// the lump-sum previousDues, by the full amount typed, and NEVER reaches
+// into this customer's Orders any more (an order's own paidAmount/
+// remainingAmount only ever changes through completing that specific
+// order - SalesPage/POSPage's Complete Payment flow - never from here).
+// previousDues can go negative as a result - that's a genuine advance/
+// credit (the customer has paid the shop more than the manual side of
+// what they currently owe), same idea as a bank account going into
+// credit. It nets against any real unpaid-order balance in totalDue
+// (see getCustomerLedger) without ever touching those Order documents
+// directly, so a customer's `+Rs 3224` / `-Rs 688` Dues Statement balance
+// always exactly matches Current Dues on the very last row - no separate
+// "applied to orders" bookkeeping to keep in sync with it.
 //
 // paymentMethod/bankId: when this payment actually arrived via bank
 // transfer rather than cash-in-hand, the picked bank's own balance goes UP
-// by whatever actually got applied (appliedAmount, not the raw requested
-// amount - see below) - see bankController.recordCustomerBankMovement.
+// by the same amount - see bankController.recordCustomerBankMovement.
 exports.settleCustomerDues = async (req, res) => {
   try {
     const phone = req.params.phone;
@@ -493,71 +505,20 @@ exports.settleCustomerDues = async (req, res) => {
       return res.status(404).json({ message: "Customer not found" });
     }
 
-    let remaining = amount;
-    let previousDues = Number(customer.previousDues || 0);
-
-    if (previousDues > 0 && remaining > 0) {
-      const applied = Math.min(previousDues, remaining);
-      previousDues -= applied;
-      remaining -= applied;
-    }
-
-    // Tracked purely so the History dropdown's settle entry can say which
-    // order(s) this payment actually paid down, same "from order, then
-    // order number" tracking the note field covers for manual entries.
-    const touchedOrders = [];
-
-    if (remaining > 0) {
-      const orders = await Order.find({
-        ...scope,
-        "customer.phone": phone,
-        status: { $ne: "cancelled" },
-      }).sort({ createdAt: 1 });
-
-      for (const order of orders) {
-        if (remaining <= 0) break;
-        const due = typeof order.remainingAmount === "number"
-          ? order.remainingAmount
-          : Math.max((order.total || 0) - (order.paidAmount || 0), 0);
-        if (due <= 0) continue;
-
-        const applied = Math.min(due, remaining);
-        order.paidAmount = Number(order.paidAmount || 0) + applied;
-        order.remainingAmount = Math.max(due - applied, 0);
-        if (order.remainingAmount === 0) order.status = "completed";
-        order.version = Number(order.version || 0) + 1;
-        await order.save();
-        touchedOrders.push({ dailyOrderNumber: order.dailyOrderNumber, applied });
-        remaining -= applied;
-      }
-    }
-
+    const previousDues = Number(customer.previousDues || 0) - amount;
     customer.previousDues = previousDues;
-
-    const appliedAmount = amount - remaining;
     const createdBy = await currentUserName(req);
-    if (appliedAmount > 0) {
-      const orderRefs = touchedOrders
-        .map((entry) => (entry.dailyOrderNumber !== undefined && entry.dailyOrderNumber !== null ? `#${entry.dailyOrderNumber} (Rs ${entry.applied})` : null))
-        .filter(Boolean)
-        .join(", ");
-      customer.duesHistory.push({
-        type: "settle",
-        amount: appliedAmount,
-        note: [note, orderRefs ? `Applied to orders: ${orderRefs}` : ""].filter(Boolean).join(" - "),
-        balanceAfter: previousDues,
-        createdBy,
-      });
-    }
 
-    await customer.save();
-
-    if (paymentMethod === "bank" && bankId && appliedAmount > 0) {
-      await recordCustomerBankMovement({
+    // Move the bank's own money FIRST (if applicable) so its real name is
+    // known before building the duesHistory entry below - see
+    // updateCustomerDues's own comment on the same ordering.
+    let bank = null;
+    if (paymentMethod === "bank" && bankId) {
+      bank = await recordCustomerBankMovement({
         bankId,
         shopId: scope.shopId,
         type: "deposit",
-        amount: appliedAmount,
+        amount,
         note,
         customerName: customer.name,
         customerPhone: customer.phone,
@@ -565,11 +526,22 @@ exports.settleCustomerDues = async (req, res) => {
       });
     }
 
-    // appliedAmount can be less than the requested amount if it exceeded
-    // everything this customer actually owed - the frontend caps the input
-    // at totalDue before ever sending this, but this stays defensive
-    // rather than trusting that.
-    res.json({ appliedAmount, unapplied: remaining });
+    customer.duesHistory.push({
+      type: "settle",
+      amount,
+      note,
+      balanceAfter: previousDues,
+      createdBy,
+      paymentMethod: bank ? "bank" : "cash",
+      bankName: bank?.name || "",
+    });
+
+    await customer.save();
+
+    // appliedAmount is always the full amount now (nothing left
+    // "unapplied") - kept in the response shape so the frontend's existing
+    // `result.appliedAmount` toast keeps working unchanged.
+    res.json({ appliedAmount: amount, unapplied: 0 });
   } catch (error) {
     res.status(500).json({ message: "Failed to settle dues", detail: error.message });
   }
@@ -637,9 +609,12 @@ exports.deleteDuesHistoryEntry = async (req, res) => {
       orderPortion += revert;
     }
 
+    // No longer floored at 0 - previousDues itself isn't any more (see
+    // Customer.js), so undoing an "add" can legitimately take it negative
+    // if other activity since has already put this customer in credit.
     const previousDuesPortion = Number(entry.amount) - orderPortion;
     let nextPreviousDues = Number(customer.previousDues || 0);
-    nextPreviousDues = entry.type === "add" ? Math.max(0, nextPreviousDues - previousDuesPortion) : nextPreviousDues + previousDuesPortion;
+    nextPreviousDues = entry.type === "add" ? nextPreviousDues - previousDuesPortion : nextPreviousDues + previousDuesPortion;
 
     customer.previousDues = nextPreviousDues;
     customer.duesHistory.splice(index, 1);

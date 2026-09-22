@@ -117,6 +117,12 @@ export interface DuesHistoryEntry {
   balanceAfter: number;
   createdBy: string;
   createdAt: string;
+  // How this entry actually moved money - "bank" means it went through
+  // one of the shop's own Bank accounts (see the Bank page) and bankName
+  // says which one. Absent/undefined on older entries recorded before
+  // this existed - treat as 'cash'.
+  paymentMethod?: 'cash' | 'bank';
+  bankName?: string;
 }
 
 // One linked-purchase row on a Unified Khata contact's statement - the

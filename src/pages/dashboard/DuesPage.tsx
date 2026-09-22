@@ -162,22 +162,17 @@ export default function CustomerDuesPage() {
   };
 
   // "- Pay Dues" / "Clear" are a real payment actually collected from the
-  // customer - unlike Add Dues above, this has to be able to reach
-  // whichever unpaid ORDERS make up the rest of totalDue, not just the
-  // manual lump-sum, or a cash payment for an order-based due would have
-  // nowhere to go (that used to be exactly this bug - see
-  // customerController.settleCustomerDues for the same oldest-debt-first
-  // distribution completeAndSettle's cascade already uses elsewhere).
-  // amount is capped at totalDue before this is ever called (see
-  // CustomerCard) - defensively re-checked here too.
+  // customer - a pure manual-ledger move against previousDues only, never
+  // touching this customer's Orders (see customerController.settleCustomerDues).
+  // Deliberately NOT capped at totalDue any more - a payment can exceed
+  // what's currently owed, which leaves the customer in credit (previousDues
+  // goes negative, shown as an advance) rather than being silently clipped.
   const handleSettlePayment = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
-    if (!customer) return false;
-    const cappedAmount = Math.min(amount, customer.totalDue || 0);
-    if (cappedAmount <= 0) return false;
+    if (!customer || amount <= 0) return false;
 
     try {
-      const result = await settleCustomerDues(phone, cappedAmount, note, bankId ? { bankId } : undefined);
+      const result = await settleCustomerDues(phone, amount, note, bankId ? { bankId } : undefined);
       if (!result) {
         toast.error('Could not record payment.');
         return false;
@@ -487,7 +482,12 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
       key: `manual-${entry.createdAt}-${entry.amount}`,
       date: entry.createdAt,
       label: entry.type === 'add' ? `+ Rs ${entry.amount} added` : `- Rs ${entry.amount} paid`,
-      detail: entry.note || 'No note',
+      // Bank-routed entries say so right in the History row - "took/gave
+      // via <bank>" - not just on the Bank page's own history (see
+      // customerController.js's updateCustomerDues/settleCustomerDues).
+      detail: entry.paymentMethod === 'bank' && entry.bankName
+        ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.bankName}`
+        : (entry.note || 'No note'),
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
       orderId: undefined as string | undefined,
@@ -1031,9 +1031,9 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
               setSaving(false);
               if (ok) { setAmount(''); setNote(''); }
             }}
-            disabled={saving || amountValue <= 0 || amountValue > totalDue || (paymentMethod === 'bank' && !bankId)}
+            disabled={saving || amountValue <= 0 || (paymentMethod === 'bank' && !bankId)}
             className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
-            title={amountValue > totalDue ? `Can't exceed the ₨${totalDue} owed` : 'Record a payment against everything owed'}
+            title={amountValue > totalDue ? `More than the ₨${totalDue} owed - the extra becomes an advance` : 'Record a payment against everything owed'}
           >
             {saving ? 'Saving...' : '- Pay Dues'}
           </button>
