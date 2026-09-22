@@ -14,6 +14,7 @@ export const sidebar = {
   management: "Customers & HR",
   dues: "Customer Dues",
   ledger: "Ledger",
+  bank: "Bank",
   record: "Record",
   shifts: "Shifts",
   offline: "Connect Devices",

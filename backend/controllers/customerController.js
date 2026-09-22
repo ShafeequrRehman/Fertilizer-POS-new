@@ -5,6 +5,7 @@ const IngredientPurchase = require("../models/IngredientPurchase");
 const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
+const { recordCustomerBankMovement } = require("./bankController");
 
 // The JWT (req.user) only ever carries id/role/shopId/permissions - never
 // a display name (see auth/tokenService.js) - so recording who made a
@@ -394,7 +395,7 @@ exports.getCustomerOutstanding = async (req, res) => {
   }
 };
 
-// PATCH /api/customers/dues/:phone  body: { previousDues, note? }
+// PATCH /api/customers/dues/:phone  body: { previousDues, note?, paymentMethod?, bankId? }
 // `previousDues` is still the new TOTAL lump-sum figure (not a delta) -
 // kept exactly as before so pos-mobile's DuesScreen (which also calls this
 // same endpoint) keeps working unchanged. The note - and the history entry
@@ -403,17 +404,31 @@ exports.getCustomerOutstanding = async (req, res) => {
 // whatever it was) is what actually gets recorded as the entry's `amount`
 // so "+Rs 500 (note)" in the History dropdown always matches what really
 // changed, not just whatever number happened to be typed into the field.
+//
+// paymentMethod/bankId are new: this endpoint is only ever called from
+// "+ Add Dues" (DuesPage.tsx), which is the shop CHARGING the customer -
+// giving them something (an advance, credit for a purchase not tied to an
+// order) rather than collecting anything. When that credit was actually
+// handed over via bank transfer instead of cash-in-hand, the picked
+// bank's own balance needs to go DOWN by the same amount - see
+// bankController.recordCustomerBankMovement. A plain cash entry (the
+// default, and the only option before this) never touches any Bank
+// document, exactly as before.
 exports.updateCustomerDues = async (req, res) => {
   const nextPreviousDues = Number(req.body.previousDues || 0);
   const note = String(req.body.note || "").trim();
+  const paymentMethod = req.body.paymentMethod === "bank" ? "bank" : "cash";
+  const bankId = req.body.bankId ? String(req.body.bankId) : "";
 
-  const customer = await Customer.findOne({ phone: req.params.phone, ...shopScope(req) });
+  const scope = shopScope(req);
+  const customer = await Customer.findOne({ phone: req.params.phone, ...scope });
   if (!customer) {
     return res.status(404).json({ error: "Customer not found" });
   }
 
   const delta = nextPreviousDues - Number(customer.previousDues || 0);
   customer.previousDues = nextPreviousDues;
+  const createdBy = await currentUserName(req);
   // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
   // worth a history row - only a real change is.
   if (delta !== 0) {
@@ -422,15 +437,28 @@ exports.updateCustomerDues = async (req, res) => {
       amount: Math.abs(delta),
       note,
       balanceAfter: nextPreviousDues,
-      createdBy: await currentUserName(req),
+      createdBy,
     });
   }
   await customer.save();
 
+  if (paymentMethod === "bank" && bankId && delta > 0) {
+    await recordCustomerBankMovement({
+      bankId,
+      shopId: scope.shopId,
+      type: "withdrawal",
+      amount: delta,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
   res.json(serializeCustomer(customer));
 };
 
-// POST /api/customers/:phone/settle-dues  body: { amount }
+// POST /api/customers/:phone/settle-dues  body: { amount, note?, paymentMethod?, bankId? }
 // A real cash-in-hand payment against everything this customer owes -
 // unlike updateCustomerDues above (which only ever moves the manual
 // previousDues number and never touches an order), this is money actually
@@ -443,11 +471,18 @@ exports.updateCustomerDues = async (req, res) => {
 // remainingAmount 0 this way is marked "completed" the same way that
 // cascade already does - not a new kind of side effect, just the same one
 // reachable from a second place.
+//
+// paymentMethod/bankId: when this payment actually arrived via bank
+// transfer rather than cash-in-hand, the picked bank's own balance goes UP
+// by whatever actually got applied (appliedAmount, not the raw requested
+// amount - see below) - see bankController.recordCustomerBankMovement.
 exports.settleCustomerDues = async (req, res) => {
   try {
     const phone = req.params.phone;
     const amount = Math.max(Number(req.body.amount) || 0, 0);
     const note = String(req.body.note || "").trim();
+    const paymentMethod = req.body.paymentMethod === "bank" ? "bank" : "cash";
+    const bankId = req.body.bankId ? String(req.body.bankId) : "";
     if (amount <= 0) {
       return res.status(400).json({ message: "amount must be greater than 0", reason: "validation_error" });
     }
@@ -500,6 +535,7 @@ exports.settleCustomerDues = async (req, res) => {
     customer.previousDues = previousDues;
 
     const appliedAmount = amount - remaining;
+    const createdBy = await currentUserName(req);
     if (appliedAmount > 0) {
       const orderRefs = touchedOrders
         .map((entry) => (entry.dailyOrderNumber !== undefined && entry.dailyOrderNumber !== null ? `#${entry.dailyOrderNumber} (Rs ${entry.applied})` : null))
@@ -510,11 +546,24 @@ exports.settleCustomerDues = async (req, res) => {
         amount: appliedAmount,
         note: [note, orderRefs ? `Applied to orders: ${orderRefs}` : ""].filter(Boolean).join(" - "),
         balanceAfter: previousDues,
-        createdBy: await currentUserName(req),
+        createdBy,
       });
     }
 
     await customer.save();
+
+    if (paymentMethod === "bank" && bankId && appliedAmount > 0) {
+      await recordCustomerBankMovement({
+        bankId,
+        shopId: scope.shopId,
+        type: "deposit",
+        amount: appliedAmount,
+        note,
+        customerName: customer.name,
+        customerPhone: customer.phone,
+        createdBy,
+      });
+    }
 
     // appliedAmount can be less than the requested amount if it exceeded
     // everything this customer actually owed - the frontend caps the input

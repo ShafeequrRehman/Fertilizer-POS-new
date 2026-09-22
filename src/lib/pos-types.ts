@@ -61,6 +61,31 @@ export interface Customer {
   previousDues: number;
 }
 
+// The Bank page's own khata - same "customer, but the shop borrows from
+// and pays into it instead of the other way round" idea. history is
+// newest-first (see backend/controllers/bankController.js's serializeBank).
+// relatedCustomerName/Phone are only ever set on an entry pushed by a
+// Customer Dues "+ Add Dues"/"- Pay Dues" action made "via Bank" - see
+// pos-api.ts's updateCustomerDues/settleCustomerDues bankId parameter.
+export interface BankTransaction {
+  type: 'deposit' | 'withdrawal';
+  amount: number;
+  note: string;
+  balanceAfter: number;
+  relatedCustomerPhone?: string;
+  relatedCustomerName?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface Bank {
+  id: string;
+  name: string;
+  balance: number;
+  history: BankTransaction[];
+  createdAt: string;
+}
+
 export interface LedgerOrder {
   id: string;
   dailyOrderNumber?: number;

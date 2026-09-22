@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CloseShopResult, CompanyLedgerEntry, Customer, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -153,9 +153,19 @@ export async function updateCustomer(id: string, payload: Partial<Customer>) {
   }
 }
 
-export async function updateCustomerDues(phone: string, previousDues: number, note?: string) {
+// bankPayment: when the cashier picked "Bank" instead of "Cash" for this
+// "+ Add Dues" charge, this is which of the shop's own banks handed the
+// customer that credit - its balance goes down by the same amount (see
+// backend/controllers/customerController.js's updateCustomerDues). Omit or
+// leave undefined for a plain cash entry, unchanged from before.
+export async function updateCustomerDues(phone: string, previousDues: number, note?: string, bankPayment?: { bankId: string }) {
   try {
-    const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, { previousDues, note });
+    const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, {
+      previousDues,
+      note,
+      paymentMethod: bankPayment?.bankId ? 'bank' : 'cash',
+      bankId: bankPayment?.bankId,
+    });
     return normalizeCustomer(response.data as Customer & { _id?: string; updatedAt?: string });
   } catch (error) {
     handleApiError(error);
@@ -184,9 +194,58 @@ export async function deleteDuesHistoryEntry(phone: string, entry: { createdAt: 
 // others too). Unlike updateCustomerDues above, this can mark an order
 // "completed" if the payment fully covers it - see
 // customerController.settleCustomerDues for the full reasoning.
-export async function settleCustomerDues(phone: string, amount: number, note?: string) {
+// bankPayment: when this collected payment ("- Pay Dues"/"Clear") actually
+// came in via bank transfer instead of cash-in-hand, this is which of the
+// shop's own banks it landed in - its balance goes up by whatever actually
+// got applied (see backend/controllers/customerController.js's
+// settleCustomerDues). Omit for a plain cash payment, unchanged from before.
+export async function settleCustomerDues(phone: string, amount: number, note?: string, bankPayment?: { bankId: string }) {
   try {
-    const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, { amount, note });
+    const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, {
+      amount,
+      note,
+      paymentMethod: bankPayment?.bankId ? 'bank' : 'cash',
+      bankId: bankPayment?.bankId,
+    });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Bank page (the shop's own bank accounts) ---
+// Mirrors the Customer Dues khata pattern - each bank has a running
+// balance and a history of movements - but the shop is the one borrowing
+// from/paying into it, not a customer. See backend/models/Bank.js.
+export async function fetchBanks() {
+  try {
+    const response = await api.get<Bank[]>('/banks');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Adding a bank and its very first payment in one step, e.g. "MCB Bank"
+// with an opening amount of 300000 - exactly the "go to Bank page, add my
+// bank, add a payment" flow this was built for. openingAmount can be 0 to
+// just create an empty bank.
+export async function createBank(name: string, openingAmount: number, note?: string) {
+  try {
+    const response = await api.post<Bank>('/banks', { name, openingBalance: openingAmount, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// A manual deposit/withdrawal recorded directly on the Bank page itself -
+// money the owner put into or took out of this bank with no customer
+// involved (a customer-linked movement is recorded automatically instead,
+// via updateCustomerDues/settleCustomerDues's own bankPayment above).
+export async function addBankTransaction(bankId: string, type: 'deposit' | 'withdrawal', amount: number, note?: string) {
+  try {
+    const response = await api.post<Bank>(`/banks/${bankId}/transactions`, { type, amount, note });
     return response.data;
   } catch (error) {
     handleApiError(error);

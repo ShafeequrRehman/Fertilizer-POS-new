@@ -12,8 +12,9 @@ import {
   cancelOrder,
   cancelIngredientPurchase,
   deleteDuesHistoryEntry,
+  fetchBanks,
 } from '@/lib/pos-api';
-import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry } from '@/lib/pos-types';
+import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank } from '@/lib/pos-types';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 import OrderDetailModal from '@/components/OrderDetailModal';
@@ -35,6 +36,10 @@ import DuesHistoryDetailModal from '@/components/DuesHistoryDetailModal';
 export default function CustomerDuesPage() {
   const { toast } = useToast();
   const [customers, setCustomers] = useState<LedgerCustomer[]>([]);
+  // The shop's own banks (see BankPage.tsx) - loaded once here so every
+  // CustomerCard's Cash/Bank payment-method picker can offer the same
+  // up-to-date list without each card fetching it separately.
+  const [banks, setBanks] = useState<Bank[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
@@ -50,6 +55,7 @@ export default function CustomerDuesPage() {
   useEffect(() => {
     loadCustomers();
     checkWhatsapp();
+    void loadBanks();
     // WhatsApp's socket can take a few seconds to finish (re)connecting
     // after the backend starts, so the very first status check right after
     // this page mounts can catch it mid-handshake and report "not
@@ -81,6 +87,15 @@ export default function CustomerDuesPage() {
       setErrorMessage(error instanceof Error ? error.message : 'Failed to load customers.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadBanks = async () => {
+    try {
+      const data = await fetchBanks();
+      if (data) setBanks(data);
+    } catch {
+      // Non-fatal - a card just falls back to Cash-only if this fails.
     }
   };
 
@@ -126,17 +141,18 @@ export default function CustomerDuesPage() {
   // amount field on a real success, and surfaces a toast either way
   // instead of silently doing nothing on failure (updateCustomerDues
   // throws on any HTTP error).
-  const handleAddManualDue = async (phone: string, amount: number, note: string): Promise<boolean> => {
+  const handleAddManualDue = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
 
     try {
-      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount, note);
+      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount, note, bankId ? { bankId } : undefined);
       if (!updated) {
         toast.error('Could not update dues.');
         return false;
       }
       await loadCustomers();
+      if (bankId) await loadBanks();
       toast.success('Dues updated.');
       return true;
     } catch (error) {
@@ -154,19 +170,20 @@ export default function CustomerDuesPage() {
   // distribution completeAndSettle's cascade already uses elsewhere).
   // amount is capped at totalDue before this is ever called (see
   // CustomerCard) - defensively re-checked here too.
-  const handleSettlePayment = async (phone: string, amount: number, note: string): Promise<boolean> => {
+  const handleSettlePayment = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer) return false;
     const cappedAmount = Math.min(amount, customer.totalDue || 0);
     if (cappedAmount <= 0) return false;
 
     try {
-      const result = await settleCustomerDues(phone, cappedAmount, note);
+      const result = await settleCustomerDues(phone, cappedAmount, note, bankId ? { bankId } : undefined);
       if (!result) {
         toast.error('Could not record payment.');
         return false;
       }
       await loadCustomers();
+      if (bankId) await loadBanks();
       toast.success(`₨${result.appliedAmount} recorded.`);
       return true;
     } catch (error) {
@@ -349,6 +366,7 @@ export default function CustomerDuesPage() {
                 <CustomerCard
                   key={c.id}
                   customer={c}
+                  banks={banks}
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
@@ -384,6 +402,7 @@ export default function CustomerDuesPage() {
                 <CustomerCard
                   key={c.id}
                   customer={c}
+                  banks={banks}
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
@@ -410,11 +429,18 @@ export default function CustomerDuesPage() {
   );
 }
 
-function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, onAddManual: (phone: string, amount: number, note: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
+function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], onAddManual: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Cash vs Bank - "+ Add Dues" via Bank means the shop handed the
+  // customer that credit out of the picked bank (its balance goes down);
+  // "- Pay Dues"/"Clear" via Bank means the customer's payment landed IN
+  // the picked bank (its balance goes up) - see
+  // customerController.updateCustomerDues/settleCustomerDues.
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank'>('cash');
+  const [bankId, setBankId] = useState<string>('');
   // Dues Statement PDF (Download/Send): a full, printable record of
   // everything that makes up this customer's balance - same historyEntries
   // trail already shown in the on-screen History dropdown below, just as a
@@ -948,15 +974,52 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
           onChange={e => setNote(e.target.value)}
           className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none focus:border-indigo-500"
         />
+
+        {/* Cash vs Bank - only shows the bank picker once "Bank" is chosen,
+            and only if the shop has added at least one bank on the Bank
+            page. Defaults back to Cash whenever no bank is available, so
+            this never blocks Add/Pay Dues for a shop that hasn't set one
+            up yet. */}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => { setPaymentMethod('cash'); setBankId(''); }}
+            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'cash' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+          >
+            Cash
+          </button>
+          <button
+            type="button"
+            onClick={() => setPaymentMethod('bank')}
+            disabled={banks.length === 0}
+            title={banks.length === 0 ? 'Add a bank on the Bank page first' : 'This payment goes through a bank'}
+            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'bank' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+          >
+            Bank
+          </button>
+        </div>
+        {paymentMethod === 'bank' ? (
+          <select
+            value={bankId}
+            onChange={e => setBankId(e.target.value)}
+            className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-indigo-500"
+          >
+            <option value="">Select bank...</option>
+            {banks.map(b => (
+              <option key={b.id} value={b.id}>{b.name} (₨{b.balance.toLocaleString()})</option>
+            ))}
+          </select>
+        ) : null}
+
         <div className="flex gap-2">
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onAddManual(customer.phone, amountValue, note.trim());
+              const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
               setSaving(false);
               if (ok) { setAmount(''); setNote(''); }
             }}
-            disabled={saving || amountValue <= 0}
+            disabled={saving || amountValue <= 0 || (paymentMethod === 'bank' && !bankId)}
             className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
           >
             {saving ? 'Saving...' : '+ Add Dues'}
@@ -964,11 +1027,11 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, amountValue, note.trim());
+              const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
               setSaving(false);
               if (ok) { setAmount(''); setNote(''); }
             }}
-            disabled={saving || amountValue <= 0 || amountValue > totalDue}
+            disabled={saving || amountValue <= 0 || amountValue > totalDue || (paymentMethod === 'bank' && !bankId)}
             className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
             title={amountValue > totalDue ? `Can't exceed the ₨${totalDue} owed` : 'Record a payment against everything owed'}
           >
@@ -979,11 +1042,11 @@ function CustomerCard({ customer, onAddManual, onSettlePayment, onRemind, onOrde
               const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
               if (!confirmed) return;
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, totalDue, note.trim());
+              const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
               setSaving(false);
               if (ok) { setAmount(''); setNote(''); }
             }}
-            disabled={saving || totalDue <= 0}
+            disabled={saving || totalDue <= 0 || (paymentMethod === 'bank' && !bankId)}
             className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Record a full payment, clearing everything this customer owes"
           >

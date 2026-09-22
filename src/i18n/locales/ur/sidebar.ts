@@ -8,6 +8,7 @@ export const sidebar = {
   management: "کسٹمرز اور عملہ",
   dues: "کسٹمر واجبات",
   ledger: "لیجر",
+  bank: "بینک",
   record: "ریکارڈ",
   shifts: "شفٹیں",
   offline: "ڈیوائسز جوڑیں",

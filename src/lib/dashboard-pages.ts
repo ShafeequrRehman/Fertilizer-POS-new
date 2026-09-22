@@ -62,6 +62,10 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F6' },
   { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F7' },
   { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F8' },
+  // The shop's own bank accounts - same dues.manage gate as Dues/Ledger
+  // above, since Bank exists to back Customer Dues payments made "via
+  // Bank" (see BankPage.tsx/DuesPage.tsx's paymentMethod picker).
+  { key: 'bank', label: 'Bank', href: '/dashboard/bank', permission: 'dues.manage' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
   // Sidebar/Route Bypass Bug Fix: same story as Dining Tables above - used
