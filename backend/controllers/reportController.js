@@ -5,6 +5,7 @@ const IngredientPurchase = require("../models/IngredientPurchase");
 const StaffPayment = require("../models/StaffPayment");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
+const Ingredient = require("../models/Ingredient");
 const Bank = require("../models/Bank");
 const CashRegister = require("../models/CashRegister");
 const { shopScope } = require("../middleware/attachShopScope");
@@ -447,6 +448,7 @@ exports.getDashboardSummary = async (req, res) => {
     const [
       todaysOrders,
       products,
+      ingredients,
       banks,
       cashRegister,
       vendorDueAgg,
@@ -461,11 +463,20 @@ exports.getDashboardSummary = async (req, res) => {
       Order.find({ shopId: shopObjectId, status: { $ne: "cancelled" }, createdAt: { $gte: start, $lte: end } })
         .select("total paidAmount remainingAmount paymentMethod")
         .lean(),
-      // Stock Value - selling-price x current stock across every product
-      // (there's no separate cost-price field on Product.js yet, so this is
-      // "what the shelf is worth at sale price", the closest available
-      // reading of the reference screenshot's STOCK VALUE card).
-      Product.find({ shopId: shopObjectId }).select("price stock").lean(),
+      // Stock Value fallback - selling-price x current stock, used ONLY for
+      // a Product that has no matching raw-stock Ingredient (see below).
+      // There's no separate cost-price field on Product.js, so this stays
+      // "what the shelf is worth at sale price" for that leftover case.
+      Product.find({ shopId: shopObjectId }).select("name price stock").lean(),
+      // Stock Value - real raw-stock valuation: currentStock x averageCost
+      // (the actual weighted purchase rate this batch cost, from
+      // IngredientPurchase - see Ingredient.js's own averageCost comment)
+      // for every tracked ingredient. This is what most items on a
+      // Fertilizer POS shelf actually are (Urea, DAP, sprays, ...) - see
+      // stockService.js's own "no-setup-required" same-name Product<->
+      // Ingredient auto-match, which is exactly why Product.stock itself is
+      // never touched/maintained for these and can't be used here.
+      Ingredient.find({ shopId: shopObjectId }).select("name currentStock averageCost").lean(),
       // Balance on Bank - every named bank this shop has added (Bank page).
       Bank.find({ shopId: shopObjectId }).select("balance").lean(),
       CashRegister.findOne({ shopId: shopObjectId }).select("balance").lean(),
@@ -510,7 +521,23 @@ exports.getDashboardSummary = async (req, res) => {
       else saleOnCash += Number(order.paidAmount || 0);
     }
 
-    const stockValue = products.reduce((sum, p) => sum + Number(p.price || 0) * Number(p.stock || 0), 0);
+    // Stock Value = every tracked Ingredient's own currentStock x
+    // averageCost (the real purchase-rate valuation, e.g. 199pcs x
+    // Rs400 = Rs79,600 for a batch bought at Rs400/pc), PLUS the old
+    // price x stock fallback for any Product that has no matching
+    // Ingredient by name (same case-insensitive match
+    // stockService.js's ingredientNameKey uses) - so a product that
+    // genuinely isn't raw-stock-tracked still counts, but one that IS
+    // (the normal case here) is valued off its real Ingredient record
+    // instead of Product.stock, which auto-matched products never
+    // actually update.
+    const ingredientNameSet = new Set(ingredients.map((i) => String(i.name || "").trim().toLowerCase()));
+    const ingredientStockValue = ingredients.reduce((sum, i) => sum + Number(i.currentStock || 0) * Number(i.averageCost || 0), 0);
+    const untrackedProductStockValue = products.reduce((sum, p) => {
+      if (ingredientNameSet.has(String(p.name || "").trim().toLowerCase())) return sum;
+      return sum + Number(p.price || 0) * Number(p.stock || 0);
+    }, 0);
+    const stockValue = ingredientStockValue + untrackedProductStockValue;
     const balanceOnBank = banks.reduce((sum, b) => sum + Number(b.balance || 0), 0);
     const cashInHand = Number(cashRegister?.balance || 0);
     const vendorBalance = vendorDueAgg[0]?.total || 0;
