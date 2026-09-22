@@ -104,7 +104,7 @@ export const ingredientStock = {
     logPurchaseTitle: "Log a purchased batch (company, product, rate, quantity, total, due)",
     logPurchase: "Log Purchase",
     adjustStockTitle: "Manual stock adjustment (correction/wastage - no cost)",
-    historyTitle: "Purchase order history for this ingredient (dates, suppliers, quantities, status)",
+    historyTitle: "Stock ledger for this ingredient (who it was bought from, who it was sold to, remaining balance)",
     purchaseOrderHistory: "Purchase Order History",
     recordCount: "{{count}} record",
     recordCountPlural: "{{count}} records",
@@ -112,6 +112,22 @@ export const ingredientStock = {
     unspecifiedSupplier: "Unspecified supplier",
     received: "Received",
     pending: "Pending",
+  },
+
+  ledger: {
+    stockLedger: "Stock Ledger",
+    currentStock: "Current Stock",
+    downloadPdf: "Download PDF",
+    totalPurchased: "Total Purchased",
+    totalSold: "Total Sold",
+    remaining: "Remaining",
+    entry: "Entry",
+    purchaseQty: "Purchase Qty",
+    saleQty: "Sale Qty",
+    noEntries: "No purchases or sales recorded for this ingredient yet.",
+    rateSuffix: "@ {{rate}}/{{unit}}",
+    pdfTitle: "{{name}} — Stock Ledger",
+    pdfSubtitle: "Current stock: {{qty}}{{unit}}",
   },
 
   purchaseForm: {

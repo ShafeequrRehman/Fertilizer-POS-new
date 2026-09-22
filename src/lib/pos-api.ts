@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -472,6 +472,18 @@ export async function restockIngredient(id: string, quantity: number, note?: str
 export async function deleteIngredient(id: string) {
   try {
     await api.delete(`/ingredients/${id}`);
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Per-Ingredient Stock Ledger (khata) - IngredientStockSection.tsx's History
+// icon on a stock item, mirroring fetchCustomerLedger/fetchBanks' own
+// pattern. See backend/controllers/ingredientController.js's getIngredientLedger.
+export async function fetchIngredientLedger(id: string) {
+  try {
+    const response = await api.get<IngredientLedgerResponse>(`/ingredients/${id}/ledger`);
+    return response.data;
   } catch (error) {
     handleApiError(error);
   }

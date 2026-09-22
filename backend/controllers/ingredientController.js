@@ -1,6 +1,9 @@
+const mongoose = require("mongoose");
 const IngredientCategory = require("../models/IngredientCategory");
 const Ingredient = require("../models/Ingredient");
 const Recipe = require("../models/Recipe");
+const IngredientPurchase = require("../models/IngredientPurchase");
+const Order = require("../models/Order");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { INGREDIENT_UNITS, UNIT_FAMILY, toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
@@ -200,4 +203,101 @@ exports.deleteIngredient = async (req, res) => {
   const ingredient = await Ingredient.findOneAndDelete({ _id: req.params.id, ...shopScope(req) });
   if (!ingredient) return res.status(404).json({ error: "Ingredient not found" });
   res.json({ message: "Ingredient deleted", id: req.params.id });
+};
+
+// GET /api/ingredients/:id/ledger
+//
+// Per-Ingredient Stock Khata - the Stock Manager's own ask: clicking the
+// History icon on a stock item (IngredientStockSection.tsx, which used to
+// only show that COMPANY's purchase-order history) should instead show a
+// full ledger of "kis se kitna purchase kiya aur kitna kis ko sale kiya" -
+// same shape as Customer/Bank's own khata (an in/out entry list with a
+// running balance column), just for this one ingredient's stock instead of
+// money. Two sources, merged and sorted chronologically:
+//   - IN:  every received IngredientPurchase batch of this ingredient
+//          (who it was bought from, how much).
+//   - OUT: every non-cancelled Order whose stockDeductions (see
+//          Order.js's own comment - the frozen per-order record of exactly
+//          how much of each ingredient that order's items actually
+//          consumed, written once by services/stockService.js at creation
+//          and never recomputed later) includes this ingredient.
+// Running Remaining is computed oldest-first purely from these two
+// sources, then the WHOLE series is shifted by a single constant offset
+// so the most recent row always lands exactly on Ingredient.currentStock -
+// the same "always reconciles to the real current balance on the last
+// row" approach DuesPage.tsx's own Dues Statement replay uses, needed here
+// because a plain quantity-only restock (exports.restockIngredient above)
+// moves currentStock without leaving a ledger entry of its own.
+exports.getIngredientLedger = async (req, res) => {
+  try {
+    const scope = shopScope(req);
+    const ingredient = await Ingredient.findOne({ _id: req.params.id, ...scope }).lean();
+    if (!ingredient) return res.status(404).json({ error: "Ingredient not found" });
+
+    const [purchases, orders] = await Promise.all([
+      IngredientPurchase.find({ ...scope, ingredientId: ingredient._id, status: "received" })
+        .select("purchaseOrderNumber companyName quantity rate totalAmount purchaseDate receivedAt")
+        .lean(),
+      Order.find({ ...scope, status: { $ne: "cancelled" }, "stockDeductions.ingredientId": ingredient._id })
+        .select("dailyOrderNumber shopSequenceNumber customer createdAt stockDeductions")
+        .lean(),
+    ]);
+
+    const entries = [];
+    for (const purchase of purchases) {
+      entries.push({
+        date: purchase.receivedAt || purchase.purchaseDate,
+        type: "purchase",
+        label: purchase.purchaseOrderNumber || "Purchase",
+        detail: purchase.companyName || "Unspecified supplier",
+        quantity: Number(purchase.quantity || 0),
+        direction: "in",
+        rate: purchase.rate || 0,
+        totalAmount: purchase.totalAmount || 0,
+      });
+    }
+    for (const order of orders) {
+      const deduction = (order.stockDeductions || []).find((d) => String(d.ingredientId) === String(ingredient._id));
+      if (!deduction || !(deduction.quantity > 0)) continue;
+      entries.push({
+        date: order.createdAt,
+        type: "sale",
+        label: `Order #${order.dailyOrderNumber ?? order.shopSequenceNumber ?? String(order._id).slice(-4)}`,
+        detail: order.customer?.name || "Walk-in Customer",
+        quantity: Number(deduction.quantity || 0),
+        direction: "out",
+      });
+    }
+
+    entries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    let running = 0;
+    for (const entry of entries) {
+      running += entry.direction === "in" ? entry.quantity : -entry.quantity;
+      entry.runningBeforeOffset = running;
+    }
+    // Shift the whole series so the most recent row reconciles exactly to
+    // the ingredient's real current stock - see this function's own header
+    // comment on why (untracked manual restocks/corrections).
+    const offset = entries.length > 0 ? Number(ingredient.currentStock || 0) - running : 0;
+    for (const entry of entries) {
+      entry.remaining = Math.round((entry.runningBeforeOffset + offset) * 1000) / 1000;
+      delete entry.runningBeforeOffset;
+    }
+
+    entries.reverse(); // newest-first, same convention as every other khata in this app
+
+    res.json({
+      ingredient: {
+        id: String(ingredient._id),
+        name: ingredient.name,
+        unit: ingredient.unit,
+        currentStock: ingredient.currentStock,
+        averageCost: ingredient.averageCost,
+      },
+      entries,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 };

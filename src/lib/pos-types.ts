@@ -107,6 +107,40 @@ export interface CashSummary {
   history: CashTransaction[];
 }
 
+// Per-Ingredient Stock Ledger (khata) - same "who it came from / who it
+// went to, with a running Remaining" idea as CashTransaction/BankTransaction
+// above, but for raw stock quantity instead of money. See
+// backend/controllers/ingredientController.js's getIngredientLedger:
+// 'purchase' rows are received IngredientPurchase batches (direction
+// always 'in'), 'sale' rows are completed orders that consumed this
+// ingredient via Order.stockDeductions (direction always 'out'). `remaining`
+// is a running balance reconciled so the newest (first, since the API
+// returns newest-first) row always matches the ingredient's real
+// currentStock at fetch time.
+export interface IngredientLedgerEntry {
+  date: string;
+  type: 'purchase' | 'sale';
+  label: string;
+  detail: string;
+  quantity: number;
+  direction: 'in' | 'out';
+  remaining: number;
+  // Only set on 'purchase' rows.
+  rate?: number;
+  totalAmount?: number;
+}
+
+export interface IngredientLedgerResponse {
+  ingredient: {
+    id: string;
+    name: string;
+    unit: IngredientUnit;
+    currentStock: number;
+    averageCost: number;
+  };
+  entries: IngredientLedgerEntry[];
+}
+
 // Home Dashboard's Accounting Overview widgets - see
 // backend/controllers/reportController.js's getDashboardSummary.
 export interface DashboardSummary {

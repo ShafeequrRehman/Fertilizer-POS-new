@@ -14,6 +14,7 @@ const {
   updateIngredient,
   restockIngredient,
   deleteIngredient,
+  getIngredientLedger,
 } = require("../controllers/ingredientController");
 
 const router = express.Router();
@@ -42,6 +43,7 @@ router.post("/", createIngredient);
 router.get("/:id", getIngredient);
 router.patch("/:id", updateIngredient);
 router.patch("/:id/restock", restockIngredient);
+router.get("/:id/ledger", getIngredientLedger);
 router.delete("/:id", deleteIngredient);
 
 module.exports = router;

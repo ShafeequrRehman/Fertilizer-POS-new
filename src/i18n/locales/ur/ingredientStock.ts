@@ -101,7 +101,7 @@ export const ingredientStock = {
     logPurchaseTitle: "خریدی گئی کھیپ ریکارڈ کریں (کمپنی، پروڈکٹ، قیمت، مقدار، کل، باقی)",
     logPurchase: "خریداری ریکارڈ کریں",
     adjustStockTitle: "دستی اسٹاک ایڈجسٹمنٹ (اصلاح/نقصان - کوئی قیمت نہیں)",
-    historyTitle: "اس خام مال کی خریداری آرڈر کی تاریخ (تاریخیں، سپلائرز، مقداریں، حیثیت)",
+    historyTitle: "اس خام مال کا اسٹاک کھاتہ (کس سے خریدا، کسے فروخت کیا، باقی مقدار)",
     purchaseOrderHistory: "خریداری آرڈر کی تاریخ",
     recordCount: "{{count}} ریکارڈ",
     recordCountPlural: "{{count}} ریکارڈز",
@@ -109,6 +109,22 @@ export const ingredientStock = {
     unspecifiedSupplier: "غیر متعین سپلائر",
     received: "موصول ہو گیا",
     pending: "زیر التوا",
+  },
+
+  ledger: {
+    stockLedger: "اسٹاک کھاتہ",
+    currentStock: "موجودہ اسٹاک",
+    downloadPdf: "پی ڈی ایف ڈاؤن لوڈ کریں",
+    totalPurchased: "کل خریدا گیا",
+    totalSold: "کل فروخت شدہ",
+    remaining: "باقی",
+    entry: "اندراج",
+    purchaseQty: "خریداری مقدار",
+    saleQty: "فروخت مقدار",
+    noEntries: "اس خام مال کے لیے ابھی تک کوئی خریداری یا فروخت ریکارڈ نہیں۔",
+    rateSuffix: "@ {{rate}}/{{unit}}",
+    pdfTitle: "{{name}} — اسٹاک کھاتہ",
+    pdfSubtitle: "موجودہ اسٹاک: {{qty}}{{unit}}",
   },
 
   purchaseForm: {

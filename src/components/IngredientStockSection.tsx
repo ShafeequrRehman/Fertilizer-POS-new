@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, Plus, Edit, Trash2, Search, PackagePlus, ShoppingCart, AlertTriangle, X, Building2, Download, FileSpreadsheet, MessageCircle, History, Clock, CheckCircle2 } from "lucide-react";
+import { Boxes, Plus, Edit, Trash2, Search, PackagePlus, ShoppingCart, AlertTriangle, X, Building2, Download, FileSpreadsheet, MessageCircle, History, XCircle, ArrowDownCircle, ArrowUpCircle } from "lucide-react";
 import {
   fetchIngredients,
   createIngredient,
@@ -15,8 +15,9 @@ import {
   fetchProducts,
   sendWhatsappDocument,
   fetchCustomerSearch,
+  fetchIngredientLedger,
 } from "@/lib/pos-api";
-import { Customer, Ingredient, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product, Recipe, Supplier } from "@/lib/pos-types";
+import { Customer, Ingredient, IngredientLedgerEntry, IngredientPurchase, IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product, Recipe, Supplier } from "@/lib/pos-types";
 import { getAuthShop } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { ReportPdfDocument, downloadPdfDocument, pdfDocumentToBase64 } from "@/lib/pdf-export";
@@ -25,6 +26,7 @@ import { isDesktopApp } from "@/lib/api";
 import { getIngredientsCache } from "@/lib/local-hub-api";
 import { estimateOfflineIngredients } from "@/lib/offline-ingredient-helpers";
 import { useLanguage } from "@/i18n";
+import { useBackspaceToClose } from "@/lib/keyboard-shortcuts";
 
 function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
@@ -138,7 +140,13 @@ export function IngredientStockSection({
   // at a time - same single-expansion pattern as isPurchasing/isRestocking
   // just below). Reads off the same `purchases` list already fetched once
   // in loadAll() - no separate per-ingredient fetch needed.
-  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  // Per-Ingredient Stock Ledger (khata) - which ingredient's full
+  // purchase+sale ledger modal is currently open (see IngredientLedgerModal
+  // below). Replaces the old inline "Purchase Order History" panel, which
+  // only showed the purchase side - the owner explicitly asked for both
+  // sides (who it was bought from AND who it was sold to) with a running
+  // Remaining column, same as the Customer/Bank khata pages.
+  const [ledgerIngredient, setLedgerIngredient] = useState<Ingredient | null>(null);
   const [newCompanyName, setNewCompanyName] = useState("");
   const [newCompanyPhone, setNewCompanyPhone] = useState("");
   // Doubles the Add Company form above as an Edit form too (same pattern
@@ -569,23 +577,6 @@ export function IngredientStockSection({
       if (!key) continue;
       if (!map.has(key)) map.set(key, new Set());
       map.get(key)!.add(purchase.ingredientId);
-    }
-    return map;
-  }, [purchases]);
-
-  // Purchase Logs Integration: every purchase batch ever logged against
-  // EACH ingredient, most-recent first - what the directory's per-ingredient
-  // History panel reads from (see expandedHistoryId above). Grouped once
-  // here rather than filtering `purchases` fresh on every render/toggle.
-  const purchasesByIngredientId = useMemo(() => {
-    const map = new Map<string, IngredientPurchase[]>();
-    for (const purchase of purchases) {
-      const list = map.get(purchase.ingredientId);
-      if (list) list.push(purchase);
-      else map.set(purchase.ingredientId, [purchase]);
-    }
-    for (const list of map.values()) {
-      list.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
     }
     return map;
   }, [purchases]);
@@ -1368,8 +1359,6 @@ export function IngredientStockSection({
             const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
             const isRestocking = restockingId === ingredient.id;
             const isPurchasing = purchasingId === ingredient.id;
-            const isHistoryOpen = expandedHistoryId === ingredient.id;
-            const ingredientHistory = purchasesByIngredientId.get(ingredient.id) || [];
             return (
               <div key={ingredient.id} className="rounded-[24px] border border-slate-100 bg-white shadow-sm hover:border-emerald-100 hover:shadow-md transition-all p-4">
                 {/* Was a single `flex items-center justify-between` row with
@@ -1423,9 +1412,9 @@ export function IngredientStockSection({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setExpandedHistoryId(isHistoryOpen ? null : ingredient.id)}
+                        onClick={() => setLedgerIngredient(ingredient)}
                         title={t('ingredientStock.directory.historyTitle')}
-                        className={`p-3 border rounded-xl transition-all shadow-sm ${isHistoryOpen ? "text-indigo-600 bg-indigo-50 border-indigo-100" : "text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border-transparent hover:border-indigo-100"}`}
+                        className="p-3 border rounded-xl transition-all shadow-sm text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border-transparent hover:border-indigo-100"
                       >
                         <History size={16} />
                       </button>
@@ -1438,45 +1427,6 @@ export function IngredientStockSection({
                     </div>
                   </div>
                 </div>
-                {isHistoryOpen ? (
-                  <div className="mt-3 border-t border-slate-100 pt-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <h6 className="text-[10px] font-black uppercase tracking-widest text-slate-400">{t('ingredientStock.directory.purchaseOrderHistory')}</h6>
-                      <span className="text-[10px] font-bold text-slate-300">
-                        {ingredientHistory.length === 1
-                          ? t('ingredientStock.directory.recordCount', { count: ingredientHistory.length })
-                          : t('ingredientStock.directory.recordCountPlural', { count: ingredientHistory.length })}
-                      </span>
-                    </div>
-                    {ingredientHistory.length === 0 ? (
-                      <p className="rounded-xl bg-slate-50 px-4 py-4 text-center text-xs font-bold text-slate-400">
-                        {t('ingredientStock.directory.noPurchaseOrdersForIngredient')}
-                      </p>
-                    ) : (
-                      <div className="max-h-64 space-y-1.5 overflow-y-auto">
-                        {ingredientHistory.map((p) => (
-                          <div key={p.id} className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-2.5">
-                            <div className="min-w-0">
-                              <p className="truncate text-xs font-black text-slate-700">
-                                {p.purchaseOrderNumber} <span className="font-bold text-slate-400">· {p.companyName || t('ingredientStock.directory.unspecifiedSupplier')}</span>
-                              </p>
-                              <p className="text-[10px] font-bold text-slate-400">{formatPurchaseDateTime(purchaseDisplayDate(p))}</p>
-                            </div>
-                            <div className="flex shrink-0 items-center gap-3">
-                              <span className="text-xs font-black text-slate-900 whitespace-nowrap">{p.quantity}{p.unit}</span>
-                              <span className={`flex items-center gap-1 text-[10px] font-black uppercase px-2.5 py-1 rounded-lg whitespace-nowrap ${
-                                p.status === "received" ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
-                              }`}>
-                                {p.status === "received" ? <CheckCircle2 size={11} /> : <Clock size={11} />}
-                                {p.status === "received" ? t('ingredientStock.directory.received') : t('ingredientStock.directory.pending')}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
                 {isPurchasing ? (
                   <div className="mt-3 space-y-3 border-t border-slate-100 pt-3">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1649,6 +1599,191 @@ export function IngredientStockSection({
               </div>
             );
           })}
+        </div>
+      </div>
+      {ledgerIngredient ? (
+        <IngredientLedgerModal ingredient={ledgerIngredient} onClose={() => setLedgerIngredient(null)} />
+      ) : null}
+    </div>
+  );
+}
+
+// Per-Ingredient Stock Ledger (khata) - "History icon click krain to stock
+// ki history ajaya kis say kitna purchase kiya aur kitna kis ko sale kiya,
+// pdf bhe download honi chahiye" - same khata pattern already built for
+// Customers (DuesPage.tsx) and Banks (BankPage.tsx): a running "Remaining"
+// balance column on the right, newest-first, purchase-side and sale-side
+// both in one merged timeline, plus a Download PDF button. Reads from
+// GET /ingredients/:id/ledger (backend/controllers/ingredientController.js's
+// getIngredientLedger), which already does all the merging/sorting/running-
+// balance math server-side - this component just renders it.
+function IngredientLedgerModal({ ingredient, onClose }: { ingredient: Ingredient; onClose: () => void }) {
+  const { t } = useLanguage();
+  useBackspaceToClose(onClose);
+  const [isLoading, setIsLoading] = useState(true);
+  const [entries, setEntries] = useState<IngredientLedgerEntry[]>([]);
+  const [currentStock, setCurrentStock] = useState(ingredient.currentStock);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        setIsLoading(true);
+        setLoadError(null);
+        const result = await fetchIngredientLedger(ingredient.id);
+        if (cancelled) return;
+        if (result) {
+          setEntries(result.entries);
+          setCurrentStock(result.ingredient.currentStock);
+        }
+      } catch (error) {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Failed to load ledger');
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ingredient.id]);
+
+  function formatLedgerDateTime(value: string) {
+    return new Date(value).toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  const totals = useMemo(
+    () =>
+      entries.reduce(
+        (acc, e) => ({
+          purchased: acc.purchased + (e.type === 'purchase' ? e.quantity : 0),
+          sold: acc.sold + (e.type === 'sale' ? e.quantity : 0),
+        }),
+        { purchased: 0, sold: 0 }
+      ),
+    [entries]
+  );
+
+  function buildLedgerPdfRows(): Array<Array<string | number>> {
+    return entries.map((e) => [
+      formatLedgerDateTime(e.date),
+      `${e.label} · ${e.detail}`,
+      e.type === 'purchase' ? `${formatStockQty(e.quantity)}${ingredient.unit}` : '—',
+      e.type === 'sale' ? `${formatStockQty(e.quantity)}${ingredient.unit}` : '—',
+      `${formatStockQty(e.remaining)}${ingredient.unit}`,
+    ]);
+  }
+
+  function downloadLedgerPdf() {
+    const doc = (
+      <ReportPdfDocument
+        title={t('ingredientStock.ledger.pdfTitle', { name: ingredient.name })}
+        subtitle={t('ingredientStock.ledger.pdfSubtitle', { qty: formatStockQty(currentStock), unit: ingredient.unit })}
+        stats={[
+          { label: t('ingredientStock.ledger.totalPurchased'), value: `${formatStockQty(totals.purchased)}${ingredient.unit}` },
+          { label: t('ingredientStock.ledger.totalSold'), value: `${formatStockQty(totals.sold)}${ingredient.unit}` },
+          { label: t('ingredientStock.ledger.currentStock'), value: `${formatStockQty(currentStock)}${ingredient.unit}` },
+        ]}
+        tables={[
+          {
+            title: t('ingredientStock.ledger.stockLedger'),
+            columns: [
+              { label: t('ingredientStock.export.dateTime'), width: 1.3 },
+              { label: t('ingredientStock.ledger.entry'), width: 2 },
+              { label: t('ingredientStock.ledger.purchaseQty'), width: 1, align: 'right' },
+              { label: t('ingredientStock.ledger.saleQty'), width: 1, align: 'right' },
+              { label: t('ingredientStock.ledger.remaining'), width: 1, align: 'right' },
+            ],
+            rows: buildLedgerPdfRows(),
+            emptyMessage: t('ingredientStock.ledger.noEntries'),
+          },
+        ]}
+      />
+    );
+    void downloadPdfDocument(doc, `${ingredient.name.replace(/\s+/g, '_')}_stock_ledger.pdf`);
+  }
+
+  return (
+    <div className="glass-overlay fixed inset-0 z-[130] flex items-center justify-center p-4">
+      <div className="glass-strong flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col rounded-[32px]">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/40 p-6">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-[0.18em] text-gray-400">{t('ingredientStock.ledger.stockLedger')}</p>
+            <h2 className="mt-1 truncate text-2xl font-black text-gray-900">{ingredient.name}</h2>
+            <p className="mt-1 text-sm font-bold text-gray-500">
+              {t('ingredientStock.ledger.currentStock')}: {formatStockQty(currentStock)}{ingredient.unit}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={downloadLedgerPdf}
+              disabled={isLoading || entries.length === 0}
+              title={t('ingredientStock.ledger.downloadPdf')}
+              className="glass-pill inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-xs font-black uppercase tracking-wider text-gray-700 transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Download size={14} /> {t('ingredientStock.ledger.downloadPdf')}
+            </button>
+            <button type="button" onClick={onClose} className="glass-pill rounded-full p-2.5 text-gray-500 transition hover:bg-white/70 hover:text-gray-900">
+              <XCircle size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid shrink-0 grid-cols-2 gap-3 px-6 pt-4 sm:grid-cols-2">
+          <div className="rounded-2xl bg-emerald-50 px-4 py-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-500">{t('ingredientStock.ledger.totalPurchased')}</p>
+            <p className="mt-0.5 text-lg font-black text-emerald-700">{formatStockQty(totals.purchased)}{ingredient.unit}</p>
+          </div>
+          <div className="rounded-2xl bg-rose-50 px-4 py-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">{t('ingredientStock.ledger.totalSold')}</p>
+            <p className="mt-0.5 text-lg font-black text-rose-700">{formatStockQty(totals.sold)}{ingredient.unit}</p>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+          {isLoading ? (
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 animate-pulse">
+              {t('ingredientStock.directory.loading')}
+            </div>
+          ) : loadError ? (
+            <div className="rounded-2xl bg-rose-50 px-6 py-8 text-center text-sm font-bold text-rose-500">{loadError}</div>
+          ) : entries.length === 0 ? (
+            <div className="rounded-2xl bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-400">
+              {t('ingredientStock.ledger.noEntries')}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {entries.map((entry, index) => (
+                <div key={index} className="flex items-center justify-between gap-3 rounded-2xl bg-white/60 px-4 py-3 shadow-sm ring-1 ring-slate-100">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${entry.type === 'purchase' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                      {entry.type === 'purchase' ? <ArrowDownCircle size={18} /> : <ArrowUpCircle size={18} />}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black text-slate-800">{entry.label}</p>
+                      <p className="truncate text-xs font-bold text-slate-400">
+                        {entry.detail} · {formatLedgerDateTime(entry.date)}
+                      </p>
+                      {entry.type === 'purchase' && entry.rate ? (
+                        <p className="text-[10px] font-bold text-slate-400">
+                          {t('ingredientStock.ledger.rateSuffix', { rate: formatMoney(entry.rate), unit: ingredient.unit })}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className={`text-sm font-black whitespace-nowrap ${entry.direction === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {entry.direction === 'in' ? '+' : '-'}{formatStockQty(entry.quantity)}{ingredient.unit}
+                    </p>
+                    <p className="text-[10px] font-bold text-slate-400 whitespace-nowrap">
+                      {t('ingredientStock.ledger.remaining')}: {formatStockQty(entry.remaining)}{ingredient.unit}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
