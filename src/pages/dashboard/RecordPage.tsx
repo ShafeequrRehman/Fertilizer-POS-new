@@ -536,6 +536,8 @@ export default function RecordPage() {
     // it's clear they all belong to that one combined total above.
     const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
     const totalCategoryRevenue = categorySales.reduce((sum, c) => sum + c.revenue, 0);
+    const totalCategoryCash = categorySales.reduce((sum, c) => sum + c.cashAmount, 0);
+    const totalCategoryDue = categorySales.reduce((sum, c) => sum + c.dueAmount, 0);
     const summaryRows: ExcelCell[][] = [
       [{ value: t('record.export.salesRecordTitle'), style: titleStyle }],
       [{ value: rangeLabel, style: subtitleStyle }],
@@ -558,16 +560,22 @@ export default function RecordPage() {
         { value: t('common.category'), style: headerStyle },
         { value: t('record.qtySold'), style: headerStyle },
         { value: t('record.revenue'), style: headerStyle },
+        { value: t('record.cashAmount'), style: headerStyle },
+        { value: t('record.dueAmount'), style: headerStyle },
       ],
       ...categorySales.map((c): ExcelCell[] => [
         { value: c.category, style: plainStyle },
         { value: c.qty, style: plainStyle },
         { value: c.revenue, style: moneyStyle },
+        { value: c.cashAmount, style: moneyStyle },
+        { value: c.dueAmount, style: moneyStyle },
       ]),
       [
         { value: t('record.export.grandTotal'), style: subtotalStyle },
         { value: totalCategoryQty, style: subtotalStyle },
         { value: totalCategoryRevenue, style: moneyBoldStyle },
+        { value: totalCategoryCash, style: moneyBoldStyle },
+        { value: totalCategoryDue, style: moneyBoldStyle },
       ],
       [],
       [{ value: t('record.export.itemWiseSale'), style: titleStyle }],
@@ -577,6 +585,8 @@ export default function RecordPage() {
         { value: t('record.variation'), style: headerStyle },
         { value: t('record.qtySold'), style: headerStyle },
         { value: t('record.revenue'), style: headerStyle },
+        { value: t('record.cashAmount'), style: headerStyle },
+        { value: t('record.dueAmount'), style: headerStyle },
       ],
       ...categorySales.flatMap((catSummary): ExcelCell[][] =>
         (itemsByCategory.get(catSummary.category) || []).map((item): ExcelCell[] => [
@@ -585,6 +595,8 @@ export default function RecordPage() {
           { value: item.variation || '-', style: plainStyle },
           { value: item.qty, style: plainStyle },
           { value: item.revenue, style: moneyStyle },
+          { value: item.cashAmount, style: moneyStyle },
+          { value: item.dueAmount, style: moneyStyle },
         ]),
       ),
       [
@@ -593,9 +605,11 @@ export default function RecordPage() {
         { value: '', style: subtotalStyle },
         { value: totalCategoryQty, style: subtotalStyle },
         { value: totalCategoryRevenue, style: moneyBoldStyle },
+        { value: totalCategoryCash, style: moneyBoldStyle },
+        { value: totalCategoryDue, style: moneyBoldStyle },
       ],
     ];
-    sheets.push({ name: t('record.export.summarySheetName'), columnWidths: [140, 180, 100, 80, 100], rows: summaryRows });
+    sheets.push({ name: t('record.export.summarySheetName'), columnWidths: [140, 180, 100, 80, 100, 100, 100], rows: summaryRows });
 
     // --- One sheet per category: the combined category total sits at the
     // top (so it reads as one figure for the whole category, e.g. Pizza),
@@ -608,10 +622,14 @@ export default function RecordPage() {
         [
           { value: t('record.export.totalQtySold'), style: statLabelStyle },
           { value: t('record.export.totalRevenue'), style: statLabelStyle },
+          { value: t('record.export.totalCash'), style: statLabelStyle },
+          { value: t('record.export.totalDue'), style: statLabelStyle },
         ],
         [
           { value: catSummary.qty, style: moneyBoldStyle },
           { value: catSummary.revenue, style: moneyBoldStyle },
+          { value: catSummary.cashAmount, style: moneyBoldStyle },
+          { value: catSummary.dueAmount, style: moneyBoldStyle },
         ],
         [],
         [
@@ -619,15 +637,19 @@ export default function RecordPage() {
           { value: t('record.variation'), style: headerStyle },
           { value: t('record.qtySold'), style: headerStyle },
           { value: t('record.revenue'), style: headerStyle },
+          { value: t('record.cashAmount'), style: headerStyle },
+          { value: t('record.dueAmount'), style: headerStyle },
         ],
         ...items.map((item): ExcelCell[] => [
           { value: item.name, style: plainStyle },
           { value: item.variation || '-', style: plainStyle },
           { value: item.qty, style: plainStyle },
           { value: item.revenue, style: moneyStyle },
+          { value: item.cashAmount, style: moneyStyle },
+          { value: item.dueAmount, style: moneyStyle },
         ]),
       ];
-      sheets.push({ name: catSummary.category, columnWidths: [180, 120, 90, 100], rows });
+      sheets.push({ name: catSummary.category, columnWidths: [180, 120, 90, 100, 100, 100], rows });
     });
 
     // --- All Orders sheet (mirrors Export CSV's columns) ---
@@ -680,6 +702,8 @@ export default function RecordPage() {
 
     const totalCategoryQty = categorySales.reduce((sum, c) => sum + c.qty, 0);
     const totalCategoryRevenue = categorySales.reduce((sum, c) => sum + c.revenue, 0);
+    const totalCategoryCash = categorySales.reduce((sum, c) => sum + c.cashAmount, 0);
+    const totalCategoryDue = categorySales.reduce((sum, c) => sum + c.dueAmount, 0);
 
     const itemsByCategory = new Map<string, typeof itemSales>();
     itemSales.forEach((item) => {
@@ -708,22 +732,26 @@ export default function RecordPage() {
           {
             title: t('record.export.categoryWiseSale'),
             columns: [
-              { label: t('common.category'), width: 2 },
-              { label: t('record.qtySold'), width: 1, align: 'right' },
-              { label: t('record.revenue'), width: 1.3, align: 'right' },
+              { label: t('common.category'), width: 1.6 },
+              { label: t('record.qtySold'), width: 0.8, align: 'right' },
+              { label: t('record.revenue'), width: 1.1, align: 'right' },
+              { label: t('record.cashAmount'), width: 1.1, align: 'right' },
+              { label: t('record.dueAmount'), width: 1.1, align: 'right' },
             ],
-            rows: categorySales.map((c) => [c.category, String(c.qty), formatMoney(c.revenue)]),
-            footer: [t('record.export.grandTotal'), String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            rows: categorySales.map((c) => [c.category, String(c.qty), formatMoney(c.revenue), formatMoney(c.cashAmount), formatMoney(c.dueAmount)]),
+            footer: [t('record.export.grandTotal'), String(totalCategoryQty), formatMoney(totalCategoryRevenue), formatMoney(totalCategoryCash), formatMoney(totalCategoryDue)],
             emptyMessage: t('record.export.noItemsInSelection'),
           },
           {
             title: t('record.export.itemWiseSale'),
             columns: [
-              { label: t('common.category'), width: 1.5 },
-              { label: t('record.item'), width: 2 },
-              { label: t('record.variation'), width: 1.3 },
-              { label: t('record.qtySold'), width: 1, align: 'right' },
-              { label: t('record.revenue'), width: 1.3, align: 'right' },
+              { label: t('common.category'), width: 1.3 },
+              { label: t('record.item'), width: 1.6 },
+              { label: t('record.variation'), width: 1 },
+              { label: t('record.qtySold'), width: 0.8, align: 'right' },
+              { label: t('record.revenue'), width: 1.1, align: 'right' },
+              { label: t('record.cashAmount'), width: 1.1, align: 'right' },
+              { label: t('record.dueAmount'), width: 1.1, align: 'right' },
             ],
             rows: categorySales.flatMap((catSummary) =>
               (itemsByCategory.get(catSummary.category) || []).map((item) => [
@@ -732,9 +760,11 @@ export default function RecordPage() {
                 item.variation || '-',
                 String(item.qty),
                 formatMoney(item.revenue),
+                formatMoney(item.cashAmount),
+                formatMoney(item.dueAmount),
               ]),
             ),
-            footer: [t('record.export.grandTotal'), '', '', String(totalCategoryQty), formatMoney(totalCategoryRevenue)],
+            footer: [t('record.export.grandTotal'), '', '', String(totalCategoryQty), formatMoney(totalCategoryRevenue), formatMoney(totalCategoryCash), formatMoney(totalCategoryDue)],
             emptyMessage: t('record.export.noItemsInSelection'),
           },
           {
@@ -816,15 +846,29 @@ export default function RecordPage() {
   // "Fries (Small)" are tallied separately, same composite key convention
   // used by the backend's computeKitchenIncreaseDelta.
   const itemSales = useMemo(() => {
-    const map = new Map<string, { name: string; variation: string; qty: number; revenue: number }>();
+    const map = new Map<string, { name: string; variation: string; qty: number; revenue: number; cashAmount: number; dueAmount: number }>();
     dayOrders
       .filter((order) => order.status !== 'cancelled')
       .forEach((order) => {
+        // Payment (paid vs still-due) is only ever recorded at the ORDER
+        // level - paidAmount/remainingAmount - never per line item. To show
+        // a Cash/Udhaar split per item and per category, this order's own
+        // paid share is prorated down across its items by each item's
+        // share of the order total (e.g. an order that's 60% paid splits
+        // every one of its items 60% cash / 40% due). Clamped to 0-1 so a
+        // rounding edge case (paidAmount slightly over total) can't push a
+        // line's cash share past its own revenue.
+        const orderTotal = Number(order.total) || 0;
+        const orderPaid = Number(order.paidAmount) || 0;
+        const paidRatio = orderTotal > 0 ? Math.min(Math.max(orderPaid / orderTotal, 0), 1) : 0;
         order.items.forEach((item) => {
           const key = `${item.name}::${item.variation || ''}`;
-          const entry = map.get(key) || { name: item.name, variation: item.variation || '', qty: 0, revenue: 0 };
+          const entry = map.get(key) || { name: item.name, variation: item.variation || '', qty: 0, revenue: 0, cashAmount: 0, dueAmount: 0 };
+          const lineRevenue = (Number(item.price) || 0) * (Number(item.quantity) || 0);
           entry.qty += Number(item.quantity) || 0;
-          entry.revenue += (Number(item.price) || 0) * (Number(item.quantity) || 0);
+          entry.revenue += lineRevenue;
+          entry.cashAmount += lineRevenue * paidRatio;
+          entry.dueAmount += lineRevenue * (1 - paidRatio);
           map.set(key, entry);
         });
       });
@@ -836,15 +880,17 @@ export default function RecordPage() {
   // back to name-only, then finally an "Uncategorized" bucket for any item
   // that no longer matches a product in the catalog at all (deleted since).
   const categorySales = useMemo(() => {
-    const map = new Map<string, { category: string; qty: number; revenue: number }>();
+    const map = new Map<string, { category: string; qty: number; revenue: number; cashAmount: number; dueAmount: number }>();
     itemSales.forEach((item) => {
       const category =
         categoryByItem.get(`${item.name}::${item.variation}`) ||
         categoryByItem.get(item.name) ||
         'Uncategorized';
-      const entry = map.get(category) || { category, qty: 0, revenue: 0 };
+      const entry = map.get(category) || { category, qty: 0, revenue: 0, cashAmount: 0, dueAmount: 0 };
       entry.qty += item.qty;
       entry.revenue += item.revenue;
+      entry.cashAmount += item.cashAmount;
+      entry.dueAmount += item.dueAmount;
       map.set(category, entry);
     });
     return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue);
@@ -1094,20 +1140,24 @@ export default function RecordPage() {
           <div className="p-6 text-center text-sm font-bold text-gray-400">{t('record.noItemsSold')}</div>
         ) : (
           <div>
-            <div className="hidden grid-cols-[1.5fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
+            <div className="hidden grid-cols-[1.3fr_0.6fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
               <span>{t('common.category')}</span>
               <span>{t('record.qtySold')}</span>
               <span>{t('record.revenue')}</span>
+              <span>{t('record.cashAmount')}</span>
+              <span>{t('record.dueAmount')}</span>
             </div>
             <div className="divide-y divide-gray-100">
               {visibleCategorySales.map((entry) => (
                 <div
                   key={entry.category}
-                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.7fr_0.9fr] sm:items-center"
+                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.3fr_0.6fr_0.8fr_0.8fr_0.8fr] sm:items-center"
                 >
                   <span className="font-bold text-gray-800">{entry.category}</span>
                   <span className="font-semibold text-gray-700">{entry.qty}</span>
-                  <span className="font-black text-emerald-600">Rs {entry.revenue}</span>
+                  <span className="font-black text-emerald-600">Rs {Math.round(entry.revenue)}</span>
+                  <span className="font-black text-sky-600">Rs {Math.round(entry.cashAmount)}</span>
+                  <span className="font-black text-rose-600">Rs {Math.round(entry.dueAmount)}</span>
                 </div>
               ))}
             </div>
@@ -1135,22 +1185,26 @@ export default function RecordPage() {
           <div className="p-6 text-center text-sm font-bold text-gray-400">{t('record.noItemsSold')}</div>
         ) : (
           <div className="max-h-[420px] overflow-y-auto">
-            <div className="hidden grid-cols-[1.5fr_0.8fr_0.7fr_0.9fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
+            <div className="hidden grid-cols-[1.2fr_0.7fr_0.5fr_0.7fr_0.7fr_0.7fr] gap-2 border-b border-gray-100 bg-[#FAFBFC] px-5 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-gray-400 sm:grid">
               <span>{t('record.item')}</span>
               <span>{t('record.variation')}</span>
               <span>{t('record.qtySold')}</span>
               <span>{t('record.revenue')}</span>
+              <span>{t('record.cashAmount')}</span>
+              <span>{t('record.dueAmount')}</span>
             </div>
             <div className="divide-y divide-gray-100">
               {visibleItemSales.map((item) => (
                 <div
                   key={`${item.name}::${item.variation}`}
-                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.5fr_0.8fr_0.7fr_0.9fr] sm:items-center"
+                  className="grid grid-cols-2 gap-2 px-5 py-3 text-sm sm:grid-cols-[1.2fr_0.7fr_0.5fr_0.7fr_0.7fr_0.7fr] sm:items-center"
                 >
                   <span className="font-bold text-gray-800">{item.name}</span>
                   <span className="text-xs text-gray-400">{item.variation || '—'}</span>
                   <span className="font-semibold text-gray-700">{item.qty}</span>
-                  <span className="font-black text-emerald-600">Rs {item.revenue}</span>
+                  <span className="font-black text-emerald-600">Rs {Math.round(item.revenue)}</span>
+                  <span className="font-black text-sky-600">Rs {Math.round(item.cashAmount)}</span>
+                  <span className="font-black text-rose-600">Rs {Math.round(item.dueAmount)}</span>
                 </div>
               ))}
             </div>
