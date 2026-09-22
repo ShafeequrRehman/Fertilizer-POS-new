@@ -1757,7 +1757,28 @@ export default function POSPage() {
                       />
                     </div>
                   ) : (
-                    <p className="text-[10px] font-semibold text-gray-500">{t('pos.priceEach', { price: item.price })}</p>
+                    // Ordinary products: still start out at whatever
+                    // Manage Products has as the catalog price (see
+                    // addToCart - unchanged), but a cashier can override
+                    // it per cart line right here before Save, e.g. a
+                    // negotiated/discounted rate for this one sale. This
+                    // is deliberately the SAME handleItemPriceChange the
+                    // specialType input above already uses - it never
+                    // validated specialType itself, it just set
+                    // item.price - so no new handler was needed, only
+                    // widening which rows render the input. (Restored -
+                    // this had briefly regressed back to a plain,
+                    // non-editable price label in commit 1c84028.)
+                    <div className="mt-1 flex items-center gap-1">
+                      <span className="text-[10px] font-semibold text-gray-500">PKR</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={item.price}
+                        onChange={(event) => handleItemPriceChange(index, event.target.value)}
+                        className="w-20 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-[10px] font-semibold text-gray-500 shadow-none outline-none transition focus:border-white/60 focus:bg-white/70 focus:text-gray-900 focus:shadow-inner [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                      />
+                    </div>
                   )}
                 </div>
                 {/* Electricity Bill / Cash are one-off, open-amount
