@@ -1,6 +1,6 @@
 import { useLanguage } from '@/i18n';
 import { useBackspaceToClose } from '@/lib/keyboard-shortcuts';
-import { AlertCircle, CheckCircle2, Trash2, XCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Edit3, Trash2, XCircle } from 'lucide-react';
 import { SavedOrder } from '@/lib/pos-types';
 import { resolveProductImage } from '@/lib/food-images';
 
@@ -48,17 +48,21 @@ export function DetailRow({ label, value, strong = false }: { label: string; val
 export default function OrderDetailModal({
   order,
   canCancel = false,
+  canEdit = false,
   deleting = false,
   onClose,
   onCancelRequested,
   onCompleteRequested,
+  onEditRequested,
 }: {
   order: SavedOrder;
   canCancel?: boolean;
+  canEdit?: boolean;
   deleting?: boolean;
   onClose: () => void;
   onCancelRequested?: () => void;
   onCompleteRequested?: () => void;
+  onEditRequested?: () => void;
 }) {
   const { t } = useLanguage();
   const orderLabel = order.dailyOrderNumber ?? order.id.slice(-4);
@@ -69,7 +73,14 @@ export default function OrderDetailModal({
   // Universal Popup-Close Hotkey - see useBackspaceToClose's own comment.
   useBackspaceToClose(onClose);
 
-  const showFooter = order.status === 'pending' && (onCompleteRequested || (canCancel && onCancelRequested));
+  // Complete is pending-only (you can't "complete" an already-completed
+  // order), but Edit and Cancel both stay available on any non-cancelled
+  // order regardless of status - same rule SalesPage.tsx's own edit entry
+  // point uses (only a cancelled order locks editing).
+  const canShowComplete = order.status === 'pending' && Boolean(onCompleteRequested);
+  const canShowEdit = order.status !== 'cancelled' && canEdit && Boolean(onEditRequested);
+  const canShowCancel = order.status !== 'cancelled' && canCancel && Boolean(onCancelRequested);
+  const showFooter = canShowComplete || canShowEdit || canShowCancel;
 
   return (
     <div className="glass-overlay fixed inset-0 z-[130] flex items-center justify-center p-4">
@@ -148,7 +159,7 @@ export default function OrderDetailModal({
 
         {showFooter ? (
           <div className="flex shrink-0 gap-2 border-t border-white/40 p-6">
-            {onCompleteRequested ? (
+            {canShowComplete ? (
               <button
                 type="button"
                 onClick={onCompleteRequested}
@@ -157,7 +168,16 @@ export default function OrderDetailModal({
                 <CheckCircle2 size={16} /> {t('record.actions.completeOrder')}
               </button>
             ) : null}
-            {canCancel && onCancelRequested ? (
+            {canShowEdit ? (
+              <button
+                type="button"
+                onClick={onEditRequested}
+                className="flex flex-1 items-center justify-center gap-2 rounded-[20px] border-[0.5px] border-white/30 bg-gradient-to-b from-sky-500 to-sky-700 px-5 py-3.5 text-sm font-black text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-4px_10px_rgba(3,60,90,0.45)] transition hover:brightness-105"
+              >
+                <Edit3 size={16} /> {t('record.actions.editOrderTitle')}
+              </button>
+            ) : null}
+            {canShowCancel ? (
               <button
                 type="button"
                 onClick={onCancelRequested}

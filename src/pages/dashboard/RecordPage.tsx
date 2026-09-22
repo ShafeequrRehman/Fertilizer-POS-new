@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '@/i18n';
-import { Link } from 'react-router-dom';
-import { CheckCircle2, Download, Eye, Printer, Search, Trash2, WifiOff, X } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { CheckCircle2, Download, Edit3, Eye, Printer, Search, Trash2, WifiOff, X } from 'lucide-react';
 import { cancelOrder, fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
 import { SavedOrder, ShopSession, Product } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -878,6 +878,18 @@ export default function RecordPage() {
   const visibleOrders = filteredOrders.slice(0, visibleOrdersCount);
 
   const canCancel = hasPermission('sales.delete');
+  const navigate = useNavigate();
+  // Same permission gate as the /dashboard/sales/:id/edit route itself
+  // (see EditOrderPage.tsx's own <RequirePermission>) - mirrored here
+  // purely for UX so a button that would just get redirected/blocked
+  // isn't shown at all; never a substitute for that route guard. This
+  // Edit entry point briefly went missing from Record's row/modal actions
+  // during an unrelated Table/Type-column cleanup - restored here.
+  const canEditOrders = hasPermission('sales.create') || hasPermission('sales.edit');
+
+  function handleEditOrder(order: SavedOrder) {
+    navigate(`/dashboard/sales/${order.id}/edit`);
+  }
 
   // Delete = cancel this order directly, no confirm popup and no reason
   // prompt - the shop owner explicitly asked for a one-click delete with
@@ -1178,8 +1190,10 @@ export default function RecordPage() {
               <RecordRow
                 key={order.id}
                 order={order}
+                canEdit={canEditOrders}
                 onView={() => setViewOrder(order)}
                 onComplete={() => setCompleteOrderTarget(order)}
+                onEdit={() => handleEditOrder(order)}
                 onDelete={() => void handleDeleteOrder(order)}
                 deleting={deletingOrderIds.has(order.id)}
                 toast={toast}
@@ -1205,10 +1219,12 @@ export default function RecordPage() {
         <OrderDetailModal
           order={viewOrder}
           canCancel={canCancel}
+          canEdit={canEditOrders}
           deleting={deletingOrderIds.has(viewOrder.id)}
           onClose={() => setViewOrder(null)}
           onCancelRequested={() => void handleDeleteOrder(viewOrder)}
           onCompleteRequested={() => setCompleteOrderTarget(viewOrder)}
+          onEditRequested={() => handleEditOrder(viewOrder)}
         />
       ) : null}
 
@@ -1229,16 +1245,20 @@ export default function RecordPage() {
 
 function RecordRow({
   order,
+  canEdit,
   onView,
   onComplete,
+  onEdit,
   onDelete,
   deleting,
   toast,
   setPrintReadyUrl,
 }: {
   order: SavedOrder;
+  canEdit: boolean;
   onView: () => void;
   onComplete: () => void;
+  onEdit: () => void;
   onDelete: () => void;
   deleting: boolean;
   toast: ToastLike;
@@ -1288,6 +1308,16 @@ function RecordRow({
             className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-2 text-[11px] font-black text-emerald-700 transition hover:bg-emerald-100"
           >
             <CheckCircle2 size={13} />
+          </button>
+        ) : null}
+        {order.status !== 'cancelled' && canEdit ? (
+          <button
+            type="button"
+            onClick={onEdit}
+            title={t('record.actions.editOrderTitle')}
+            className="flex items-center gap-1.5 rounded-full bg-sky-50 px-3 py-2 text-[11px] font-black text-sky-700 transition hover:bg-sky-100"
+          >
+            <Edit3 size={13} />
           </button>
         ) : null}
         <button
