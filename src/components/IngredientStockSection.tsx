@@ -164,6 +164,10 @@ export function IngredientStockSection({
   const [lowStockThreshold, setLowStockThreshold] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
+  // Directory list paginates like Customer Dues/Record/POS - 30 shown,
+  // "Load More" grows it by 30. Restarts whenever the filtered set changes
+  // (search/company tab) so it never shows a stale slice.
+  const [visibleIngredientsCount, setVisibleIngredientsCount] = useState(30);
   const [restockingId, setRestockingId] = useState<string | null>(null);
   const [restockQty, setRestockQty] = useState("");
 
@@ -637,6 +641,16 @@ export function IngredientStockSection({
     }
     return [...list].sort((a, b) => a.name.localeCompare(b.name));
   }, [ingredients, searchQuery, activeSupplier, ingredientIdsByCompanyName]);
+
+  // A stale "load more" position from before a search/company-tab change
+  // would otherwise show an arbitrary/inconsistent slice - always restart
+  // at 30 whenever the filtered set's own inputs change.
+  useEffect(() => {
+    setVisibleIngredientsCount(30);
+  }, [searchQuery, activeSupplier]);
+
+  const visibleIngredients = filteredIngredients.slice(0, visibleIngredientsCount);
+  const hasMoreIngredients = filteredIngredients.length > visibleIngredients.length;
 
   // Task 5: the exported table's rows (Download PDF / Download Excel /
   // Send WhatsApp) - one row per ingredient this company supplies, current
@@ -1355,7 +1369,7 @@ export function IngredientStockSection({
         {!isLoading && filteredIngredients.length === 0 ? <div className="rounded-[32px] bg-slate-50 px-6 py-8 text-center text-sm font-bold text-slate-500 border border-slate-100">{t('ingredientStock.directory.noIngredientsConfigured')}</div> : null}
 
         <div className="flex flex-col gap-3">
-          {filteredIngredients.map((ingredient) => {
+          {visibleIngredients.map((ingredient) => {
             const isLow = ingredient.lowStockThreshold > 0 && ingredient.currentStock < ingredient.lowStockThreshold;
             const isRestocking = restockingId === ingredient.id;
             const isPurchasing = purchasingId === ingredient.id;
@@ -1600,6 +1614,18 @@ export function IngredientStockSection({
             );
           })}
         </div>
+
+        {hasMoreIngredients ? (
+          <div className="flex justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => setVisibleIngredientsCount((previous) => previous + 30)}
+              className="rounded-full bg-white px-6 py-2.5 text-xs font-black text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
+            >
+              {t('ingredientStock.directory.loadMore', { count: filteredIngredients.length - visibleIngredients.length })}
+            </button>
+          </div>
+        ) : null}
       </div>
       {ledgerIngredient ? (
         <IngredientLedgerModal ingredient={ledgerIngredient} onClose={() => setLedgerIngredient(null)} />

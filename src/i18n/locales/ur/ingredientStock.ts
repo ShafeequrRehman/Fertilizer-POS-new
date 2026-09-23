@@ -80,6 +80,7 @@ export const ingredientStock = {
 
   directory: {
     heading: "خام مال کی فہرست ({{count}})",
+    loadMore: "مزید دکھائیں ({{count}} مزید)",
     searchPlaceholder: "خام مال تلاش کریں...",
     downloadPdf: "پی ڈی ایف ڈاؤن لوڈ کریں",
     downloadExcel: "ایکسل ڈاؤن لوڈ کریں",

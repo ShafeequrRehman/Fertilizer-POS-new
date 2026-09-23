@@ -424,6 +424,32 @@ export default function CustomerDuesPage() {
   );
 }
 
+// Per-customer History filter (feature: "customer ki history Day month
+// custom date ka hissab say show ho, start mn month say show ho") - same
+// Today/Month/Custom idea already used by BankPage's card history and
+// IngredientStockSection's per-ingredient khata, but defaults to 'month'
+// here instead of 'all'/'today' - a long-standing customer's full
+// historyEntries trail (every order/purchase/manual entry ever) can get
+// long, so rendering + PDF-building only this month's slice by default
+// keeps the card fast; switching to Today or a Custom range narrows (or
+// widens) it further, and the Download/Send PDF buttons above follow
+// whichever range is currently selected (see buildDuesStatementDoc below).
+type HistoryRangeMode = 'today' | 'month' | 'custom';
+
+function isSameCalendarDay(a: Date, b: Date) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function isSameCalendarMonth(value: string, reference: Date) {
+  const d = new Date(value);
+  return d.getFullYear() === reference.getFullYear() && d.getMonth() === reference.getMonth();
+}
+
+function todayDateInputValue() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], onAddManual: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
@@ -449,6 +475,11 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
   // long-standing customer, no point rendering/scrolling past it on every
   // card just to see the current balance.
   const [showHistory, setShowHistory] = useState(false);
+  // Defaults to 'month' (not 'all') - see HistoryRangeMode's own comment
+  // above for why. customFrom/customTo only matter once 'custom' is picked.
+  const [historyRangeMode, setHistoryRangeMode] = useState<HistoryRangeMode>('month');
+  const [customFrom, setCustomFrom] = useState(todayDateInputValue());
+  const [customTo, setCustomTo] = useState(todayDateInputValue());
 
   const fromOrders = customer.totalOrderBalance || 0;
   const fromLumpSum = customer.previousDues || 0;
@@ -599,6 +630,34 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
       };
     }),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  // Narrows historyEntries down to whatever range is currently picked
+  // (Today/This Month/Custom) - drives both the on-screen list below AND
+  // the Download/Send PDF buttons above (see buildDuesStatementDoc), so a
+  // shop owner who picks "This Month" gets a statement for exactly that,
+  // not the customer's entire history.
+  const now = new Date();
+  const filteredHistoryEntries = historyEntries.filter((entry) => {
+    const entryDate = new Date(entry.date);
+    if (historyRangeMode === 'today') return isSameCalendarDay(entryDate, now);
+    if (historyRangeMode === 'month') return isSameCalendarMonth(entry.date, now);
+    const from = customFrom ? new Date(`${customFrom}T00:00:00`) : null;
+    const to = customTo ? new Date(`${customTo}T23:59:59.999`) : null;
+    if (from && entryDate < from) return false;
+    if (to && entryDate > to) return false;
+    return true;
+  });
+
+  const historyRangeLabel = historyRangeMode === 'today' ? 'Today' : historyRangeMode === 'month' ? 'This Month' : `${customFrom || '...'} to ${customTo || '...'}`;
+
+  function historyRangeFilenameSuffix() {
+    if (historyRangeMode === 'today') return todayDateInputValue();
+    if (historyRangeMode === 'month') {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+    return `${customFrom || 'start'}_to_${customTo || 'end'}`;
+  }
 
   // View/Print/Delete for every History row (feature 4) - orders,
   // purchases and manual dues entries all get the same three actions, in
@@ -822,7 +881,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
     return (
       <ReportPdfDocument
         title="Customer Dues Statement"
-        subtitle={`${customer.name} · ${customer.phone}`}
+        subtitle={`${customer.name} · ${customer.phone} · ${historyRangeLabel}`}
         stats={[
           { label: 'Current Dues', value: `Rs ${totalDue}` },
           { label: 'From Unpaid Orders', value: `Rs ${fromOrders}` },
@@ -840,7 +899,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
               { label: 'Add', width: 0.9 },
               { label: 'Balance', width: 1.1 },
             ],
-            rows: historyEntries.map((entry) => {
+            rows: filteredHistoryEntries.map((entry) => {
               // Pay = money that reduced what the customer owes (a "- Pay
               // Dues" entry, or what's already been paid on an order).
               // Add = money that increased it (a "+ Add Dues" entry, or a
@@ -868,7 +927,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
                 formatBalanceCell(balance),
               ];
             }),
-            emptyMessage: 'No dues activity recorded for this customer yet.',
+            emptyMessage: `No dues activity recorded for this customer in ${historyRangeLabel}.`,
           },
         ]}
       />
@@ -878,7 +937,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
   async function handleDownloadDuesPdf() {
     const { downloadPdfDocument } = await import('@/lib/pdf-export');
     const doc = await buildDuesStatementDoc();
-    await downloadPdfDocument(doc, `${customer.name.replace(/\s+/g, '_')}_dues_statement.pdf`);
+    await downloadPdfDocument(doc, `${customer.name.replace(/\s+/g, '_')}_dues_statement_${historyRangeFilenameSuffix()}.pdf`);
   }
 
   async function handleSendDuesPdf() {
@@ -891,7 +950,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
       const { pdfDocumentToBase64 } = await import('@/lib/pdf-export');
       const doc = await buildDuesStatementDoc();
       const base64 = await pdfDocumentToBase64(doc);
-      const response = await sendWhatsappDocument(customer.phone, base64, `${customer.name.replace(/\s+/g, '_')}_dues_statement.pdf`);
+      const response = await sendWhatsappDocument(customer.phone, base64, `${customer.name.replace(/\s+/g, '_')}_dues_statement_${historyRangeFilenameSuffix()}.pdf`);
       if (response?.success) {
         toast.success(`Dues statement sent to ${customer.name} on WhatsApp.`);
       } else {
@@ -953,7 +1012,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
               <button
                 type="button"
                 onClick={() => void handleDownloadDuesPdf()}
-                title="Download this customer's complete dues record as a PDF"
+                title="Download this customer's dues statement for the selected range as a PDF"
                 className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
               >
                 <Download size={13} /> PDF
@@ -962,7 +1021,7 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
                 type="button"
                 onClick={() => void handleSendDuesPdf()}
                 disabled={isSendingPdf}
-                title="Send this customer's complete dues record as a PDF on WhatsApp"
+                title="Send this customer's dues statement for the selected range as a PDF on WhatsApp"
                 className="flex items-center gap-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
               >
                 <FileText size={13} /> {isSendingPdf ? 'Sending...' : 'Send PDF'}
@@ -1079,12 +1138,48 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
               onClick={() => setShowHistory((previous) => !previous)}
               className="w-full flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-100 transition-colors"
             >
-              <span>History ({historyEntries.length})</span>
+              <span>History ({filteredHistoryEntries.length})</span>
               <span className="text-slate-400">{showHistory ? '▲' : '▼'}</span>
             </button>
+            {/* Today/This Month/Custom - always visible (not gated on
+                showHistory) since the Download/Send PDF buttons above
+                follow whatever's picked here even without expanding the
+                list itself. Defaults to 'month' - see HistoryRangeMode. */}
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {(['today', 'month', 'custom'] as HistoryRangeMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setHistoryRangeMode(mode)}
+                  className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-wider transition-colors ${historyRangeMode === mode ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                >
+                  {mode === 'today' ? 'Today' : mode === 'month' ? 'This Month' : 'Custom'}
+                </button>
+              ))}
+              {historyRangeMode === 'custom' ? (
+                <>
+                  <input
+                    type="date"
+                    value={customFrom}
+                    onChange={(e) => setCustomFrom(e.target.value)}
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold outline-none focus:border-slate-400"
+                  />
+                  <span className="text-[10px] font-black text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={customTo}
+                    onChange={(e) => setCustomTo(e.target.value)}
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold outline-none focus:border-slate-400"
+                  />
+                </>
+              ) : null}
+            </div>
             {showHistory ? (
               <div className="mt-2 max-h-56 space-y-2 overflow-y-auto rounded-xl border border-slate-100 p-2">
-                {historyEntries.map((entry) => (
+                {filteredHistoryEntries.length === 0 ? (
+                  <p className="px-1 py-3 text-center text-[11px] font-bold text-slate-400">No dues activity in {historyRangeLabel}.</p>
+                ) : null}
+                {filteredHistoryEntries.map((entry) => (
                   <div key={entry.key} className="rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
                     <div className="flex items-center justify-between gap-2">
                       <span className={`font-black ${entry.tone}`}>{entry.label}</span>

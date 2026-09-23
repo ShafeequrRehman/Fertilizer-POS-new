@@ -83,6 +83,7 @@ export const ingredientStock = {
 
   directory: {
     heading: "Ingredient Directory ({{count}})",
+    loadMore: "Load More ({{count}} more)",
     searchPlaceholder: "Search ingredients...",
     downloadPdf: "Download PDF",
     downloadExcel: "Download Excel",
