@@ -145,6 +145,12 @@ export interface IngredientLedgerResponse {
 // backend/controllers/reportController.js's getDashboardSummary.
 export interface DashboardSummary {
   date: string;
+  // Which range this summary was computed for - see fetchDashboardSummary's
+  // own params and getDashboardSummary's own comment on which tiles this
+  // actually changes vs which stay "current balance" regardless of range.
+  range?: 'today' | 'month' | 'custom';
+  startDate?: string;
+  endDate?: string;
   totalSaleToday: number;
   saleOnCash: number;
   saleOnBank: number;

@@ -164,9 +164,22 @@ function DashboardPageClientInner() {
   const [showCustomerAdvances, setShowCustomerAdvances] = useState(false);
   const [showRecoveryHistory, setShowRecoveryHistory] = useState(false);
 
+  // Accounting Overview's Day/This Month/Custom filter ("yahan bhe date
+  // honi chahy... day month aur year aur custom date ka hissab say states
+  // update hona chahya") - defaults to Today, same as this section always
+  // showed before this filter existed. Only re-fetches the summary (see
+  // getDashboardSummary's own comment on which tiles this actually moves).
+  const [summaryRange, setSummaryRange] = useState<'today' | 'month' | 'custom'>('today');
+  const [summaryCustomFrom, setSummaryCustomFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [summaryCustomTo, setSummaryCustomTo] = useState(() => new Date().toISOString().slice(0, 10));
+
   async function loadSummary() {
     try {
-      const data = await fetchDashboardSummary();
+      const data = await fetchDashboardSummary(
+        summaryRange === 'custom'
+          ? { range: 'custom', startDate: summaryCustomFrom, endDate: summaryCustomTo }
+          : { range: summaryRange }
+      );
       if (data) setSummary(data);
     } catch (error) {
       console.error('Dashboard accounting summary fetch error', error);
@@ -175,9 +188,13 @@ function DashboardPageClientInner() {
 
   useEffect(() => {
     void loadSummary();
+    // Today/This Month don't need a live 45s refresh restart on their own
+    // (the interval below already re-fires loadSummary regardless), but a
+    // Custom range change should refetch immediately rather than waiting
+    // for the next tick.
     const intervalId = setInterval(() => void loadSummary(), 45000);
     return () => clearInterval(intervalId);
-  }, []);
+  }, [summaryRange, summaryCustomFrom, summaryCustomTo]);
 
   useEffect(() => {
     // Always paints instantly from the Local Hub's cache first (see
@@ -339,6 +356,12 @@ function DashboardPageClientInner() {
         summary={summary}
         formatter={formatter}
         canAdjustCash={hasPermission('dues.manage')}
+        range={summaryRange}
+        onRangeChange={setSummaryRange}
+        customFrom={summaryCustomFrom}
+        onCustomFromChange={setSummaryCustomFrom}
+        customTo={summaryCustomTo}
+        onCustomToChange={setSummaryCustomTo}
         onAdjustCash={() => setShowAdjustCash(true)}
         onOpenCashHistory={() => setShowCashHistory(true)}
         onAdjustTile={(key) => setAdjustTileKey(key)}
@@ -510,6 +533,12 @@ function AccountingOverview({
   summary,
   formatter,
   canAdjustCash,
+  range,
+  onRangeChange,
+  customFrom,
+  onCustomFromChange,
+  customTo,
+  onCustomToChange,
   onAdjustCash,
   onOpenCashHistory,
   onAdjustTile,
@@ -520,6 +549,12 @@ function AccountingOverview({
   summary: DashboardSummary | null;
   formatter: Intl.NumberFormat;
   canAdjustCash: boolean;
+  range: 'today' | 'month' | 'custom';
+  onRangeChange: (range: 'today' | 'month' | 'custom') => void;
+  customFrom: string;
+  onCustomFromChange: (value: string) => void;
+  customTo: string;
+  onCustomToChange: (value: string) => void;
   onAdjustCash: () => void;
   onOpenCashHistory: () => void;
   onAdjustTile: (key: DashboardAdjustmentKey) => void;
@@ -528,6 +563,16 @@ function AccountingOverview({
   onOpenRecoveryHistory: () => void;
 }) {
   const money = (value: number | undefined) => `Rs ${formatter.format(value ?? 0)}`;
+  // Every "(Today)"-suffixed tile's label follows whichever range is
+  // currently picked, so switching to This Month/Custom doesn't leave a
+  // stale "(Today)" next to a figure that's no longer today's.
+  const periodLabel = range === 'today' ? 'Today' : range === 'month' ? 'This Month' : `${customFrom || '...'} to ${customTo || '...'}`;
+  // Cash in Hand / Balance on Bank are live balances, not period sums (see
+  // getDashboardSummary's own comment) - for Today/This Month that's just
+  // "now", but a Custom range in the past actually rewinds them to that
+  // date's end-of-day balance, so the label says exactly which moment
+  // they're showing instead of implying they moved with the other tiles.
+  const balanceAsOfLabel = range === 'custom' ? `As of ${customTo || '...'}` : 'Live';
   // Task 1: every tile below (besides Cash in Hand, which owns its own
   // Adjust+History pair, and Balance on Bank, which is corrected from the
   // Bank page itself) gets the same Pencil (correct it) + History (see
@@ -549,12 +594,45 @@ function AccountingOverview({
     canAdjustCash ? [{ icon: <Pencil size={12} />, onClick: () => onAdjustTile(key), label: 'Adjust' }] : [];
   return (
     <div className="rounded-[32px] bg-white p-6 shadow-sm">
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h3 className="font-bold text-gray-800">Accounting Overview</h3>
-        <span className="text-[10px] font-bold uppercase text-gray-400">{summary?.date || '...'}</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(['today', 'month', 'custom'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => onRangeChange(mode)}
+              className={`rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition-colors ${range === mode ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+            >
+              {mode === 'today' ? 'Day' : mode === 'month' ? 'Month' : 'Custom'}
+            </button>
+          ))}
+          {range === 'custom' ? (
+            <>
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(e) => onCustomFromChange(e.target.value)}
+                className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold outline-none focus:border-slate-400"
+              />
+              <span className="text-[10px] font-black text-slate-400">to</span>
+              <input
+                type="date"
+                value={customTo}
+                onChange={(e) => onCustomToChange(e.target.value)}
+                className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold outline-none focus:border-slate-400"
+              />
+            </>
+          ) : null}
+        </div>
       </div>
+      {summary?.startDate ? (
+        <p className="-mt-4 mb-4 text-[10px] font-bold uppercase tracking-wider text-gray-400">
+          {summary.startDate === summary.endDate ? summary.startDate : `${summary.startDate} to ${summary.endDate}`}
+        </p>
+      ) : null}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-        <OverviewTile icon={<Target size={18} />} color="bg-orange-50 text-orange-500" label="Total Sale (Today)" value={money(summary?.totalSaleToday)} actions={actionsFor('totalSaleToday')} />
+        <OverviewTile icon={<Target size={18} />} color="bg-orange-50 text-orange-500" label={`Total Sale (${periodLabel})`} value={money(summary?.totalSaleToday)} actions={actionsFor('totalSaleToday')} />
         <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Customer Udhar" value={money(summary?.customerUdharTotal)} valueColor="text-rose-600" actions={actionsFor('customerUdharTotal')} />
         <OverviewTile
           icon={<PiggyBank size={18} />}
@@ -570,7 +648,7 @@ function AccountingOverview({
         <OverviewTile
           icon={<Wallet size={18} />}
           color="bg-blue-50 text-blue-500"
-          label="Cash in Hand"
+          label={`Cash in Hand (${balanceAsOfLabel})`}
           value={money(summary?.cashInHand)}
           onTileClick={onOpenCashHistory}
           actions={[
@@ -578,18 +656,18 @@ function AccountingOverview({
             ...(canAdjustCash ? [{ icon: <Pencil size={12} />, onClick: onAdjustCash, label: 'Adjust' }] : []),
           ]}
         />
-        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Balance on Bank" value={money(summary?.balanceOnBank)} />
+        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label={`Balance on Bank (${balanceAsOfLabel})`} value={money(summary?.balanceOnBank)} />
         <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} actions={actionsFor('stockValue')} />
         <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" actions={actionsFor('vendorBalance')} />
-        <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label="Total Purchase (Today)" value={money(summary?.totalPurchaseToday)} actions={actionsFor('totalPurchaseToday')} />
-        <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label="Total Expenses (Today)" value={money(summary?.totalExpensesToday)} actions={actionsFor('totalExpensesToday')} />
-        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label="Sale on Cash" value={money(summary?.saleOnCash)} actions={actionsFor('saleOnCash')} />
-        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Sale on Bank" value={money(summary?.saleOnBank)} actions={actionsFor('saleOnBank')} />
-        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Sale on Udhar (Credit)" value={money(summary?.saleOnCredit)} valueColor="text-rose-600" actions={actionsFor('saleOnCredit')} />
+        <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label={`Total Purchase (${periodLabel})`} value={money(summary?.totalPurchaseToday)} actions={actionsFor('totalPurchaseToday')} />
+        <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label={`Total Expenses (${periodLabel})`} value={money(summary?.totalExpensesToday)} actions={actionsFor('totalExpensesToday')} />
+        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label={`Sale on Cash (${periodLabel})`} value={money(summary?.saleOnCash)} actions={actionsFor('saleOnCash')} />
+        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label={`Sale on Bank (${periodLabel})`} value={money(summary?.saleOnBank)} actions={actionsFor('saleOnBank')} />
+        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label={`Sale on Udhar (Credit · ${periodLabel})`} value={money(summary?.saleOnCredit)} valueColor="text-rose-600" actions={actionsFor('saleOnCredit')} />
         <OverviewTile
           icon={<CheckCircle2 size={18} />}
           color="bg-emerald-50 text-emerald-500"
-          label="Total Recovery (Today)"
+          label={`Total Recovery (${periodLabel})`}
           value={money(summary?.totalRecoveryToday)}
           valueColor="text-emerald-600"
           actions={[{ icon: <List size={12} />, onClick: onOpenRecoveryHistory, label: 'Details' }, ...adjustOnlyFor('totalRecoveryToday')]}

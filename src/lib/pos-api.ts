@@ -275,10 +275,12 @@ export async function adjustCash(amount: number, direction: 'in' | 'out', note?:
 }
 
 // Home Dashboard's Accounting Overview widgets - see
-// backend/controllers/reportController.js's getDashboardSummary.
-export async function fetchDashboardSummary() {
+// backend/controllers/reportController.js's getDashboardSummary. Optional
+// range params for the Day/This Month/Custom filter - omitted entirely
+// defaults to "today" server-side, same as before this filter existed.
+export async function fetchDashboardSummary(params?: { range?: 'today' | 'month' | 'custom'; startDate?: string; endDate?: string }) {
   try {
-    const response = await api.get<DashboardSummary>('/reports/dashboard-summary');
+    const response = await api.get<DashboardSummary>('/reports/dashboard-summary', { params });
     return response.data;
   } catch (error) {
     handleApiError(error);

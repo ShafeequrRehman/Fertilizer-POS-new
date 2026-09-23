@@ -438,13 +438,73 @@ exports.getInventoryReport = async (req, res) => {
 // Point-in-time figures (Cash in Hand, Balance on Bank, Stock Value,
 // Vendor Balance, Customer Udhar/Advance) are always all-time/current -
 // a balance doesn't reset at midnight.
+// Accounting Overview's Day/This Month/Custom filter - "yahan bhe date
+// honi chahy sara states ki day month aur year aur custom date ka hissab
+// say states update hona chahya". Query params: range=today|month|custom
+// (defaults to today, same as before this filter existed), plus
+// startDate/endDate (YYYY-MM-DD) when range=custom.
+//
+// Only the tiles that are genuinely a SUM OF ACTIVITY within a period
+// (Total Sale, Sale on Cash/Bank/Credit, Total Purchase, Total Expenses,
+// Total Recovery) actually change value across Day/Month/Custom - their
+// source data (Order.createdAt, IngredientPurchase.receivedAt,
+// Expense.date, Customer.duesHistory[].createdAt) is fully timestamped, so
+// re-summing over a different window is exact.
+//
+// Cash in Hand and Balance on Bank are handled specially: for Today/This
+// Month (whose end is effectively "right now") the live CashRegister/Bank
+// .balance is already the answer, but for a Custom range whose end date is
+// before today, this replays each account's own history[] (every entry
+// already carries its own balanceAfter/createdAt - see CashRegister.js/
+// Bank.js) to reconstruct what the balance actually was at the end of that
+// day - not just today's balance relabelled.
+//
+// Stock Value, Vendor Balance, Customer Udhar and Customer Advance are
+// deliberately left as their current live totals regardless of range -
+// Ingredient.currentStock, IngredientPurchase.remainingAmount and
+// Customer.previousDues are all single live fields with no dated history
+// of their own past values, so there's no reliable way to rewind them to
+// an arbitrary past date without risking a wrong number - showing today's
+// real balance is safer than a fabricated historical guess.
 exports.getDashboardSummary = async (req, res) => {
   try {
     const { shopId } = shopScope(req);
     const shopObjectId = new mongoose.Types.ObjectId(shopId);
     const now = new Date();
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
-    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+    const rangeMode = ["today", "month", "custom"].includes(req.query.range) ? req.query.range : "today";
+
+    let start;
+    let end;
+    if (rangeMode === "month") {
+      start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+      end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+    } else if (rangeMode === "custom" && req.query.startDate && req.query.endDate) {
+      start = new Date(`${req.query.startDate}T00:00:00.000Z`);
+      end = new Date(`${req.query.endDate}T23:59:59.999Z`);
+    } else {
+      start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+      end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+    }
+
+    // See this function's own comment above - only a Custom range ending
+    // before today needs the history-replay path; Today/This Month's end
+    // is effectively "now", where the live balance already IS correct.
+    const todayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+    const needsHistoricalBalance = rangeMode === "custom" && end < todayEnd;
+
+    function balanceAsOfEnd(currentBalance, history) {
+      if (!needsHistoricalBalance) return Number(currentBalance || 0);
+      let result = 0;
+      let lastTime = -Infinity;
+      for (const entry of history || []) {
+        const t = entry.createdAt ? new Date(entry.createdAt).getTime() : null;
+        if (t !== null && t <= end.getTime() && t > lastTime) {
+          result = Number(entry.balanceAfter || 0);
+          lastTime = t;
+        }
+      }
+      return result;
+    }
 
     const [
       todaysOrders,
@@ -480,8 +540,11 @@ exports.getDashboardSummary = async (req, res) => {
       // never touched/maintained for these and can't be used here.
       Ingredient.find({ shopId: shopObjectId }).select("name currentStock averageCost").lean(),
       // Balance on Bank - every named bank this shop has added (Bank page).
-      Bank.find({ shopId: shopObjectId }).select("balance").lean(),
-      CashRegister.findOne({ shopId: shopObjectId }).select("balance").lean(),
+      // history is only actually walked when needsHistoricalBalance is true
+      // (see balanceAsOfEnd above) but is always selected here since which
+      // range is active is only known after this query already ran.
+      Bank.find({ shopId: shopObjectId }).select("balance history").lean(),
+      CashRegister.findOne({ shopId: shopObjectId }).select("balance history").lean(),
       // Vendor Balance - total still owed to suppliers across every
       // received (not pending/cancelled) stock batch ever logged, same
       // status:"received" convention getCompanyLedger/getInventoryReport
@@ -548,8 +611,8 @@ exports.getDashboardSummary = async (req, res) => {
       return sum + Number(p.price || 0) * Number(p.stock || 0);
     }, 0);
     const stockValue = ingredientStockValue + untrackedProductStockValue;
-    const balanceOnBank = banks.reduce((sum, b) => sum + Number(b.balance || 0), 0);
-    const cashInHand = Number(cashRegister?.balance || 0);
+    const balanceOnBank = banks.reduce((sum, b) => sum + balanceAsOfEnd(b.balance, b.history), 0);
+    const cashInHand = balanceAsOfEnd(cashRegister?.balance, cashRegister?.history);
     const vendorBalance = vendorDueAgg[0]?.total || 0;
     const totalPurchaseToday = todaysPurchaseAgg[0]?.total || 0;
     const totalExpensesToday = todaysExpenseAgg[0]?.total || 0;
@@ -590,6 +653,9 @@ exports.getDashboardSummary = async (req, res) => {
 
     res.json({
       date: start.toISOString().slice(0, 10),
+      range: rangeMode,
+      startDate: start.toISOString().slice(0, 10),
+      endDate: end.toISOString().slice(0, 10),
       totalSaleToday: adjusted("totalSaleToday", totalSaleToday),
       saleOnCash: adjusted("saleOnCash", saleOnCash),
       saleOnBank: adjusted("saleOnBank", saleOnBank),
