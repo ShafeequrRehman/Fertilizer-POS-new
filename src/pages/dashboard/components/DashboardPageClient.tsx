@@ -563,7 +563,7 @@ function AccountingOverview({
           value={money(summary?.customerAdvanceTotal)}
           valueColor="text-emerald-600"
           actions={[
-            { icon: <List size={12} />, onClick: onOpenCustomerAdvances, label: 'Details' },
+            { icon: <HistoryIcon size={12} />, onClick: onOpenCustomerAdvances, label: 'Details' },
             ...adjustOnlyFor('customerAdvanceTotal'),
           ]}
         />
@@ -1107,22 +1107,81 @@ function CustomerAdvancesModal({
   onClose: () => void;
 }) {
   useBackspaceToClose(onClose);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const total = advances.reduce((sum, c) => sum + c.amount, 0);
+
+  // Same "title, stats, one table" PDF style every other Details/History
+  // download in this app already uses (Cash in Hand History, Recovery
+  // History, Bank Statement) - just name + advance amount here, per the
+  // owner's own ask for this one ("sirf naam aur amount, bs").
+  async function handleDownloadPdf() {
+    setIsDownloadingPdf(true);
+    try {
+      const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
+      const doc = (
+        <ReportPdfDocument
+          title="Customer Advances"
+          subtitle={`As of ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`}
+          stats={[
+            { label: 'Total Advance', value: `Rs ${total.toLocaleString()}` },
+            { label: 'Customers', value: String(advances.length) },
+          ]}
+          tables={[
+            {
+              title: 'Customers',
+              columns: [
+                { label: 'Customer', width: 2 },
+                { label: 'Phone', width: 1.4 },
+                { label: 'Advance', width: 1, align: 'right' },
+              ],
+              rows: advances.map((c) => [c.name, c.phone || '\u2014', `Rs ${c.amount.toLocaleString()}`]),
+              footer: ['', 'Total', `Rs ${total.toLocaleString()}`],
+              emptyMessage: 'No customer currently has an advance.',
+            },
+          ]}
+        />
+      );
+      await downloadPdfDocument(doc, 'customer_advances.pdf');
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
       <div className="flex max-h-[85vh] w-full max-w-sm flex-col rounded-[32px] bg-white p-6 shadow-2xl">
         <div className="flex items-start justify-between">
-          <h2 className="text-lg font-black text-gray-900">Customer Advances</h2>
+          <div>
+            <h2 className="text-lg font-black text-gray-900">Customer Advances</h2>
+            <p className="mt-1 text-xs text-gray-400">Every customer who has paid the shop more than they currently owe.</p>
+          </div>
           <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
             <XCircle size={18} />
           </button>
         </div>
-        <div className="mt-4 flex-1 space-y-2 overflow-y-auto pr-1">
+
+        <div className="mt-3 flex items-center justify-between">
+          <p className="text-sm font-black text-emerald-600">Total: Rs {total.toLocaleString()}</p>
+          <button
+            type="button"
+            onClick={() => void handleDownloadPdf()}
+            disabled={isDownloadingPdf || advances.length === 0}
+            className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-600 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isDownloadingPdf ? 'Preparing...' : 'PDF'}
+          </button>
+        </div>
+
+        <div className="mt-3 flex-1 space-y-2 overflow-y-auto pr-1">
           {advances.length === 0 ? (
             <p className="py-8 text-center text-xs font-bold text-gray-400">No customer currently has an advance.</p>
           ) : (
             advances.map((customer) => (
               <div key={customer.phone || customer.name} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
-                <p className="truncate text-sm font-bold text-gray-800">{customer.name}</p>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-gray-800">{customer.name}</p>
+                  {customer.phone ? <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{customer.phone}</p> : null}
+                </div>
                 <p className="text-sm font-black text-emerald-600">Rs {customer.amount.toLocaleString()}</p>
               </div>
             ))
