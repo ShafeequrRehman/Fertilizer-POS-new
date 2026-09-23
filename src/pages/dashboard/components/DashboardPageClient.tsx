@@ -757,7 +757,7 @@ function HistoryModalShell({
   subtitle: string;
   onClose: () => void;
   loading: boolean;
-  rows: { direction: 'in' | 'out'; amount: number; note: string; createdBy: string; createdAt: string }[];
+  rows: { direction: 'in' | 'out'; amount: number; note: string; createdBy: string; createdAt: string; balanceAfter?: number }[];
   pdfTitle?: string;
   pdfFilename?: string;
 }) {
@@ -818,13 +818,22 @@ function HistoryModalShell({
             {
               title: 'History',
               columns: [
-                { label: 'Date', width: 1.4 },
-                { label: 'Type', width: 1 },
-                { label: 'Note', width: 2 },
-                { label: 'By', width: 1 },
-                { label: 'In', width: 1, align: 'right' },
-                { label: 'Out', width: 1, align: 'right' },
+                { label: 'Date', width: 1.3 },
+                { label: 'Type', width: 0.8 },
+                { label: 'Note', width: 1.8 },
+                { label: 'By', width: 0.9 },
+                { label: 'In', width: 0.9, align: 'right' },
+                { label: 'Out', width: 0.9, align: 'right' },
+                { label: 'Balance', width: 1, align: 'right' },
               ],
+              // Balance (right-most, next to In/Out) - the owner's own ask:
+              // every In/Out PDF should show the running total alongside
+              // each entry, same as BankPage.tsx's own statement PDF
+              // already does. This is each entry's real balanceAfter/
+              // totalAfter as it was stored the moment it happened
+              // (CashRegister.js / DashboardAdjustment.js) - never
+              // recomputed/replayed here, so it stays correct however the
+              // list is filtered or sorted.
               rows: filteredRows.map((row) => [
                 new Date(row.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
                 row.direction === 'in' ? 'In' : 'Out',
@@ -832,8 +841,9 @@ function HistoryModalShell({
                 row.createdBy || '—',
                 row.direction === 'in' ? `Rs ${row.amount.toLocaleString()}` : '—',
                 row.direction === 'out' ? `Rs ${row.amount.toLocaleString()}` : '—',
+                row.balanceAfter === undefined ? '—' : `Rs ${row.balanceAfter.toLocaleString()}`,
               ]),
-              footer: ['', '', '', 'Total', `Rs ${totalIn.toLocaleString()}`, `Rs ${totalOut.toLocaleString()}`],
+              footer: ['', '', '', 'Total', `Rs ${totalIn.toLocaleString()}`, `Rs ${totalOut.toLocaleString()}`, ''],
               emptyMessage: 'No transactions in this range.',
             },
           ]}
@@ -906,6 +916,9 @@ function HistoryModalShell({
                     {new Date(row.createdAt).toLocaleString()}
                     {row.createdBy ? ` · ${row.createdBy}` : ''}
                   </p>
+                  {row.balanceAfter !== undefined ? (
+                    <p className="text-[10px] font-bold text-gray-300">Balance after: Rs {row.balanceAfter.toLocaleString()}</p>
+                  ) : null}
                 </div>
               </div>
             ))
@@ -948,6 +961,7 @@ function CashHistoryModal({ onClose }: { onClose: () => void }) {
         note: entry.note || entry.type,
         createdBy: entry.createdBy || '',
         createdAt: entry.createdAt,
+        balanceAfter: entry.balanceAfter,
       }))}
     />
   );
@@ -979,7 +993,7 @@ function TileHistoryModal({ tileKey, onClose }: { tileKey: DashboardAdjustmentKe
       loading={loading}
       pdfTitle="Correction History"
       pdfFilename={`${tileKey}_correction_history`}
-      rows={history}
+      rows={history.map((entry) => ({ ...entry, balanceAfter: entry.totalAfter }))}
     />
   );
 }
