@@ -1109,11 +1109,19 @@ function CustomerAdvancesModal({
   useBackspaceToClose(onClose);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const total = advances.reduce((sum, c) => sum + c.amount, 0);
+  // This is a live snapshot (every customer currently in credit right
+  // now), not a dated transaction log - there's no single "date" a
+  // standing advance balance happened on. The owner's own ask was for a
+  // date to show anyway (same as every other history list in this app),
+  // so this is the one meaningful date available: the moment this list
+  // was generated/viewed - same "As of <date>" convention already used in
+  // the PDF's own subtitle.
+  const asOfDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
   // Same "title, stats, one table" PDF style every other Details/History
   // download in this app already uses (Cash in Hand History, Recovery
-  // History, Bank Statement) - just name + advance amount here, per the
-  // owner's own ask for this one ("sirf naam aur amount, bs").
+  // History, Bank Statement) - name + advance amount, plus the same
+  // Date-first-column look those other PDFs use.
   async function handleDownloadPdf() {
     setIsDownloadingPdf(true);
     try {
@@ -1121,7 +1129,7 @@ function CustomerAdvancesModal({
       const doc = (
         <ReportPdfDocument
           title="Customer Advances"
-          subtitle={`As of ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`}
+          subtitle={`As of ${asOfDate}`}
           stats={[
             { label: 'Total Advance', value: `Rs ${total.toLocaleString()}` },
             { label: 'Customers', value: String(advances.length) },
@@ -1130,12 +1138,13 @@ function CustomerAdvancesModal({
             {
               title: 'Customers',
               columns: [
-                { label: 'Customer', width: 2 },
+                { label: 'Date', width: 1.2 },
+                { label: 'Customer', width: 1.8 },
                 { label: 'Phone', width: 1.4 },
                 { label: 'Advance', width: 1, align: 'right' },
               ],
-              rows: advances.map((c) => [c.name, c.phone || '\u2014', `Rs ${c.amount.toLocaleString()}`]),
-              footer: ['', 'Total', `Rs ${total.toLocaleString()}`],
+              rows: advances.map((c) => [asOfDate, c.name, c.phone || '\u2014', `Rs ${c.amount.toLocaleString()}`]),
+              footer: ['', '', 'Total', `Rs ${total.toLocaleString()}`],
               emptyMessage: 'No customer currently has an advance.',
             },
           ]}
@@ -1180,7 +1189,8 @@ function CustomerAdvancesModal({
               <div key={customer.phone || customer.name} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-bold text-gray-800">{customer.name}</p>
-                  {customer.phone ? <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{customer.phone}</p> : null}
+                  {customer.phone ? <p className="text-[10px] font-bold text-gray-500">{customer.phone}</p> : null}
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">As of {asOfDate}</p>
                 </div>
                 <p className="text-sm font-black text-emerald-600">Rs {customer.amount.toLocaleString()}</p>
               </div>
