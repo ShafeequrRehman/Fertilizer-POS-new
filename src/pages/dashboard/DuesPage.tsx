@@ -1284,7 +1284,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             disabled={saving || amountValue <= 0 || paymentIncomplete}
             className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
           >
-            {saving ? 'Saving...' : '+ Add Dues'}
+            {saving ? 'Saving...' : '+ Paid Amount'}
           </button>
           <button
             onClick={async () => {
@@ -1297,7 +1297,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
             title={amountValue > totalDue ? `More than the ₨${totalDue} owed - the extra becomes an advance` : 'Record a payment against everything owed'}
           >
-            {saving ? 'Saving...' : '- Pay Dues'}
+            {saving ? 'Saving...' : '- Received Amount'}
           </button>
           <button
             onClick={async () => {
