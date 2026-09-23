@@ -29,9 +29,13 @@ import {
   getPendingEmployeeDeletes,
   ackEmployeeDeletes,
   markEmployeeDeleteFailed,
+  getPendingCustomerActions,
+  ackCustomerActions,
+  markCustomerActionFailed,
+  pushCustomersCache,
   type SyncStatus,
 } from '@/lib/local-hub-api';
-import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchWaiters, openShopSession, fetchShopSessionStatus, fetchIngredients, fetchIngredientCategories, fetchRecipes } from '@/lib/pos-api';
+import { ApiError, fetchOrders, fetchProducts, fetchAllCustomers, fetchCustomerLedger, fetchWaiters, openShopSession, fetchShopSessionStatus, fetchIngredients, fetchIngredientCategories, fetchRecipes } from '@/lib/pos-api';
 import { shopApi } from '@/lib/shop-api';
 import { hasPendingLocalShopOpen, clearPendingLocalShopOpen } from '@/lib/shop-session';
 
@@ -87,6 +91,9 @@ export interface OfflineSyncResult {
   // letting them silently keep failing in the background forever.
   tableConflictOrderIds?: string[];
   versionConflictOrderIds?: string[];
+  // Offline Customer Dues - see syncCustomerActions below.
+  customerActionsApplied?: number;
+  customerActionsFailed?: number;
   error?: string;
 }
 
@@ -309,6 +316,42 @@ async function syncEmployeeDeletes(): Promise<{ applied: number; failed: number 
 // already had a real cloud _id before this offline stretch, never one
 // still sitting in the creates queue - see localStaff.js), creates just go
 // first for tidiness.
+// Offline Customer Dues - replays whatever "Add Customer" / "+ Add Dues" /
+// "- Pay Dues" actions were queued while offline (see
+// backend/localHub/localCustomerActions.js / offline-dues-helpers.ts)
+// against the same real customerController.js logic the online routes
+// use. One flat queue (unlike orders' three), so this is a single call
+// instead of syncOrderEdits + syncOrderCancellations' separate phases.
+async function syncCustomerActions(): Promise<{ applied: number; failed: number }> {
+  const pending = await getPendingCustomerActions();
+  if (pending.length === 0) return { applied: 0, failed: 0 };
+
+  try {
+    const response = await api.post('/customers/import-offline-actions', {
+      actions: pending.map((action) => ({
+        clientActionId: action.id,
+        kind: action.kind,
+        ...action.payload,
+      })),
+    });
+
+    const { results = [] } = response.data as {
+      results: Array<{ clientActionId: string; success: boolean; error?: string }>;
+    };
+
+    const succeededIds = results.filter((entry) => entry.success).map((entry) => entry.clientActionId);
+    if (succeededIds.length) await ackCustomerActions(succeededIds);
+
+    for (const entry of results) {
+      if (!entry.success) void markCustomerActionFailed(entry.clientActionId, entry.error || 'Sync failed');
+    }
+
+    return { applied: succeededIds.length, failed: pending.length - succeededIds.length };
+  } catch {
+    return { applied: 0, failed: pending.length };
+  }
+}
+
 async function syncEmployeeQueues(): Promise<{ applied: number; failed: number }> {
   const [creates, edits, deletes] = await Promise.all([
     syncEmployeeCreates(),
@@ -425,6 +468,10 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
   // runs regardless of whether there were any orders to sync this tick.
   const staffResult = await syncEmployeeQueues();
 
+  // Offline Customer Dues - same "always runs, independent queue" as
+  // staff above (see localCustomerActions.js).
+  const customerActionsResult = await syncCustomerActions();
+
   // Whatever this tick just imported (or found nothing to import), pull
   // the cloud's now-current session + orderCounter and hand it to the
   // Local Hub - this is what keeps the local counter caught up even when
@@ -458,6 +505,8 @@ export async function runSyncNow(): Promise<OfflineSyncResult> {
     wrongKeyOrderIds: cancellationsResult.wrongKeyOrderIds,
     tableConflictOrderIds: tableConflictLocalOrderIds,
     versionConflictOrderIds: editsResult.versionConflictOrderIds,
+    customerActionsApplied: customerActionsResult.applied,
+    customerActionsFailed: customerActionsResult.failed,
   };
 }
 
@@ -487,6 +536,9 @@ export function triggerBackgroundSync(): void {
       // (see offline-order-helpers.ts's loadOrdersFromLocalHub), never a
       // live call.
       await pushCurrentOrdersCache();
+      // Same reasoning, for Customer Dues - see offline-dues-helpers.ts's
+      // loadCustomersFromLocalHub.
+      await pushCurrentCustomersLedgerCache();
     } catch {
       // Best-effort, same as every other background push in this file.
     } finally {
@@ -576,6 +628,25 @@ export async function pushCurrentOrdersCache(): Promise<void> {
 // push right after a successful online load (see its `load()`), so this
 // periodic one mainly covers "the till came back online on some other page
 // and Manage Staff hasn't been opened yet this session".
+// Customer Dues' own full-ledger cache - see customersCache.js /
+// offline-dues-helpers.ts's loadCustomersFromLocalHub. Separate from
+// pushCurrentReferenceData's lightweight `customers` field (a bare
+// name+phone list for the POS checkout customer picker) - DuesPage.tsx
+// needs the FULL ledger shape (previousDues, duesHistory, orders,
+// purchases, netBalance, ...) fetchCustomerLedger returns.
+export async function pushCurrentCustomersLedgerCache(): Promise<void> {
+  if (!isDesktopApp()) return;
+  const hubUp = await isLocalHubReachable();
+  if (!hubUp) return;
+
+  try {
+    const customers = await fetchCustomerLedger();
+    await pushCustomersCache(customers || []);
+  } catch {
+    // Best-effort - same reasoning as pushCurrentReferenceData.
+  }
+}
+
 export async function pushCurrentEmployeesCache(): Promise<void> {
   if (!isDesktopApp()) return;
   const hubUp = await isLocalHubReachable();
@@ -623,6 +694,7 @@ export function useOfflineSync() {
       await pushCurrentIngredientsCache();
       await pushCurrentOrdersCache();
       await pushCurrentEmployeesCache();
+      await pushCurrentCustomersLedgerCache();
       await refreshStatus();
       return result;
     } finally {

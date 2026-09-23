@@ -136,6 +136,10 @@ export interface SyncStatus {
   // SYNCED order while offline" section / server.js's /sync/status.
   pendingCancellationCount?: number;
   failedCancellationCount?: number;
+  // Offline Customer Dues - see localCustomerActions.js / server.js's
+  // /sync/status.
+  pendingCustomerActionCount?: number;
+  failedCustomerActionCount?: number;
 }
 
 // Loopback-only calls (the till talking to its own hub) - fetches and
@@ -229,6 +233,67 @@ export async function getOrdersCache(): Promise<OrdersCacheSnapshot> {
   if (!getCachedPairingKey()) await getPairingInfo();
   const response = await hub.get<OrdersCacheSnapshot>('/orders-cache');
   return response.data;
+}
+
+// --- Customer Dues ledger cache (see backend/localHub/customersCache.js) -
+// same read-through-cache shape as Orders above: DuesPage.tsx always reads
+// this first (see offline-dues-helpers.ts's loadCustomersFromLocalHub),
+// refreshed in the background whenever the till successfully loads the
+// ledger from the cloud.
+export interface CustomersCacheSnapshot {
+  updatedAt: string | null;
+  customers: unknown[];
+}
+
+export async function pushCustomersCache(customers: unknown[]) {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  await hub.post('/customers-cache', { customers });
+}
+
+export async function getCustomersCache(): Promise<CustomersCacheSnapshot> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<CustomersCacheSnapshot>('/customers-cache');
+  return response.data;
+}
+
+// --- Customer Dues offline write queue (see
+// backend/localHub/localCustomerActions.js) - one shared queue for
+// Add Customer / + Add Dues / - Pay Dues, each tagged with its own kind
+// so a mixed batch replays in one sync pass. See offline-dues-helpers.ts.
+export interface LocalCustomerActionRecord {
+  id: string;
+  kind: 'create' | 'add_due' | 'settle_due';
+  payload: Record<string, unknown>;
+  actor: { name?: string } | null;
+  status: 'pending' | 'synced' | 'failed';
+  queuedAt: string;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+
+export async function queueCustomerAction(
+  kind: 'create' | 'add_due' | 'settle_due',
+  payload: Record<string, unknown>,
+  actor?: { name?: string },
+): Promise<LocalCustomerActionRecord> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.post<LocalCustomerActionRecord>('/customer-actions', { kind, payload, actor });
+  return response.data;
+}
+
+export async function getPendingCustomerActions(): Promise<LocalCustomerActionRecord[]> {
+  if (!getCachedPairingKey()) await getPairingInfo();
+  const response = await hub.get<LocalCustomerActionRecord[]>('/customer-actions/pending');
+  return response.data;
+}
+
+export async function ackCustomerActions(ids: string[]) {
+  if (ids.length === 0) return;
+  await hub.post('/customer-actions/ack', { ids });
+}
+
+export async function markCustomerActionFailed(id: string, error: string) {
+  await hub.post(`/customer-actions/${id}/fail`, { error });
 }
 
 // Read back whatever was last pushed - what POSPage.tsx falls back to for

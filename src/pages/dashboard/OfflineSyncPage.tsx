@@ -281,6 +281,31 @@ export default function OfflineSyncPage() {
           </div>
         ) : null}
       </div>
+
+      {/* Offline Customer Dues - see localCustomerActions.js. Covers
+          Add Customer, + Add Dues, and - Pay Dues/Clear made on Customer
+          Dues while the internet was down or too slow to trust. Same sync
+          engine/interval as everything else on this page. */}
+      <div className="rounded-[28px] border border-slate-200 bg-white p-6">
+        <div>
+          <h2 className="text-lg font-black text-slate-900">Offline Customer Dues</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            A customer added, or a dues amount added/paid, on Customer Dues while offline or on a slow connection.
+            They sync automatically the same way offline orders do.
+          </p>
+        </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-2">
+          <StatBox label="Pending" value={status?.pendingCustomerActionCount ?? 0} tone="amber" />
+          <StatBox label="Failed" value={status?.failedCustomerActionCount ?? 0} tone="rose" />
+        </div>
+
+        {!isOnline && (status?.pendingCustomerActionCount ?? 0) > 0 ? (
+          <div className="mt-4 flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700">
+            <WifiOff size={14} /> Waiting for the internet to come back before these can sync.
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

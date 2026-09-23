@@ -36,6 +36,12 @@ router.get("/ledger", canReadCustomers, customerController.getCustomerLedger);
 router.get("/:phone/outstanding", canReadCustomers, customerController.getCustomerOutstanding);
 router.get("/", canReadCustomers, customerController.getAllCustomers);
 router.post("/", canWriteCustomer, customerController.createCustomer);
+// Offline Mode's queued Customer Dues writes (Add Customer / + Add Dues /
+// - Pay Dues made while offline) - replayed once the till is back online.
+// Gated broadly (any permission that could have queued one of these
+// actions client-side in the first place) since a single batch can mix
+// creates and dues actions from the same offline session.
+router.post("/import-offline-actions", requireAnyPermission("sales.create", "customers.manage", "dues.manage"), customerController.importOfflineCustomerActions);
 router.post("/:phone/settle-dues", requirePermission("dues.manage"), customerController.settleCustomerDues);
 router.patch("/dues/:phone", requirePermission("dues.manage"), customerController.updateCustomerDues);
 // Delete-a-manual-dues-entry (Khata History timeline's own "+ Add"/"- Pay"

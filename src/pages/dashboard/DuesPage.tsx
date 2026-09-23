@@ -15,6 +15,9 @@ import {
   fetchBanks,
 } from '@/lib/pos-api';
 import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank } from '@/lib/pos-types';
+import { isDesktopApp } from '@/lib/api';
+import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
+import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 import OrderDetailModal from '@/components/OrderDetailModal';
@@ -75,16 +78,44 @@ export default function CustomerDuesPage() {
     }
   };
 
+  // Paints instantly from the Local Hub's cache first (same "never wait
+  // on a live cloud round trip just to show the list" pattern
+  // Dashboard/Sales/Kitchen already use for orders - see
+  // offline-dues-helpers.ts's loadCustomersFromLocalHub) - a slow or dead
+  // connection still shows this shop's customers/dues immediately instead
+  // of a blank "Loading customers..." screen. The real cloud fetch below
+  // still runs whenever possible, refining this with up-to-date numbers
+  // and refreshing the cache for next time (pushCurrentCustomersLedgerCache).
   const loadCustomers = async () => {
-    setLoading(true);
     setErrorMessage(null);
+    let paintedFromCache = false;
+    if (isDesktopApp()) {
+      try {
+        const cached = await loadCustomersFromLocalHub();
+        if (cached.length > 0) {
+          setCustomers(cached);
+          setLoading(false);
+          paintedFromCache = true;
+        }
+      } catch {
+        // Local Hub itself unreachable (rare) - falls through to the
+        // cloud-only path below, exactly like before this cache existed.
+      }
+    }
+    if (!paintedFromCache) setLoading(true);
     try {
       const data = await fetchCustomerLedger();
       if (data) {
         setCustomers(data);
+        if (isDesktopApp()) void pushCurrentCustomersLedgerCache();
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load customers.');
+      // Cached data is already on screen and still useful - a failed LIVE
+      // refresh (offline, or too slow) shouldn't blank the page or scare
+      // the shop owner with an error on top of data that's already there.
+      if (!paintedFromCache) {
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to load customers.');
+      }
     } finally {
       setLoading(false);
     }
@@ -128,6 +159,25 @@ export default function CustomerDuesPage() {
       // (0 orders, totalDue === whatever previousDues they were given).
       await loadCustomers();
     } catch (error) {
+      // Net down or too slow to reach the backend (not a real rejection
+      // like a duplicate phone or bad input - see isConnectivityFailure) -
+      // queue it instead of erroring out. It reaches the cloud
+      // automatically the moment connectivity returns (see
+      // offline-dues-helpers.ts), and shows up in the list right away as
+      // a provisional row so nothing looks lost in the meantime.
+      if (isDesktopApp() && isConnectivityFailure(error)) {
+        try {
+          const provisional = await queueCreateCustomerOffline(newCustomer);
+          setCustomers((previous) => [...previous, provisional].sort((a, b) => a.name.localeCompare(b.name)));
+          setShowAddCustomer(false);
+          setNewCustomer({ name: '', phone: '', address: '', previousDues: 0 });
+          toast.success(`"${provisional.name}" saved offline - will sync automatically once online.`);
+          return;
+        } catch {
+          // Local Hub itself unreachable too - nothing more can be done
+          // locally, fall through to the normal error below.
+        }
+      }
       toast.error(error instanceof Error ? error.message : 'Could not add customer.');
     }
   };
@@ -144,9 +194,10 @@ export default function CustomerDuesPage() {
   const handleAddManualDue = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
+    const nextPreviousDues = (customer.previousDues || 0) + amount;
 
     try {
-      const updated = await updateCustomerDues(phone, (customer.previousDues || 0) + amount, note, bankId ? { bankId } : undefined);
+      const updated = await updateCustomerDues(phone, nextPreviousDues, note, bankId ? { bankId } : undefined);
       if (!updated) {
         toast.error('Could not update dues.');
         return false;
@@ -156,6 +207,19 @@ export default function CustomerDuesPage() {
       toast.success('Dues updated.');
       return true;
     } catch (error) {
+      // See handleAddCustomer's own comment on isConnectivityFailure - net
+      // down/slow queues instead of erroring; a real rejection still shows
+      // the error below.
+      if (isDesktopApp() && isConnectivityFailure(error)) {
+        try {
+          const patched = await queueAddDueOffline(customer, { previousDues: nextPreviousDues, note, paymentMethod: bankId ? 'bank' : 'cash', bankId });
+          setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
+          toast.success('Saved offline - will sync automatically once online.');
+          return true;
+        } catch {
+          // Local Hub itself unreachable too - fall through below.
+        }
+      }
       toast.error(error instanceof Error ? error.message : 'Could not update dues.');
       return false;
     }
@@ -182,6 +246,17 @@ export default function CustomerDuesPage() {
       toast.success(`₨${result.appliedAmount} recorded.`);
       return true;
     } catch (error) {
+      // See handleAddCustomer's own comment on isConnectivityFailure.
+      if (isDesktopApp() && isConnectivityFailure(error)) {
+        try {
+          const patched = await queueSettleDueOffline(customer, { amount, note, paymentMethod: bankId ? 'bank' : 'cash', bankId });
+          setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
+          toast.success(`₨${amount} saved offline - will sync automatically once online.`);
+          return true;
+        } catch {
+          // Local Hub itself unreachable too - fall through below.
+        }
+      }
       toast.error(error instanceof Error ? error.message : 'Could not record payment.');
       return false;
     }

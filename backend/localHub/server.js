@@ -3,8 +3,10 @@ const cors = require("cors");
 const os = require("os");
 const pairing = require("./pairing");
 const localOrders = require("./localOrders");
+const localCustomerActions = require("./localCustomerActions");
 const referenceData = require("./referenceData");
 const orderCache = require("./orderCache");
+const customersCache = require("./customersCache");
 const localStaff = require("./localStaff");
 const employeesCache = require("./employeesCache");
 const ingredientsCache = require("./ingredientsCache");
@@ -189,6 +191,44 @@ app.post("/orders-cache", requireLoopback, (req, res) => {
 
 app.get("/orders-cache", requirePairingKey, (req, res) => {
   res.json(orderCache.get());
+});
+
+// Customer Dues ledger snapshot - see customersCache.js. Same push
+// (loopback)/read (pairing-key) shape as /orders-cache above.
+app.post("/customers-cache", requireLoopback, (req, res) => {
+  const snapshot = customersCache.set(req.body?.customers || []);
+  res.json(snapshot);
+});
+
+app.get("/customers-cache", requirePairingKey, (req, res) => {
+  res.json(customersCache.get());
+});
+
+// Customer Dues offline write queue - see localCustomerActions.js. One
+// shared queue for Add Customer / + Add Dues / - Pay Dues, each tagged
+// with its own `kind`.
+app.post("/customer-actions", requirePairingKey, (req, res) => {
+  const { kind, payload, actor } = req.body || {};
+  if (!kind || !payload || typeof payload !== "object") {
+    return res.status(400).json({ message: "kind and payload are required", reason: "validation_error" });
+  }
+  const record = localCustomerActions.queueAction(kind, payload, actor || null);
+  res.status(201).json(record);
+});
+
+app.get("/customer-actions/pending", requirePairingKey, (req, res) => {
+  res.json(localCustomerActions.listPending());
+});
+
+app.post("/customer-actions/ack", requirePairingKey, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const changed = localCustomerActions.markSynced(ids);
+  res.json({ ok: true, changed });
+});
+
+app.post("/customer-actions/:id/fail", requirePairingKey, (req, res) => {
+  const changed = localCustomerActions.markFailed(req.params.id, req.body?.error);
+  res.json({ ok: changed });
 });
 
 // Manage Staff's own full employee-list cache - see employeesCache.js for
@@ -475,6 +515,10 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
   const pendingStaffEdits = localStaff.listPendingEdits();
   const pendingStaffDeletes = localStaff.listPendingDeletes();
 
+  const allCustomerActions = localCustomerActions.listAll();
+  const pendingCustomerActions = allCustomerActions.filter((entry) => entry.status === "pending");
+  const failedCustomerActions = allCustomerActions.filter((entry) => entry.status === "failed");
+
   res.json({
     pendingCount: pending.length,
     failedCount: failed.length,
@@ -494,6 +538,10 @@ app.get("/sync/status", requirePairingKey, (req, res) => {
     failedStaffEditCount: pendingStaffEdits.filter((entry) => entry.status === "failed").length,
     pendingStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "pending").length,
     failedStaffDeleteCount: pendingStaffDeletes.filter((entry) => entry.status === "failed").length,
+    // Offline Customer Dues (Add Customer / + Add Dues / - Pay Dues) - see
+    // localCustomerActions.js.
+    pendingCustomerActionCount: pendingCustomerActions.length,
+    failedCustomerActionCount: failedCustomerActions.length,
   });
 });
 

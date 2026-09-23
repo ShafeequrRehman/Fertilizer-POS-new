@@ -93,8 +93,15 @@ exports.getAllCustomers = async (req, res) => {
 };
 
 
+// Shared by the normal POST / route and importOfflineCustomerActions below
+// (Offline Mode's queued "Add Customer" replay) - both just create a
+// Customer doc from the same shape of payload, scoped to the same shop.
+async function applyCreateCustomer(shopId, body) {
+  return Customer.create({ ...body, shopId });
+}
+
 exports.createCustomer = async (req, res) => {
-  const customer = await Customer.create({ ...req.body, shopId: req.user.shopId });
+  const customer = await applyCreateCustomer(req.user.shopId, req.body);
   res.status(201).json(serializeCustomer(customer));
 };
 
@@ -417,21 +424,23 @@ exports.getCustomerOutstanding = async (req, res) => {
 // bankController.recordCustomerBankMovement. A plain cash entry (the
 // default, and the only option before this) never touches any Bank
 // document, exactly as before.
-exports.updateCustomerDues = async (req, res) => {
-  const nextPreviousDues = Number(req.body.previousDues || 0);
-  const note = String(req.body.note || "").trim();
-  const paymentMethod = req.body.paymentMethod === "bank" ? "bank" : "cash";
-  const bankId = req.body.bankId ? String(req.body.bankId) : "";
+// Shared by the normal PATCH /dues/:phone route and
+// importOfflineCustomerActions below (Offline Mode's queued "+ Add Dues"
+// replay) - both apply the exact same lump-sum-dues move for a given
+// phone, just called with a real req vs. a queued action's own payload.
+async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
+  const nextPreviousDues = Number(body.previousDues || 0);
+  const note = String(body.note || "").trim();
+  const paymentMethod = body.paymentMethod === "bank" ? "bank" : "cash";
+  const bankId = body.bankId ? String(body.bankId) : "";
 
-  const scope = shopScope(req);
-  const customer = await Customer.findOne({ phone: req.params.phone, ...scope });
+  const customer = await Customer.findOne({ phone, ...scope });
   if (!customer) {
-    return res.status(404).json({ error: "Customer not found" });
+    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
   }
 
   const delta = nextPreviousDues - Number(customer.previousDues || 0);
   customer.previousDues = nextPreviousDues;
-  const createdBy = await currentUserName(req);
 
   // Move the bank's own money FIRST (if applicable) so its real name is
   // known before building the duesHistory entry below - recordCustomerBankMovement
@@ -484,8 +493,18 @@ exports.updateCustomerDues = async (req, res) => {
     });
   }
   await customer.save();
+  return customer;
+}
 
-  res.json(serializeCustomer(customer));
+exports.updateCustomerDues = async (req, res) => {
+  try {
+    const scope = shopScope(req);
+    const createdBy = await currentUserName(req);
+    const customer = await applyUpdateCustomerDues(scope, req.params.phone, req.body, createdBy);
+    res.json(serializeCustomer(customer));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
 };
 
 // POST /api/customers/:phone/settle-dues  body: { amount, note?, paymentMethod?, bankId? }
@@ -507,82 +526,88 @@ exports.updateCustomerDues = async (req, res) => {
 // paymentMethod/bankId: when this payment actually arrived via bank
 // transfer rather than cash-in-hand, the picked bank's own balance goes UP
 // by the same amount - see bankController.recordCustomerBankMovement.
-exports.settleCustomerDues = async (req, res) => {
-  try {
-    const phone = req.params.phone;
-    const amount = Math.max(Number(req.body.amount) || 0, 0);
-    const note = String(req.body.note || "").trim();
-    const paymentMethod = req.body.paymentMethod === "bank" ? "bank" : "cash";
-    const bankId = req.body.bankId ? String(req.body.bankId) : "";
-    if (amount <= 0) {
-      return res.status(400).json({ message: "amount must be greater than 0", reason: "validation_error" });
-    }
+// Shared by the normal POST /:phone/settle-dues route and
+// importOfflineCustomerActions below (Offline Mode's queued "- Pay Dues"/
+// "Clear" replay).
+async function applySettleCustomerDues(scope, phone, body, createdBy) {
+  const amount = Math.max(Number(body.amount) || 0, 0);
+  const note = String(body.note || "").trim();
+  const paymentMethod = body.paymentMethod === "bank" ? "bank" : "cash";
+  const bankId = body.bankId ? String(body.bankId) : "";
+  if (amount <= 0) {
+    throw Object.assign(new Error("amount must be greater than 0"), { statusCode: 400 });
+  }
 
-    const scope = shopScope(req);
-    const customer = await Customer.findOne({ phone, ...scope });
-    if (!customer) {
-      return res.status(404).json({ message: "Customer not found" });
-    }
+  const customer = await Customer.findOne({ phone, ...scope });
+  if (!customer) {
+    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
+  }
 
-    const previousDues = Number(customer.previousDues || 0) - amount;
-    customer.previousDues = previousDues;
-    const createdBy = await currentUserName(req);
+  const previousDues = Number(customer.previousDues || 0) - amount;
+  customer.previousDues = previousDues;
 
-    // Move the bank's own money FIRST (if applicable) so its real name is
-    // known before building the duesHistory entry below - see
-    // updateCustomerDues's own comment on the same ordering.
-    let bank = null;
-    if (paymentMethod === "bank" && bankId) {
-      bank = await recordCustomerBankMovement({
-        bankId,
-        shopId: scope.shopId,
-        type: "deposit",
-        amount,
-        note,
-        customerName: customer.name,
-        customerPhone: customer.phone,
-        createdBy,
-      });
-    }
-
-    // Total Recovery / Cash in Hand (Dashboard): a Cash-method "Pay Dues"
-    // is real cash landing at the till right now, same as a Cash-method
-    // order payment (orderController.js's own completeAndSettle branch) -
-    // recorded here so the Dashboard's Cash in Hand figure and today's
-    // Total Recovery both reflect it. Only when the money did NOT already
-    // go into a bank above (paymentMethod:"bank" moves the bank's own
-    // balance instead, via recordCustomerBankMovement).
-    if (!bank) {
-      await recordCashMovement({
-        shopId: scope.shopId,
-        type: "due_recovery",
-        direction: "in",
-        amount,
-        note: note || `Due payment - ${customer.name || customer.phone}`,
-        relatedCustomerName: customer.name,
-        relatedCustomerPhone: customer.phone,
-        createdBy,
-      });
-    }
-
-    customer.duesHistory.push({
-      type: "settle",
+  // Move the bank's own money FIRST (if applicable) so its real name is
+  // known before building the duesHistory entry below - see
+  // updateCustomerDues's own comment on the same ordering.
+  let bank = null;
+  if (paymentMethod === "bank" && bankId) {
+    bank = await recordCustomerBankMovement({
+      bankId,
+      shopId: scope.shopId,
+      type: "deposit",
       amount,
       note,
-      balanceAfter: previousDues,
+      customerName: customer.name,
+      customerPhone: customer.phone,
       createdBy,
-      paymentMethod: bank ? "bank" : "cash",
-      bankName: bank?.name || "",
     });
+  }
 
-    await customer.save();
+  // Total Recovery / Cash in Hand (Dashboard): a Cash-method "Pay Dues"
+  // is real cash landing at the till right now, same as a Cash-method
+  // order payment (orderController.js's own completeAndSettle branch) -
+  // recorded here so the Dashboard's Cash in Hand figure and today's
+  // Total Recovery both reflect it. Only when the money did NOT already
+  // go into a bank above (paymentMethod:"bank" moves the bank's own
+  // balance instead, via recordCustomerBankMovement).
+  if (!bank) {
+    await recordCashMovement({
+      shopId: scope.shopId,
+      type: "due_recovery",
+      direction: "in",
+      amount,
+      note: note || `Due payment - ${customer.name || customer.phone}`,
+      relatedCustomerName: customer.name,
+      relatedCustomerPhone: customer.phone,
+      createdBy,
+    });
+  }
 
+  customer.duesHistory.push({
+    type: "settle",
+    amount,
+    note,
+    balanceAfter: previousDues,
+    createdBy,
+    paymentMethod: bank ? "bank" : "cash",
+    bankName: bank?.name || "",
+  });
+
+  await customer.save();
+  return amount;
+}
+
+exports.settleCustomerDues = async (req, res) => {
+  try {
+    const scope = shopScope(req);
+    const createdBy = await currentUserName(req);
+    const amount = await applySettleCustomerDues(scope, req.params.phone, req.body, createdBy);
     // appliedAmount is always the full amount now (nothing left
     // "unapplied") - kept in the response shape so the frontend's existing
     // `result.appliedAmount` toast keeps working unchanged.
     res.json({ appliedAmount: amount, unapplied: 0 });
   } catch (error) {
-    res.status(500).json({ message: "Failed to settle dues", detail: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -662,5 +687,54 @@ exports.deleteDuesHistoryEntry = async (req, res) => {
     res.json({ success: true, previousDues: nextPreviousDues });
   } catch (error) {
     res.status(500).json({ message: "Could not delete this dues history entry.", detail: error.message });
+  }
+};
+
+// POST /api/customers/import-offline-actions  body: { actions: [...] }
+// Offline Mode's queued Customer-Dues writes (Add Customer / + Add Dues /
+// - Pay Dues made while the till had no internet, or net was too slow -
+// see src/lib/offline-dues-helpers.ts on the frontend), replayed here once
+// connectivity returns. Each action carries its own clientActionId (a
+// locally-generated id, not a Mongo _id) purely so the frontend can match
+// each result back to the queued item it came from and ack/drop only
+// that one - the whole batch never fails as a unit just because one
+// action in it did (e.g. a customer that was already created from
+// another device before this one got back online).
+exports.importOfflineCustomerActions = async (req, res) => {
+  try {
+    const scope = shopScope(req);
+    const createdBy = await currentUserName(req);
+    const actions = Array.isArray(req.body.actions) ? req.body.actions : [];
+    const results = [];
+    for (const action of actions) {
+      const clientActionId = action.clientActionId;
+      try {
+        if (action.kind === "create") {
+          const customer = await applyCreateCustomer(scope.shopId, {
+            name: action.name,
+            phone: action.phone,
+            address: action.address,
+            previousDues: action.previousDues,
+          });
+          results.push({ clientActionId, success: true, customer: serializeCustomer(customer) });
+        } else if (action.kind === "add_due") {
+          const customer = await applyUpdateCustomerDues(scope, action.phone, action, createdBy);
+          results.push({ clientActionId, success: true, customer: serializeCustomer(customer) });
+        } else if (action.kind === "settle_due") {
+          const amount = await applySettleCustomerDues(scope, action.phone, action, createdBy);
+          results.push({ clientActionId, success: true, appliedAmount: amount });
+        } else {
+          results.push({ clientActionId, success: false, error: "Unknown offline action kind" });
+        }
+      } catch (error) {
+        // Per-action failure (e.g. a duplicate phone on "create", or the
+        // customer having since been removed) - reported individually so
+        // one bad queued item never blocks every other one behind it.
+        results.push({ clientActionId, success: false, error: error.message, code: error.code });
+      }
+    }
+    res.json({ results });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 };
