@@ -5,7 +5,7 @@ import {
   Package, Users, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
   Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
-  Menu, X, Smartphone, Boxes
+  Menu, X, Smartphone, Boxes, Landmark
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, getAuthShop, hasPermission, hasAnyPermission, isPageEnabled, getIsDashboardHidden } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
@@ -36,6 +36,7 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   management: <Users size={18} />,
   dues: <FileText size={18} />,
   ledger: <BookText size={18} />,
+  bank: <Landmark size={18} />,
   record: <ClipboardList size={18} />,
   shifts: <Store size={18} />,
   offline: <Wifi size={18} />,

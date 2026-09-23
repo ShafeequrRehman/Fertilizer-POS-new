@@ -240,21 +240,27 @@ function BankCard({ bank, onChanged, confirm, toast }: {
         <ReportPdfDocument
           title="Bank Statement"
           subtitle={`${bank.name} - ${rangeLabel}`}
+          // Same Total In / Total Out / Net stat-box style, and the same
+          // Date/Type/Note/By/In/Out/Balance table shape, as every other
+          // In-Out PDF in this app (Cash in Hand History, Correction
+          // History, Recovery History) - the owner's own ask was for one
+          // consistent PDF look everywhere.
           stats={[
-            { label: 'Current Balance', value: `Rs ${bank.balance.toLocaleString()}` },
-            { label: 'Total Payments Added', value: `Rs ${totalDeposits.toLocaleString()}` },
-            { label: 'Total Withdrawals', value: `Rs ${totalWithdrawals.toLocaleString()}` },
+            { label: 'Total In', value: `Rs ${totalDeposits.toLocaleString()}` },
+            { label: 'Total Out', value: `Rs ${totalWithdrawals.toLocaleString()}` },
+            { label: 'Net', value: `Rs ${(totalDeposits - totalWithdrawals).toLocaleString()}` },
           ]}
           tables={[
             {
               title: 'History',
               columns: [
-                { label: 'Date', width: 1 },
-                { label: 'Entry', width: 1.6 },
-                { label: 'Detail', width: 1.8 },
-                { label: 'Deposit', width: 1, align: 'right' },
-                { label: 'Withdrawal', width: 1, align: 'right' },
-                { label: 'Balance', width: 1.1, align: 'right' },
+                { label: 'Date', width: 1.3 },
+                { label: 'Type', width: 0.8 },
+                { label: 'Note', width: 1.8 },
+                { label: 'By', width: 0.9 },
+                { label: 'In', width: 0.9, align: 'right' },
+                { label: 'Out', width: 0.9, align: 'right' },
+                { label: 'Balance', width: 1, align: 'right' },
               ],
               // Newest-first, same order the on-screen History list above
               // already shows (bank.history comes back sorted that way -
@@ -263,17 +269,18 @@ function BankCard({ bank, onChanged, confirm, toast }: {
                 const isIn = entry.type === 'deposit';
                 const who = entry.relatedCustomerName
                   ? (isIn ? `Received from ${entry.relatedCustomerName}` : `Given to ${entry.relatedCustomerName}`)
-                  : (isIn ? 'Payment Added' : 'Withdrawal');
+                  : '';
                 return [
-                  new Date(entry.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-                  who,
-                  entry.note || '—',
+                  new Date(entry.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+                  isIn ? 'In' : 'Out',
+                  [who, entry.note].filter(Boolean).join(' - ') || '—',
+                  entry.createdBy || '—',
                   isIn ? `Rs ${entry.amount.toLocaleString()}` : '—',
                   isIn ? '—' : `Rs ${entry.amount.toLocaleString()}`,
                   `Rs ${entry.balanceAfter.toLocaleString()}`,
                 ];
               }),
-              footer: ['', '', 'Current Balance', `Rs ${totalDeposits.toLocaleString()}`, `Rs ${totalWithdrawals.toLocaleString()}`, `Rs ${bank.balance.toLocaleString()}`],
+              footer: ['', '', '', 'Total', `Rs ${totalDeposits.toLocaleString()}`, `Rs ${totalWithdrawals.toLocaleString()}`, `Rs ${bank.balance.toLocaleString()}`],
               emptyMessage: 'No transactions recorded for this bank yet.',
             },
           ]}

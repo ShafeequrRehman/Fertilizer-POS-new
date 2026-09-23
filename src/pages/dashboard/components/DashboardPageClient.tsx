@@ -539,6 +539,14 @@ function AccountingOverview({
           { icon: <HistoryIcon size={12} />, onClick: () => onOpenTileHistory(key), label: 'History' },
         ]
       : [{ icon: <HistoryIcon size={12} />, onClick: () => onOpenTileHistory(key), label: 'History' }];
+  // Customer Advance / Total Recovery already have their own dedicated
+  // "Details" icon (the real customer-level breakdown - onOpenCustomerAdvances/
+  // onOpenRecoveryHistory) - a second, separate correction-History icon
+  // there just crowded the tile with two near-identical grey circular
+  // buttons for what the owner sees as the same "show me more" action, so
+  // only Adjust is added here on top of Details for these two.
+  const adjustOnlyFor = (key: DashboardAdjustmentKey) =>
+    canAdjustCash ? [{ icon: <Pencil size={12} />, onClick: () => onAdjustTile(key), label: 'Adjust' }] : [];
   return (
     <div className="rounded-[32px] bg-white p-6 shadow-sm">
       <div className="mb-6 flex items-center justify-between">
@@ -556,7 +564,7 @@ function AccountingOverview({
           valueColor="text-emerald-600"
           actions={[
             { icon: <List size={12} />, onClick: onOpenCustomerAdvances, label: 'Details' },
-            ...actionsFor('customerAdvanceTotal'),
+            ...adjustOnlyFor('customerAdvanceTotal'),
           ]}
         />
         <OverviewTile
@@ -584,7 +592,7 @@ function AccountingOverview({
           label="Total Recovery (Today)"
           value={money(summary?.totalRecoveryToday)}
           valueColor="text-emerald-600"
-          actions={[{ icon: <List size={12} />, onClick: onOpenRecoveryHistory, label: 'Details' }, ...actionsFor('totalRecoveryToday')]}
+          actions={[{ icon: <List size={12} />, onClick: onOpenRecoveryHistory, label: 'Details' }, ...adjustOnlyFor('totalRecoveryToday')]}
         />
       </div>
     </div>
@@ -1135,26 +1143,6 @@ function firstOfMonthDateInputValue(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
 
-// Downloads a CSV Blob client-side - no PDF library dependency needed, and
-// it opens straight into Excel/Sheets the same way the other exports on
-// Record/Ledger pages already do.
-function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
-  const escape = (value: string | number) => {
-    const str = String(value);
-    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-  };
-  const csv = [headers, ...rows].map((row) => row.map(escape).join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
 // Task 3: Recovery "Details" - every real due-payment (Cash or Bank) any
 // customer has made, with a Today/This Month/Custom/All date filter (same
 // idea as IngredientStockSection.tsx's own Ledger range pills) and a CSV
@@ -1193,22 +1181,54 @@ function RecoveryHistoryModal({ onClose }: { onClose: () => void }) {
   }, [startDate, endDate]);
 
   const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
 
-  function download() {
-    downloadCsv(
-      `recovery-history-${startDate || 'all'}-to-${endDate || 'all'}.csv`,
-      ['Date', 'Customer', 'Phone', 'Amount', 'Method', 'Bank', 'Note', 'Recorded By'],
-      rows.map((row) => [
-        new Date(row.createdAt).toLocaleString(),
-        row.customerName,
-        row.customerPhone,
-        row.amount,
-        row.paymentMethod,
-        row.bankName,
-        row.note,
-        row.createdBy,
-      ])
-    );
+  const rangeLabel =
+    rangeMode === 'today' ? 'Today'
+    : rangeMode === 'month' ? 'This Month'
+    : rangeMode === 'custom' ? `${customFrom} to ${customTo}`
+    : 'All Time';
+
+  // Same "title, stats, one table" ReportPdfDocument style every other
+  // history download in this app uses (Cash in Hand/Correction History's
+  // own PDF, BankPage.tsx's Bank Statement) - the owner's own ask was a
+  // PDF here too, in that same style, not a CSV.
+  async function download() {
+    setIsDownloadingPdf(true);
+    try {
+      const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
+      const doc = (
+        <ReportPdfDocument
+          title="Recovery History"
+          subtitle={rangeLabel}
+          stats={[{ label: 'Total Recovery', value: `Rs ${total.toLocaleString()}` }]}
+          tables={[
+            {
+              title: 'History',
+              columns: [
+                { label: 'Date', width: 1.4 },
+                { label: 'Type', width: 0.9 },
+                { label: 'Note', width: 1.8 },
+                { label: 'By', width: 1 },
+                { label: 'In', width: 1, align: 'right' },
+              ],
+              rows: rows.map((row) => [
+                new Date(row.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+                row.paymentMethod === 'bank' ? row.bankName || 'Bank' : 'Cash',
+                `${row.customerName}${row.note ? ` - ${row.note}` : ''}`,
+                row.createdBy || '\u2014',
+                `Rs ${row.amount.toLocaleString()}`,
+              ]),
+              footer: ['', '', '', 'Total', `Rs ${total.toLocaleString()}`],
+              emptyMessage: 'No recovery in this range.',
+            },
+          ]}
+        />
+      );
+      await downloadPdfDocument(doc, `recovery-history-${startDate || 'all'}-to-${endDate || 'all'}.pdf`);
+    } finally {
+      setIsDownloadingPdf(false);
+    }
   }
 
   return (
@@ -1237,11 +1257,11 @@ function RecoveryHistoryModal({ onClose }: { onClose: () => void }) {
           ))}
           <button
             type="button"
-            onClick={download}
-            disabled={rows.length === 0}
+            onClick={() => void download()}
+            disabled={rows.length === 0 || isDownloadingPdf}
             className="ml-auto rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-600 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Download CSV
+            {isDownloadingPdf ? 'Preparing...' : 'PDF'}
           </button>
         </div>
 
