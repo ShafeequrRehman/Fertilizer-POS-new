@@ -8,6 +8,8 @@ const Product = require("../models/Product");
 const Ingredient = require("../models/Ingredient");
 const Bank = require("../models/Bank");
 const Grain = require("../models/Grain");
+const LabourAccount = require("../models/LabourAccount");
+const MunshiAccount = require("../models/MunshiAccount");
 const CashRegister = require("../models/CashRegister");
 const DashboardAdjustment = require("../models/DashboardAdjustment");
 const { shopScope } = require("../middleware/attachShopScope");
@@ -513,6 +515,8 @@ exports.getDashboardSummary = async (req, res) => {
       ingredients,
       banks,
       grains,
+      labourAccount,
+      munshiAccount,
       cashRegister,
       vendorDueAgg,
       todaysPurchaseAgg,
@@ -550,6 +554,12 @@ exports.getDashboardSummary = async (req, res) => {
       // (Grain Stock page), same "current rupee value on hand" idea as
       // Bank above - see grainController.js's own comment.
       Grain.find({ shopId: shopObjectId }).select("balance history").lean(),
+      // Labour/Munshi Khata - each shop's own single running balance (not
+      // a list of named accounts like Bank/Grain) - see LabourAccount.js/
+      // MunshiAccount.js's own comment on why they track ON TOP of Cash in
+      // Hand rather than instead of it.
+      LabourAccount.findOne({ shopId: shopObjectId }).select("balance history").lean(),
+      MunshiAccount.findOne({ shopId: shopObjectId }).select("balance history").lean(),
       CashRegister.findOne({ shopId: shopObjectId }).select("balance history").lean(),
       // Vendor Balance - total still owed to suppliers across every
       // received (not pending/cancelled) stock batch ever logged, same
@@ -619,6 +629,8 @@ exports.getDashboardSummary = async (req, res) => {
     const stockValue = ingredientStockValue + untrackedProductStockValue;
     const balanceOnBank = banks.reduce((sum, b) => sum + balanceAsOfEnd(b.balance, b.history), 0);
     const grainStockValue = grains.reduce((sum, g) => sum + balanceAsOfEnd(g.balance, g.history), 0);
+    const labourBalance = balanceAsOfEnd(labourAccount?.balance, labourAccount?.history);
+    const munshiBalance = balanceAsOfEnd(munshiAccount?.balance, munshiAccount?.history);
     const cashInHand = balanceAsOfEnd(cashRegister?.balance, cashRegister?.history);
     const vendorBalance = vendorDueAgg[0]?.total || 0;
     const totalPurchaseToday = todaysPurchaseAgg[0]?.total || 0;
@@ -673,6 +685,8 @@ exports.getDashboardSummary = async (req, res) => {
       cashInHand,
       balanceOnBank,
       grainStockValue,
+      labourBalance,
+      munshiBalance,
       stockValue: adjusted("stockValue", stockValue),
       vendorBalance: adjusted("vendorBalance", vendorBalance),
       customerUdharTotal: adjusted("customerUdharTotal", customerUdharTotal),

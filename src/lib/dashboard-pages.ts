@@ -71,6 +71,10 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   // made "via Grain Stock" (see GrainStockPage.tsx/DuesPage.tsx's
   // paymentMethod picker).
   { key: 'grain-stock', label: 'Grain Stock', href: '/dashboard/grain-stock', permission: 'dues.manage' },
+  // Single running khata each, same dues.manage gate - see
+  // LabourPage.tsx/MunshiPage.tsx/DuesPage.tsx's payment-method picker.
+  { key: 'labour-khata', label: 'Labour Khata', href: '/dashboard/labour-khata', permission: 'dues.manage' },
+  { key: 'munshi-khata', label: 'Munshi Khata', href: '/dashboard/munshi-khata', permission: 'dues.manage' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
   // Sidebar/Route Bypass Bug Fix: same story as Dining Tables above - used

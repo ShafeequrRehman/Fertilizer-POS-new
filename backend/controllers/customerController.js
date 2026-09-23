@@ -7,6 +7,8 @@ const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { recordCustomerBankMovement } = require("./bankController");
 const { recordCustomerGrainMovement } = require("./grainController");
+const { recordCustomerLabourMovement } = require("./labourController");
+const { recordCustomerMunshiMovement } = require("./munshiController");
 const { recordCashMovement } = require("./cashController");
 
 // The JWT (req.user) only ever carries id/role/shopId/permissions - never
@@ -432,7 +434,7 @@ exports.getCustomerOutstanding = async (req, res) => {
 async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
   const nextPreviousDues = Number(body.previousDues || 0);
   const note = String(body.note || "").trim();
-  const paymentMethod = body.paymentMethod === "bank" ? "bank" : body.paymentMethod === "grain" ? "grain" : "cash";
+  const paymentMethod = ["bank", "grain", "labour", "munshi"].includes(body.paymentMethod) ? body.paymentMethod : "cash";
   const bankId = body.bankId ? String(body.bankId) : "";
   const grainId = body.grainId ? String(body.grainId) : "";
   const grainKg = Math.max(Number(body.grainKg) || 0, 0);
@@ -483,12 +485,47 @@ async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
     });
   }
 
-  // Cash in Hand (Dashboard): a Cash-method "+ Add Dues" is the shop
-  // physically handing the customer an advance/credit - real cash leaving
-  // the till right now, the mirror image of settleCustomerDues's
+  // Labour/Munshi are different from Bank/Grain Stock above - they don't
+  // replace Cash in Hand, they track ON TOP of it. A "+ Add Dues" made
+  // "via Labour"/"via Munshi" is still real cash physically handed to the
+  // customer (so Cash in Hand still goes down below, same as plain Cash),
+  // but it's ALSO recorded as money that came out of that labour/munshi
+  // khata specifically, for the owner's own bookkeeping of what's been
+  // spent through each. See labourController.recordCustomerLabourMovement/
+  // munshiController.recordCustomerMunshiMovement.
+  if (paymentMethod === "labour" && delta > 0) {
+    await recordCustomerLabourMovement({
+      shopId: scope.shopId,
+      type: "due_given",
+      direction: "out",
+      amount: delta,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+  if (paymentMethod === "munshi" && delta > 0) {
+    await recordCustomerMunshiMovement({
+      shopId: scope.shopId,
+      type: "due_given",
+      direction: "out",
+      amount: delta,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
+  // Cash in Hand (Dashboard): a Cash/Labour/Munshi-method "+ Add Dues" is
+  // the shop physically handing the customer an advance/credit - real cash
+  // leaving the till right now, the mirror image of settleCustomerDues's
   // due_recovery below. Only when it wasn't already a bank withdrawal or a
-  // grain withdrawal above (those move their own balance instead).
-  if (paymentMethod === "cash" && delta > 0) {
+  // grain withdrawal above (those move their own balance INSTEAD of Cash
+  // in Hand - Labour/Munshi move it ON TOP of Cash in Hand, see their own
+  // comment above, so cash still moves for them too).
+  if (!bank && !grain && delta > 0) {
     await recordCashMovement({
       shopId: scope.shopId,
       type: "due_given",
@@ -510,7 +547,7 @@ async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
       note,
       balanceAfter: nextPreviousDues,
       createdBy,
-      paymentMethod: bank ? "bank" : grain ? "grain" : "cash",
+      paymentMethod: bank ? "bank" : grain ? "grain" : paymentMethod === "labour" ? "labour" : paymentMethod === "munshi" ? "munshi" : "cash",
       bankName: bank?.name || "",
       grainName: grain?.name || "",
       grainKg: grain ? grainKg : 0,
@@ -556,7 +593,7 @@ exports.updateCustomerDues = async (req, res) => {
 async function applySettleCustomerDues(scope, phone, body, createdBy) {
   const amount = Math.max(Number(body.amount) || 0, 0);
   const note = String(body.note || "").trim();
-  const paymentMethod = body.paymentMethod === "bank" ? "bank" : body.paymentMethod === "grain" ? "grain" : "cash";
+  const paymentMethod = ["bank", "grain", "labour", "munshi"].includes(body.paymentMethod) ? body.paymentMethod : "cash";
   const bankId = body.bankId ? String(body.bankId) : "";
   const grainId = body.grainId ? String(body.grainId) : "";
   const grainKg = Math.max(Number(body.grainKg) || 0, 0);
@@ -608,13 +645,46 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
     });
   }
 
-  // Total Recovery / Cash in Hand (Dashboard): a Cash-method "Pay Dues"
-  // is real cash landing at the till right now, same as a Cash-method
-  // order payment (orderController.js's own completeAndSettle branch) -
-  // recorded here so the Dashboard's Cash in Hand figure and today's
-  // Total Recovery both reflect it. Only when the money did NOT already
-  // go into a bank or grain stock above (those move their own balance
-  // instead, via recordCustomerBankMovement/recordCustomerGrainMovement).
+  // Labour/Munshi - a customer paying dues "via Labour"/"via Munshi" is
+  // still real cash landing at the till (so Cash in Hand still goes up
+  // below, same as plain Cash), but it's ALSO recorded as money collected
+  // through that labour/munshi khata specifically - see
+  // applyUpdateCustomerDues's own comment on why these two are additive
+  // tracking on top of cash rather than a replacement for it.
+  if (paymentMethod === "labour") {
+    await recordCustomerLabourMovement({
+      shopId: scope.shopId,
+      type: "due_recovery",
+      direction: "in",
+      amount,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+  if (paymentMethod === "munshi") {
+    await recordCustomerMunshiMovement({
+      shopId: scope.shopId,
+      type: "due_recovery",
+      direction: "in",
+      amount,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
+  // Total Recovery / Cash in Hand (Dashboard): a Cash/Labour/Munshi-method
+  // "Pay Dues" is real cash landing at the till right now, same as a
+  // Cash-method order payment (orderController.js's own completeAndSettle
+  // branch) - recorded here so the Dashboard's Cash in Hand figure and
+  // today's Total Recovery both reflect it. Only when the money did NOT
+  // already go into a bank or grain stock above (those move their own
+  // balance INSTEAD of Cash in Hand - Labour/Munshi move it ON TOP of Cash
+  // in Hand, see their own comment above, so cash still moves for them
+  // too).
   if (!bank && !grain) {
     await recordCashMovement({
       shopId: scope.shopId,
@@ -634,7 +704,7 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
     note,
     balanceAfter: previousDues,
     createdBy,
-    paymentMethod: bank ? "bank" : grain ? "grain" : "cash",
+    paymentMethod: bank ? "bank" : grain ? "grain" : paymentMethod === "labour" ? "labour" : paymentMethod === "munshi" ? "munshi" : "cash",
     bankName: bank?.name || "",
     grainName: grain?.name || "",
     grainKg: grain ? grainKg : 0,

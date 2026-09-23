@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, Expense, Grain, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, DuesPaymentOption, Expense, Grain, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LabourSummary, LedgerCustomer, LedgerTransactionsResponse, MunshiSummary, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -158,15 +158,15 @@ export async function updateCustomer(id: string, payload: Partial<Customer>) {
 // customer that credit - its balance goes down by the same amount (see
 // backend/controllers/customerController.js's updateCustomerDues). Omit or
 // leave undefined for a plain cash entry, unchanged from before.
-export async function updateCustomerDues(phone: string, previousDues: number, note?: string, bankPayment?: { bankId: string }, grainPayment?: { grainId: string; grainKg: number }) {
+export async function updateCustomerDues(phone: string, previousDues: number, note?: string, payment?: DuesPaymentOption) {
   try {
     const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, {
       previousDues,
       note,
-      paymentMethod: bankPayment?.bankId ? 'bank' : grainPayment?.grainId ? 'grain' : 'cash',
-      bankId: bankPayment?.bankId,
-      grainId: grainPayment?.grainId,
-      grainKg: grainPayment?.grainKg,
+      paymentMethod: payment?.method || 'cash',
+      bankId: payment?.bankId,
+      grainId: payment?.grainId,
+      grainKg: payment?.grainKg,
     });
     return normalizeCustomer(response.data as Customer & { _id?: string; updatedAt?: string });
   } catch (error) {
@@ -201,15 +201,15 @@ export async function deleteDuesHistoryEntry(phone: string, entry: { createdAt: 
 // shop's own banks it landed in - its balance goes up by whatever actually
 // got applied (see backend/controllers/customerController.js's
 // settleCustomerDues). Omit for a plain cash payment, unchanged from before.
-export async function settleCustomerDues(phone: string, amount: number, note?: string, bankPayment?: { bankId: string }, grainPayment?: { grainId: string; grainKg: number }) {
+export async function settleCustomerDues(phone: string, amount: number, note?: string, payment?: DuesPaymentOption) {
   try {
     const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, {
       amount,
       note,
-      paymentMethod: bankPayment?.bankId ? 'bank' : grainPayment?.grainId ? 'grain' : 'cash',
-      bankId: bankPayment?.bankId,
-      grainId: grainPayment?.grainId,
-      grainKg: grainPayment?.grainKg,
+      paymentMethod: payment?.method || 'cash',
+      bankId: payment?.bankId,
+      grainId: payment?.grainId,
+      grainKg: payment?.grainKg,
     });
     return response.data;
   } catch (error) {
@@ -290,6 +290,48 @@ export async function createGrain(name: string, openingKg: number, openingAmount
 export async function addGrainTransaction(grainId: string, type: 'deposit' | 'withdrawal', kg: number, amount: number, note?: string) {
   try {
     const response = await api.post<Grain>(`/grains/${grainId}/transactions`, { type, kg, amount, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Labour Khata / Munshi Khata (each shop's own single running in/out
+// ledger) --- Simpler than Bank/Grain above: there's only ever ONE Labour
+// account and ONE Munshi account per shop (see backend/models/
+// LabourAccount.js/MunshiAccount.js), so no id/name is ever needed - just
+// fetch the one summary and adjust it directly, same shape as
+// fetchCashSummary/adjustCash.
+export async function fetchLabourSummary() {
+  try {
+    const response = await api.get<LabourSummary>('/labour');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function adjustLabour(amount: number, direction: 'in' | 'out', note?: string) {
+  try {
+    const response = await api.post<LabourSummary>('/labour/adjust', { amount, direction, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function fetchMunshiSummary() {
+  try {
+    const response = await api.get<MunshiSummary>('/munshi');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function adjustMunshi(amount: number, direction: 'in' | 'out', note?: string) {
+  try {
+    const response = await api.post<MunshiSummary>('/munshi/adjust', { amount, direction, note });
     return response.data;
   } catch (error) {
     handleApiError(error);

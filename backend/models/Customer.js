@@ -22,7 +22,7 @@ const duesHistorySchema = new mongoose.Schema(
     // updateCustomerDues/settleCustomerDues) and bankName records which
     // one, purely for display here (DuesPage.tsx's History row) - the
     // Bank's own history is the source of truth for that side of it.
-    paymentMethod: { type: String, enum: ["cash", "bank", "grain"], default: "cash" },
+    paymentMethod: { type: String, enum: ["cash", "bank", "grain", "labour", "munshi"], default: "cash" },
     bankName: { type: String, default: "" },
     // Set only when paymentMethod is "grain" - which grain (e.g. "Rice")
     // and how many kg moved, purely for display here (DuesPage.tsx's

@@ -194,6 +194,10 @@ export interface DashboardSummary {
   // shop has added (Grain Stock page) - see
   // backend/controllers/reportController.js's getDashboardSummary.
   grainStockValue: number;
+  // Each shop's own single running Labour/Munshi khata balance - see
+  // backend/controllers/reportController.js's getDashboardSummary.
+  labourBalance: number;
+  munshiBalance: number;
   stockValue: number;
   vendorBalance: number;
   customerUdharTotal: number;
@@ -277,7 +281,7 @@ export interface DuesHistoryEntry {
   // one of the shop's own Bank accounts (see the Bank page) and bankName
   // says which one. Absent/undefined on older entries recorded before
   // this existed - treat as 'cash'.
-  paymentMethod?: 'cash' | 'bank' | 'grain';
+  paymentMethod?: 'cash' | 'bank' | 'grain' | 'labour' | 'munshi';
   bankName?: string;
   // Set only when paymentMethod is 'grain' - which grain and how many kg
   // moved, purely for display here (see backend/models/Customer.js's
@@ -285,6 +289,30 @@ export interface DuesHistoryEntry {
   grainName?: string;
   grainKg?: number;
 }
+
+// A "+ Add Dues"/"- Pay Dues" action can route through Cash (default),
+// the shop's own Bank, its own Grain Stock, or its single running
+// Labour/Munshi khata - see DuesPage.tsx's CustomerCard payment-method
+// picker and backend/controllers/customerController.js's
+// applyUpdateCustomerDues/applySettleCustomerDues. bankId/grainId+grainKg
+// only apply to their own method; Labour/Munshi need no extra id since
+// each shop only ever has ONE of each (unlike Bank/Grain, which can have
+// several named accounts).
+export type DuesPaymentMethod = 'cash' | 'bank' | 'grain' | 'labour' | 'munshi';
+export interface DuesPaymentOption {
+  method: DuesPaymentMethod;
+  bankId?: string;
+  grainId?: string;
+  grainKg?: number;
+}
+
+// Labour Khata / Munshi Khata - each shop's own single running "in/out"
+// ledger, same shape as Cash in Hand (CashSummary/CashTransaction above)
+// since they track money the exact same way, just kept separately for the
+// owner's own bookkeeping of what moved through each. See
+// backend/models/LabourAccount.js/MunshiAccount.js.
+export type LabourSummary = CashSummary;
+export type MunshiSummary = CashSummary;
 
 // One linked-purchase row on a Unified Khata contact's statement - the
 // purchase-side counterpart to LedgerOrder above. Deliberately a small

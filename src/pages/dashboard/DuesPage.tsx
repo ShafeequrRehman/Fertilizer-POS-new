@@ -15,7 +15,7 @@ import {
   fetchBanks,
   fetchGrains,
 } from '@/lib/pos-api';
-import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain } from '@/lib/pos-types';
+import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain, DuesPaymentOption } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
@@ -25,11 +25,6 @@ import OrderDetailModal from '@/components/OrderDetailModal';
 import PurchaseDetailModal from '@/components/PurchaseDetailModal';
 import DuesHistoryDetailModal from '@/components/DuesHistoryDetailModal';
 
-// A "+ Add Dues"/"- Pay Dues" action can route through the shop's own Bank
-// OR its own Grain Stock instead of plain Cash - exactly one of bankId or
-// (grainId + grainKg) is ever set, never both (see CustomerCard's own
-// Cash/Bank/Grain Stock picker below).
-type DuesPaymentOption = { bankId?: string; grainId?: string; grainKg?: number };
 
 // This page used to source its list from fetchAllCustomers(), which only
 // ever carries the OLD, manually-set lump-sum Customer.previousDues field -
@@ -217,25 +212,16 @@ export default function CustomerDuesPage() {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
     const nextPreviousDues = (customer.previousDues || 0) + amount;
-    const bankId = payment?.bankId;
-    const grainId = payment?.grainId;
-    const grainKg = payment?.grainKg || 0;
 
     try {
-      const updated = await updateCustomerDues(
-        phone,
-        nextPreviousDues,
-        note,
-        bankId ? { bankId } : undefined,
-        grainId ? { grainId, grainKg } : undefined,
-      );
+      const updated = await updateCustomerDues(phone, nextPreviousDues, note, payment);
       if (!updated) {
         toast.error('Could not update dues.');
         return false;
       }
       await loadCustomers();
-      if (bankId) await loadBanks();
-      if (grainId) await loadGrains();
+      if (payment?.bankId) await loadBanks();
+      if (payment?.grainId) await loadGrains();
       toast.success('Dues updated.');
       return true;
     } catch (error) {
@@ -247,10 +233,10 @@ export default function CustomerDuesPage() {
           const patched = await queueAddDueOffline(customer, {
             previousDues: nextPreviousDues,
             note,
-            paymentMethod: bankId ? 'bank' : grainId ? 'grain' : 'cash',
-            bankId,
-            grainId,
-            grainKg,
+            paymentMethod: payment?.method || 'cash',
+            bankId: payment?.bankId,
+            grainId: payment?.grainId,
+            grainKg: payment?.grainKg,
           });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success('Saved offline - will sync automatically once online.');
@@ -273,25 +259,16 @@ export default function CustomerDuesPage() {
   const handleSettlePayment = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
-    const bankId = payment?.bankId;
-    const grainId = payment?.grainId;
-    const grainKg = payment?.grainKg || 0;
 
     try {
-      const result = await settleCustomerDues(
-        phone,
-        amount,
-        note,
-        bankId ? { bankId } : undefined,
-        grainId ? { grainId, grainKg } : undefined,
-      );
+      const result = await settleCustomerDues(phone, amount, note, payment);
       if (!result) {
         toast.error('Could not record payment.');
         return false;
       }
       await loadCustomers();
-      if (bankId) await loadBanks();
-      if (grainId) await loadGrains();
+      if (payment?.bankId) await loadBanks();
+      if (payment?.grainId) await loadGrains();
       toast.success(`₨${result.appliedAmount} recorded.`);
       return true;
     } catch (error) {
@@ -301,10 +278,10 @@ export default function CustomerDuesPage() {
           const patched = await queueSettleDueOffline(customer, {
             amount,
             note,
-            paymentMethod: bankId ? 'bank' : grainId ? 'grain' : 'cash',
-            bankId,
-            grainId,
-            grainKg,
+            paymentMethod: payment?.method || 'cash',
+            bankId: payment?.bankId,
+            grainId: payment?.grainId,
+            grainKg: payment?.grainKg,
           });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success(`₨${amount} saved offline - will sync automatically once online.`);
@@ -594,13 +571,18 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   // means the customer's payment landed IN the picked bank/grain (its
   // balance goes up) - see
   // customerController.applyUpdateCustomerDues/applySettleCustomerDues.
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'grain'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'grain' | 'labour' | 'munshi'>('cash');
   const [bankId, setBankId] = useState<string>('');
   const [grainId, setGrainId] = useState<string>('');
   const [grainKg, setGrainKg] = useState<string>('');
   const grainKgValue = Number(grainKg) || 0;
-  const paymentOption: DuesPaymentOption | undefined =
-    paymentMethod === 'bank' ? { bankId } : paymentMethod === 'grain' ? { grainId, grainKg: grainKgValue } : undefined;
+  // Labour/Munshi need no extra id/picker - each shop only ever has ONE of
+  // each (a single running khata, not a list of named accounts like
+  // Bank/Grain Stock - see LabourPage.tsx/MunshiPage.tsx's own comment).
+  const paymentOption: DuesPaymentOption =
+    paymentMethod === 'bank' ? { method: 'bank', bankId }
+    : paymentMethod === 'grain' ? { method: 'grain', grainId, grainKg: grainKgValue }
+    : { method: paymentMethod };
   const paymentIncomplete =
     (paymentMethod === 'bank' && !bankId) || (paymentMethod === 'grain' && (!grainId || grainKgValue <= 0));
   // Dues Statement PDF (Download/Send): a full, printable record of
@@ -669,6 +651,10 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
         ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.bankName}`
         : entry.paymentMethod === 'grain' && entry.grainName
         ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.grainName} (${entry.grainKg || 0}kg)`
+        : entry.paymentMethod === 'labour'
+        ? `${entry.note ? `${entry.note} - ` : ''}via Labour`
+        : entry.paymentMethod === 'munshi'
+        ? `${entry.note ? `${entry.note} - ` : ''}via Munshi`
         : (entry.note || 'No note'),
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
@@ -1136,42 +1122,48 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             </p>
           ) : null}
         </div>
-        {totalDue > 0 && (
-          // Gated on totalDue (sales-side), not the new netBalance-based
-          // isPending below - handleSendReminder's message is hardcoded to
-          // "pending dues of totalDue", which would misleadingly read "₨0"
-          // for a contact whose only outstanding balance is purchase-side
-          // (the shop owes THEM, not the other way round). Reminding a
-          // supplier-side due is out of scope for this feature anyway - see
-          // this page's own comment on why Add/Pay Dues stay sales-only.
-          <div className="flex flex-col items-end gap-1.5">
+        <div className="flex flex-col items-end gap-1.5">
+          {totalDue > 0 && (
+            // Gated on totalDue (sales-side), not the new netBalance-based
+            // isPending below - handleSendReminder's message is hardcoded to
+            // "pending dues of totalDue", which would misleadingly read "₨0"
+            // for a contact whose only outstanding balance is purchase-side
+            // (the shop owes THEM, not the other way round). Reminding a
+            // supplier-side due is out of scope for this feature anyway -
+            // see this page's own comment on why Add/Pay Dues stay
+            // sales-only.
             <button
               onClick={onRemind}
               className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-xl font-bold text-xs transition-colors shadow-sm"
             >
               <MessageCircle size={14} /> Remind
             </button>
-            <div className="flex gap-1.5">
-              <button
-                type="button"
-                onClick={() => void handleDownloadDuesPdf()}
-                title="Download this customer's dues statement for the selected range as a PDF"
-                className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
-              >
-                <Download size={13} /> PDF
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleSendDuesPdf()}
-                disabled={isSendingPdf}
-                title="Send this customer's dues statement for the selected range as a PDF on WhatsApp"
-                className="flex items-center gap-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
-              >
-                <FileText size={13} /> {isSendingPdf ? 'Sending...' : 'Send PDF'}
-              </button>
-            </div>
+          )}
+          {/* PDF/Send PDF stay available regardless of whether this
+              contact currently owes the shop or is in credit (an
+              advance) - a shop owner still wants their full statement
+              either way, so these are never gated on totalDue > 0 the
+              way Remind above is. */}
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={() => void handleDownloadDuesPdf()}
+              title="Download this customer's dues statement for the selected range as a PDF"
+              className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
+            >
+              <Download size={13} /> PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSendDuesPdf()}
+              disabled={isSendingPdf}
+              title="Send this customer's dues statement for the selected range as a PDF on WhatsApp"
+              className="flex items-center gap-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-xl font-bold text-[11px] transition-colors shadow-sm"
+            >
+              <FileText size={13} /> {isSendingPdf ? 'Sending...' : 'Send PDF'}
+            </button>
           </div>
-        )}
+        </div>
       </div>
 
       <div className="space-y-2 pt-2">
@@ -1195,16 +1187,20 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
           className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none focus:border-indigo-500"
         />
 
-        {/* Cash vs Bank vs Grain Stock - only shows the relevant picker once
-            "Bank"/"Grain Stock" is chosen, and only if the shop has added
-            at least one bank/grain. Defaults back to Cash whenever none is
-            available, so this never blocks Add/Pay Dues for a shop that
-            hasn't set one up yet. */}
-        <div className="flex gap-2">
+        {/* Cash vs Bank vs Grain Stock vs Labour vs Munshi - only shows the
+            relevant picker once "Bank"/"Grain Stock" is chosen, and only if
+            the shop has added at least one bank/grain. Defaults back to
+            Cash whenever none is available, so this never blocks Add/Pay
+            Dues for a shop that hasn't set one up yet. Labour/Munshi need
+            no such picker - each shop only has ONE of each (see
+            LabourPage.tsx/MunshiPage.tsx) - and unlike Bank/Grain Stock,
+            picking them still moves Cash in Hand too (see
+            customerController.js's own comment on why).  */}
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
             onClick={() => { setPaymentMethod('cash'); setBankId(''); setGrainId(''); setGrainKg(''); }}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'cash' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+            className={`flex-1 min-w-[64px] py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'cash' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
           >
             Cash
           </button>
@@ -1213,7 +1209,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             onClick={() => { setPaymentMethod('bank'); setGrainId(''); setGrainKg(''); }}
             disabled={banks.length === 0}
             title={banks.length === 0 ? 'Add a bank on the Bank page first' : 'This payment goes through a bank'}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'bank' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+            className={`flex-1 min-w-[64px] py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'bank' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
           >
             Bank
           </button>
@@ -1222,9 +1218,25 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             onClick={() => { setPaymentMethod('grain'); setBankId(''); }}
             disabled={grains.length === 0}
             title={grains.length === 0 ? 'Add a grain on the Grain Stock page first' : 'This payment goes through grain stock (kg + amount)'}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'grain' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+            className={`flex-1 min-w-[64px] py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'grain' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
           >
             Grain Stock
+          </button>
+          <button
+            type="button"
+            onClick={() => { setPaymentMethod('labour'); setBankId(''); setGrainId(''); setGrainKg(''); }}
+            title="This payment also moves the Labour Khata, on top of Cash in Hand"
+            className={`flex-1 min-w-[64px] py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'labour' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+          >
+            Labour
+          </button>
+          <button
+            type="button"
+            onClick={() => { setPaymentMethod('munshi'); setBankId(''); setGrainId(''); setGrainKg(''); }}
+            title="This payment also moves the Munshi Khata, on top of Cash in Hand"
+            className={`flex-1 min-w-[64px] py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'munshi' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+          >
+            Munshi
           </button>
         </div>
         {paymentMethod === 'bank' ? (

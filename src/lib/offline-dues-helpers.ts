@@ -69,7 +69,7 @@ function applyPendingDuesAction(customer: LedgerCustomer, action: LocalCustomerA
     previousDues?: number;
     amount?: number;
     note?: string;
-    paymentMethod?: 'cash' | 'bank' | 'grain';
+    paymentMethod?: 'cash' | 'bank' | 'grain' | 'labour' | 'munshi';
     grainKg?: number;
   };
   const isAdd = action.kind === 'add_due';
@@ -86,7 +86,11 @@ function applyPendingDuesAction(customer: LedgerCustomer, action: LocalCustomerA
     balanceAfter: nextPreviousDues,
     createdBy: action.actor?.name || '',
     createdAt: action.queuedAt,
-    paymentMethod: payload.paymentMethod === 'bank' ? 'bank' : payload.paymentMethod === 'grain' ? 'grain' : 'cash',
+    paymentMethod: payload.paymentMethod === 'bank' ? 'bank'
+      : payload.paymentMethod === 'grain' ? 'grain'
+      : payload.paymentMethod === 'labour' ? 'labour'
+      : payload.paymentMethod === 'munshi' ? 'munshi'
+      : 'cash',
     grainKg: payload.paymentMethod === 'grain' ? payload.grainKg : undefined,
   };
 
@@ -151,7 +155,7 @@ export async function queueAddDueOffline(
   body: {
     previousDues: number;
     note?: string;
-    paymentMethod?: 'cash' | 'bank' | 'grain';
+    paymentMethod?: 'cash' | 'bank' | 'grain' | 'labour' | 'munshi';
     bankId?: string;
     grainId?: string;
     grainKg?: number;
@@ -170,7 +174,7 @@ export async function queueSettleDueOffline(
   body: {
     amount: number;
     note?: string;
-    paymentMethod?: 'cash' | 'bank' | 'grain';
+    paymentMethod?: 'cash' | 'bank' | 'grain' | 'labour' | 'munshi';
     bankId?: string;
     grainId?: string;
     grainKg?: number;

@@ -8,7 +8,7 @@ import {
 import {
   Target, Users, CheckCircle2, Clock,
   RotateCcw, XCircle, Wallet, Landmark, Package, Truck,
-  ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil, History as HistoryIcon, List, Wheat,
+  ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil, History as HistoryIcon, List, Wheat, HardHat, UserCog,
 } from 'lucide-react';
 import { adjustCash, adjustDashboardTile, fetchCashSummary, fetchDashboardAdjustmentHistory, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchRecoveryHistory, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
 import { CashTransaction, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, Product, RecoveryHistoryRow, SavedOrder, ShopSession } from '@/lib/pos-types';
@@ -658,6 +658,8 @@ function AccountingOverview({
         />
         <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label={`Balance on Bank (${balanceAsOfLabel})`} value={money(summary?.balanceOnBank)} />
         <OverviewTile icon={<Wheat size={18} />} color="bg-amber-50 text-amber-600" label="Grain Stock" value={money(summary?.grainStockValue)} />
+        <OverviewTile icon={<HardHat size={18} />} color="bg-orange-50 text-orange-600" label="Labour Khata" value={money(summary?.labourBalance)} />
+        <OverviewTile icon={<UserCog size={18} />} color="bg-cyan-50 text-cyan-600" label="Munshi Khata" value={money(summary?.munshiBalance)} />
         <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} actions={actionsFor('stockValue')} />
         <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" actions={actionsFor('vendorBalance')} />
         <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label={`Total Purchase (${periodLabel})`} value={money(summary?.totalPurchaseToday)} actions={actionsFor('totalPurchaseToday')} />

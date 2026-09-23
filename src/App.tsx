@@ -20,6 +20,8 @@ import DuesPage from '@/pages/dashboard/DuesPage';
 import LedgerPage from '@/pages/dashboard/LedgerPage';
 import BankPage from '@/pages/dashboard/BankPage';
 import GrainStockPage from '@/pages/dashboard/GrainStockPage';
+import LabourPage from '@/pages/dashboard/LabourPage';
+import MunshiPage from '@/pages/dashboard/MunshiPage';
 import RecordPage from '@/pages/dashboard/RecordPage';
 import ShiftsPage from '@/pages/dashboard/ShiftsPage';
 import PayrollPage from '@/pages/dashboard/PayrollPage';
@@ -120,6 +122,8 @@ export default function App() {
               <Route path="ledger" element={<LedgerPage />} />
               <Route path="bank" element={<BankPage />} />
               <Route path="grain-stock" element={<GrainStockPage />} />
+              <Route path="labour-khata" element={<LabourPage />} />
+              <Route path="munshi-khata" element={<MunshiPage />} />
             </Route>
             <Route element={<RequirePermission permission="orders.record.view" />}>
               <Route path="record" element={<RecordPage />} />
