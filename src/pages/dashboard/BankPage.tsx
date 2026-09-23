@@ -1,8 +1,24 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { fetchBanks, createBank, addBankTransaction } from '@/lib/pos-api';
 import { Bank } from '@/lib/pos-types';
 import { Landmark, Plus, RefreshCcw, Save, X, ArrowDownCircle, ArrowUpCircle, ChevronDown, ChevronUp, Download } from 'lucide-react';
 import { useToast } from '@/lib/toast';
+
+// Task 3's "bank ki bhi history ho ... date wise wala bhe option ho" - same
+// All/Today/This Month/Custom pattern already used for the Ingredient
+// Stock Ledger (IngredientStockSection.tsx) and Record page, just this
+// component's own local copy since those helpers aren't exported.
+type BankHistoryRangeMode = 'all' | 'today' | 'month' | 'custom';
+
+function isSameCalendarMonth(value: string, reference: Date) {
+  const d = new Date(value);
+  return d.getFullYear() === reference.getFullYear() && d.getMonth() === reference.getMonth();
+}
+
+function todayDateInputValue() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 // The shop's own bank ledger - same "khata" idea as Customer Dues
 // (DuesPage.tsx), just flipped: instead of a customer owing the shop, the
@@ -168,8 +184,44 @@ function BankCard({ bank, onChanged, confirm, toast }: {
   const [saving, setSaving] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [rangeMode, setRangeMode] = useState<BankHistoryRangeMode>('all');
+  const [customFrom, setCustomFrom] = useState(todayDateInputValue());
+  const [customTo, setCustomTo] = useState(todayDateInputValue());
 
   const amountValue = Number(amount) || 0;
+
+  // Date-filtered view of this bank's own history - used by both the
+  // on-screen History list and the downloaded PDF below. `bank.balance`/
+  // `bank.history[].balanceAfter` are always left untouched (true all-time
+  // running values) regardless of this filter, same rule the Ingredient
+  // Ledger's own range filter follows.
+  const filteredHistory = useMemo(() => {
+    if (rangeMode === 'all') return bank.history;
+    if (rangeMode === 'today') {
+      const todayStr = todayDateInputValue();
+      return bank.history.filter((e) => {
+        const d = new Date(e.createdAt);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr;
+      });
+    }
+    if (rangeMode === 'month') {
+      const now = new Date();
+      return bank.history.filter((e) => isSameCalendarMonth(e.createdAt, now));
+    }
+    if (!customFrom || !customTo) return bank.history;
+    const from = new Date(`${customFrom}T00:00:00`);
+    const to = new Date(`${customTo}T23:59:59.999`);
+    return bank.history.filter((e) => {
+      const d = new Date(e.createdAt);
+      return d >= from && d <= to;
+    });
+  }, [bank.history, rangeMode, customFrom, customTo]);
+
+  const rangeLabel =
+    rangeMode === 'today' ? 'Today'
+    : rangeMode === 'month' ? 'This Month'
+    : rangeMode === 'custom' ? `${customFrom} to ${customTo}`
+    : 'All Time';
 
   // Bank Statement PDF - same "title, stats, one table" ReportPdfDocument
   // building block DuesPage.tsx's own Dues Statement PDF uses (see
@@ -182,12 +234,12 @@ function BankCard({ bank, onChanged, confirm, toast }: {
     setIsDownloadingPdf(true);
     try {
       const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
-      const totalDeposits = bank.history.filter(e => e.type === 'deposit').reduce((sum, e) => sum + e.amount, 0);
-      const totalWithdrawals = bank.history.filter(e => e.type === 'withdrawal').reduce((sum, e) => sum + e.amount, 0);
+      const totalDeposits = filteredHistory.filter(e => e.type === 'deposit').reduce((sum, e) => sum + e.amount, 0);
+      const totalWithdrawals = filteredHistory.filter(e => e.type === 'withdrawal').reduce((sum, e) => sum + e.amount, 0);
       const doc = (
         <ReportPdfDocument
           title="Bank Statement"
-          subtitle={bank.name}
+          subtitle={`${bank.name} - ${rangeLabel}`}
           stats={[
             { label: 'Current Balance', value: `Rs ${bank.balance.toLocaleString()}` },
             { label: 'Total Payments Added', value: `Rs ${totalDeposits.toLocaleString()}` },
@@ -207,7 +259,7 @@ function BankCard({ bank, onChanged, confirm, toast }: {
               // Newest-first, same order the on-screen History list above
               // already shows (bank.history comes back sorted that way -
               // see bankController.js's serializeBank).
-              rows: bank.history.map((entry) => {
+              rows: filteredHistory.map((entry) => {
                 const isIn = entry.type === 'deposit';
                 const who = entry.relatedCustomerName
                   ? (isIn ? `Received from ${entry.relatedCustomerName}` : `Given to ${entry.relatedCustomerName}`)
@@ -321,8 +373,43 @@ function BankCard({ bank, onChanged, confirm, toast }: {
             {showHistory ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
           {showHistory ? (
-            <div className="mt-2 space-y-2 max-h-64 overflow-y-auto pr-1">
-              {bank.history.map((entry, index) => {
+            <div className="mt-2 space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {(['all', 'today', 'month', 'custom'] as BankHistoryRangeMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRangeMode(mode)}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-colors ${
+                      rangeMode === mode ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    }`}
+                  >
+                    {mode === 'all' ? 'All' : mode === 'today' ? 'Today' : mode === 'month' ? 'This Month' : 'Custom'}
+                  </button>
+                ))}
+              </div>
+              {rangeMode === 'custom' ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="date"
+                    value={customFrom}
+                    onChange={(e) => setCustomFrom(e.target.value)}
+                    className="flex-1 p-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-bold outline-none focus:border-indigo-500"
+                  />
+                  <span className="text-[10px] font-bold text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={customTo}
+                    onChange={(e) => setCustomTo(e.target.value)}
+                    className="flex-1 p-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-bold outline-none focus:border-indigo-500"
+                  />
+                </div>
+              ) : null}
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {filteredHistory.length === 0 ? (
+                <p className="text-[11px] font-bold text-slate-400 text-center py-3">No transactions in this range.</p>
+              ) : null}
+              {filteredHistory.map((entry, index) => {
                 const isIn = entry.type === 'deposit';
                 const who = entry.relatedCustomerName
                   ? (isIn ? `Received from ${entry.relatedCustomerName}` : `Given to ${entry.relatedCustomerName}`)
@@ -343,6 +430,7 @@ function BankCard({ bank, onChanged, confirm, toast }: {
                   </div>
                 );
               })}
+              </div>
             </div>
           ) : null}
         </div>

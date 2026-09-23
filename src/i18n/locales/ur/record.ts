@@ -26,6 +26,8 @@ export const record = {
     totalOrders: "کل آرڈرز",
     totalAmount: "کل رقم",
     paidAmount: "ادا شدہ رقم",
+    cashAmount: "کیش ان ہینڈ سیل",
+    bankAmount: "بینک سیل",
     remainingAmount: "بقایا رقم",
   },
   discount: {

@@ -475,7 +475,13 @@ export default function POSPage() {
   // total exactly like backend/controllers/orderController.js's
   // recalculateTotals does server-side.
   const effectiveDeliveryFee = orderFormData.orderType === 'Delivery' ? deliveryFee : 0;
-  const total = subtotal + tax + effectiveDeliveryFee;
+  // Sum of every cart line's own discount (see CartItem.discount's own
+  // comment) - subtracted from subtotal here exactly the way
+  // orderController.js's recalculateTotals subtracts a single order-level
+  // discount amount from subtotal, since that's exactly what this becomes
+  // once Save Order sends it as orderPayload.discount below.
+  const itemDiscountTotal = cart.reduce((sum, item) => sum + (item.discount || 0), 0);
+  const total = Math.max(subtotal - itemDiscountTotal, 0) + tax + effectiveDeliveryFee;
 
   // Electricity Bill / Cash special products (system-seeded into every
   // shop - see backend/controllers/superAdminController.js's createShop and
@@ -493,7 +499,7 @@ export default function POSPage() {
       const existingIndex = previousCart.findIndex((item) => item.id === product.id && item.variation === product.variation);
       if (existingIndex === -1) {
         setActiveCartItemIndex(previousCart.length);
-        return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image, specialType: product.specialType }];
+        return [...previousCart, { id: product.id, name: product.name, price: product.price, quantity: 1, variation: product.variation, image: product.image, specialType: product.specialType, discount: 0 }];
       }
       setActiveCartItemIndex(existingIndex);
       // Electricity Bill / Cash have no real "quantity" concept - each is
@@ -712,13 +718,29 @@ export default function POSPage() {
     setSelectedPaymentMethod('Cash');
   }
 
+  // Re-clamps a line's own discount to its new price*quantity whenever the
+  // quantity changes (handleIncreaseQty/handleDecreaseQty/
+  // handleQuantityInputChange below) - a discount typed against a bigger
+  // quantity would otherwise outlive a later decrease and push that line
+  // negative, same clamp handleItemDiscountChange itself already applies.
+  function clampDiscountToLine(item: CartItem, quantity: number): number {
+    if (!item.discount) return item.discount || 0;
+    return Math.min(item.discount, item.price * quantity);
+  }
+
   function handleIncreaseQty(index: number) {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: item.quantity + 1 } : item)));
     setActiveCartItemIndex(index);
   }
 
   function handleDecreaseQty(index: number) {
-    setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: Math.max(1, item.quantity - 1) } : item)));
+    setCart((previousCart) =>
+      previousCart.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const quantity = Math.max(1, item.quantity - 1);
+        return { ...item, quantity, discount: clampDiscountToLine(item, quantity) };
+      })
+    );
     setActiveCartItemIndex(index);
   }
 
@@ -732,6 +754,23 @@ export default function POSPage() {
     setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, price: nextPrice } : item)));
   }
 
+  // Per-line Discount (replaces the old direct price-edit for ordinary
+  // products - see CartItem.discount's own comment on why this is a
+  // separate field instead of overwriting price directly). Clamped to the
+  // line's own price*quantity so a discount can never flip a line negative
+  // - the same clamp-to-subtotal safety net orderController.js's
+  // computeDiscountAmount already applies at the order level.
+  function handleItemDiscountChange(index: number, value: string) {
+    setCart((previousCart) =>
+      previousCart.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const lineTotal = item.price * item.quantity;
+        const nextDiscount = Math.min(Math.max(0, Number(value) || 0), lineTotal);
+        return { ...item, discount: nextDiscount };
+      })
+    );
+  }
+
   // Lets a cashier click the quantity number itself and type an exact
   // amount (e.g. "34") instead of only tapping +/- one at a time. The
   // input below is deliberately uncontrolled (keyed on the committed
@@ -740,7 +779,9 @@ export default function POSPage() {
   // Enter, to commit whatever was typed back into the cart.
   function handleQuantityInputChange(index: number, value: string) {
     const parsedQuantity = Math.max(1, Math.floor(Number(value)) || 1);
-    setCart((previousCart) => previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: parsedQuantity } : item)));
+    setCart((previousCart) =>
+      previousCart.map((item, itemIndex) => (itemIndex === index ? { ...item, quantity: parsedQuantity, discount: clampDiscountToLine(item, parsedQuantity) } : item))
+    );
     setActiveCartItemIndex(index);
   }
 
@@ -1024,6 +1065,12 @@ export default function POSPage() {
         subtotal,
         tax: tax,
         deliveryFee: effectiveDeliveryFee,
+        // Every cart line's own Discount rolled into the one order-level
+        // Discount record - see CartItem.discount's own comment. `amount`
+        // here is purely informational (the backend always recomputes it
+        // itself from `value` + the items it trusts - see
+        // orderController.js's recalculateTotals/buildDiscountRecord).
+        discount: itemDiscountTotal > 0 ? { type: 'value', value: itemDiscountTotal, amount: itemDiscountTotal } : undefined,
         orderType: orderFormData.orderType,
         customer: { name: customerName, phone: customerPhone, address: orderFormData.address },
         address: orderFormData.address,
@@ -1757,27 +1804,32 @@ export default function POSPage() {
                       />
                     </div>
                   ) : (
-                    // Ordinary products: still start out at whatever
-                    // Manage Products has as the catalog price (see
-                    // addToCart - unchanged), but a cashier can override
-                    // it per cart line right here before Save, e.g. a
-                    // negotiated/discounted rate for this one sale. This
-                    // is deliberately the SAME handleItemPriceChange the
-                    // specialType input above already uses - it never
-                    // validated specialType itself, it just set
-                    // item.price - so no new handler was needed, only
-                    // widening which rows render the input. (Restored -
-                    // this had briefly regressed back to a plain,
-                    // non-editable price label in commit 1c84028.)
-                    <div className="mt-1 flex items-center gap-1">
-                      <span className="text-[10px] font-semibold text-gray-500">PKR</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={item.price}
-                        onChange={(event) => handleItemPriceChange(index, event.target.value)}
-                        className="w-20 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-[10px] font-semibold text-gray-500 shadow-none outline-none transition focus:border-white/60 focus:bg-white/70 focus:text-gray-900 focus:shadow-inner [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                      />
+                    // Ordinary products: the catalog price itself (see
+                    // addToCart) is shown but no longer directly editable -
+                    // a cashier instead types a flat Rs Discount for this
+                    // line right here before Save (see CartItem.discount's
+                    // own comment on why: it keeps `price` as the real
+                    // catalog price the receipt/reports need, while still
+                    // letting the line sell for less, e.g. a negotiated
+                    // rate for this one sale). Previously this was a
+                    // directly-editable price input (commit 9512243,
+                    // restored again in a later regression) - replaced
+                    // here with the Discount field per the owner's own
+                    // request, since a bare price edit left no record of
+                    // what was actually discounted.
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className="text-[10px] font-semibold text-gray-400">PKR {item.price}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] font-semibold text-rose-500">{t('pos.discountLabel')}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={item.discount || ''}
+                          onChange={(event) => handleItemDiscountChange(index, event.target.value)}
+                          placeholder="0"
+                          className="w-14 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-[10px] font-semibold text-rose-600 shadow-none outline-none transition focus:border-white/60 focus:bg-white/70 focus:shadow-inner [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        />
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1811,7 +1863,10 @@ export default function POSPage() {
                 </div>
                 ) : null}
                 <div className="min-w-[60px] text-right rtl:text-left">
-                  <p className="text-sm font-black text-gray-900">PKR {item.price * item.quantity}</p>
+                  {item.discount ? (
+                    <p className="text-[10px] font-semibold text-gray-400 line-through">PKR {item.price * item.quantity}</p>
+                  ) : null}
+                  <p className="text-sm font-black text-gray-900">PKR {item.price * item.quantity - (item.discount || 0)}</p>
                   <button type="button" onClick={() => handleRemoveItem(index)} className="mt-1 text-[10px] font-semibold text-rose-500 transition hover:text-rose-700">{t('pos.remove')}</button>
                 </div>
               </div>
@@ -1826,6 +1881,9 @@ export default function POSPage() {
             </div>
             <div className="space-y-1.5 rounded-[20px] bg-white/50 p-3 shadow-inner">
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.itemsTotal')}</span><span>PKR {subtotal}</span></div>
+              {itemDiscountTotal > 0 ? (
+                <div className="flex items-center justify-between text-[11px] font-semibold text-rose-500"><span>{t('pos.discountLabel')}</span><span>-PKR {itemDiscountTotal}</span></div>
+              ) : null}
               <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.taxLabel', { rate: taxRate })}</span><span>PKR {Math.round(tax)}</span></div>
               {orderFormData.orderType === 'Delivery' ? (
                 <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500"><span>{t('pos.deliveryFeeLabel')}</span><span>{effectiveDeliveryFee > 0 ? `PKR ${effectiveDeliveryFee}` : t('pos.free')}</span></div>

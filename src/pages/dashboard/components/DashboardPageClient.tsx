@@ -8,10 +8,10 @@ import {
 import {
   Target, Users, CheckCircle2, Clock,
   RotateCcw, XCircle, Wallet, Landmark, Package, Truck,
-  ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil,
+  ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil, History as HistoryIcon, List,
 } from 'lucide-react';
-import { adjustCash, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
-import { DashboardSummary, Product, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { adjustCash, adjustDashboardTile, fetchCashSummary, fetchDashboardAdjustmentHistory, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchRecoveryHistory, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
+import { CashTransaction, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, Product, RecoveryHistoryRow, SavedOrder, ShopSession } from '@/lib/pos-types';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
@@ -151,6 +151,18 @@ function DashboardPageClientInner() {
   // 45s cadence as orders/session above so it stays live through a shift.
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [showAdjustCash, setShowAdjustCash] = useState(false);
+  // Task 2: clicking the Cash in Hand tile opens its own history, same
+  // style as Bank's. Task 1: every OTHER tile gets its own manual
+  // correction (adjustTileKey) - see DashboardAdjustment.js. Task 3/1's
+  // "Details" button reuses the same history modal for those tiles too
+  // (historyTileKey; 'cash' is the one special case that hits /cash
+  // instead of /dashboard-adjustments/:key). Task 4's Customer Advance
+  // Details is its own simple list, not a khata-style history.
+  const [showCashHistory, setShowCashHistory] = useState(false);
+  const [adjustTileKey, setAdjustTileKey] = useState<DashboardAdjustmentKey | null>(null);
+  const [historyTileKey, setHistoryTileKey] = useState<DashboardAdjustmentKey | null>(null);
+  const [showCustomerAdvances, setShowCustomerAdvances] = useState(false);
+  const [showRecoveryHistory, setShowRecoveryHistory] = useState(false);
 
   async function loadSummary() {
     try {
@@ -328,6 +340,11 @@ function DashboardPageClientInner() {
         formatter={formatter}
         canAdjustCash={hasPermission('dues.manage')}
         onAdjustCash={() => setShowAdjustCash(true)}
+        onOpenCashHistory={() => setShowCashHistory(true)}
+        onAdjustTile={(key) => setAdjustTileKey(key)}
+        onOpenTileHistory={(key) => setHistoryTileKey(key)}
+        onOpenCustomerAdvances={() => setShowCustomerAdvances(true)}
+        onOpenRecoveryHistory={() => setShowRecoveryHistory(true)}
       />
 
       <div className="grid grid-cols-12 gap-6">
@@ -449,6 +466,35 @@ function DashboardPageClientInner() {
           }}
         />
       ) : null}
+
+      {showCashHistory ? <CashHistoryModal onClose={() => setShowCashHistory(false)} /> : null}
+
+      {adjustTileKey ? (
+        <TileAdjustModal
+          tileKey={adjustTileKey}
+          onClose={() => setAdjustTileKey(null)}
+          onSubmit={async (amount, direction, note) => {
+            try {
+              const result = await adjustDashboardTile(adjustTileKey, amount, direction, note);
+              if (result) {
+                setSummary((prev: DashboardSummary | null) => (prev ? { ...prev, [adjustTileKey]: result.total } : prev));
+                setAdjustTileKey(null);
+                popup({ tone: 'success', title: 'Updated', message: `New value: Rs ${result.total.toLocaleString()}` });
+              }
+            } catch (error) {
+              popup({ tone: 'error', title: "Couldn't save correction", message: error instanceof Error ? error.message : 'Failed to save.' });
+            }
+          }}
+        />
+      ) : null}
+
+      {historyTileKey ? <TileHistoryModal tileKey={historyTileKey} onClose={() => setHistoryTileKey(null)} /> : null}
+
+      {showCustomerAdvances ? (
+        <CustomerAdvancesModal advances={summary?.customerAdvances || []} onClose={() => setShowCustomerAdvances(false)} />
+      ) : null}
+
+      {showRecoveryHistory ? <RecoveryHistoryModal onClose={() => setShowRecoveryHistory(false)} /> : null}
     </div>
   );
 }
@@ -465,13 +511,34 @@ function AccountingOverview({
   formatter,
   canAdjustCash,
   onAdjustCash,
+  onOpenCashHistory,
+  onAdjustTile,
+  onOpenTileHistory,
+  onOpenCustomerAdvances,
+  onOpenRecoveryHistory,
 }: {
   summary: DashboardSummary | null;
   formatter: Intl.NumberFormat;
   canAdjustCash: boolean;
   onAdjustCash: () => void;
+  onOpenCashHistory: () => void;
+  onAdjustTile: (key: DashboardAdjustmentKey) => void;
+  onOpenTileHistory: (key: DashboardAdjustmentKey) => void;
+  onOpenCustomerAdvances: () => void;
+  onOpenRecoveryHistory: () => void;
 }) {
   const money = (value: number | undefined) => `Rs ${formatter.format(value ?? 0)}`;
+  // Task 1: every tile below (besides Cash in Hand, which owns its own
+  // Adjust+History pair, and Balance on Bank, which is corrected from the
+  // Bank page itself) gets the same Pencil (correct it) + History (see
+  // past corrections) actions, wired to one shared DashboardAdjustment key.
+  const actionsFor = (key: DashboardAdjustmentKey) =>
+    canAdjustCash
+      ? [
+          { icon: <Pencil size={12} />, onClick: () => onAdjustTile(key), label: 'Adjust' },
+          { icon: <HistoryIcon size={12} />, onClick: () => onOpenTileHistory(key), label: 'History' },
+        ]
+      : [{ icon: <HistoryIcon size={12} />, onClick: () => onOpenTileHistory(key), label: 'History' }];
   return (
     <div className="rounded-[32px] bg-white p-6 shadow-sm">
       <div className="mb-6 flex items-center justify-between">
@@ -479,25 +546,46 @@ function AccountingOverview({
         <span className="text-[10px] font-bold uppercase text-gray-400">{summary?.date || '...'}</span>
       </div>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-        <OverviewTile icon={<Target size={18} />} color="bg-orange-50 text-orange-500" label="Total Sale (Today)" value={money(summary?.totalSaleToday)} />
-        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Customer Udhar" value={money(summary?.customerUdharTotal)} valueColor="text-rose-600" />
-        <OverviewTile icon={<PiggyBank size={18} />} color="bg-emerald-50 text-emerald-500" label="Customer Advance" value={money(summary?.customerAdvanceTotal)} valueColor="text-emerald-600" />
+        <OverviewTile icon={<Target size={18} />} color="bg-orange-50 text-orange-500" label="Total Sale (Today)" value={money(summary?.totalSaleToday)} actions={actionsFor('totalSaleToday')} />
+        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Customer Udhar" value={money(summary?.customerUdharTotal)} valueColor="text-rose-600" actions={actionsFor('customerUdharTotal')} />
+        <OverviewTile
+          icon={<PiggyBank size={18} />}
+          color="bg-emerald-50 text-emerald-500"
+          label="Customer Advance"
+          value={money(summary?.customerAdvanceTotal)}
+          valueColor="text-emerald-600"
+          actions={[
+            { icon: <List size={12} />, onClick: onOpenCustomerAdvances, label: 'Details' },
+            ...actionsFor('customerAdvanceTotal'),
+          ]}
+        />
         <OverviewTile
           icon={<Wallet size={18} />}
           color="bg-blue-50 text-blue-500"
           label="Cash in Hand"
           value={money(summary?.cashInHand)}
-          action={canAdjustCash ? { icon: <Pencil size={12} />, onClick: onAdjustCash, label: 'Adjust' } : undefined}
+          onTileClick={onOpenCashHistory}
+          actions={[
+            { icon: <HistoryIcon size={12} />, onClick: onOpenCashHistory, label: 'History' },
+            ...(canAdjustCash ? [{ icon: <Pencil size={12} />, onClick: onAdjustCash, label: 'Adjust' }] : []),
+          ]}
         />
         <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Balance on Bank" value={money(summary?.balanceOnBank)} />
-        <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} />
-        <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" />
-        <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label="Total Purchase (Today)" value={money(summary?.totalPurchaseToday)} />
-        <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label="Total Expenses (Today)" value={money(summary?.totalExpensesToday)} />
-        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label="Sale on Cash" value={money(summary?.saleOnCash)} />
-        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Sale on Bank" value={money(summary?.saleOnBank)} />
-        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Sale on Udhar (Credit)" value={money(summary?.saleOnCredit)} valueColor="text-rose-600" />
-        <OverviewTile icon={<CheckCircle2 size={18} />} color="bg-emerald-50 text-emerald-500" label="Total Recovery (Today)" value={money(summary?.totalRecoveryToday)} valueColor="text-emerald-600" />
+        <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} actions={actionsFor('stockValue')} />
+        <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" actions={actionsFor('vendorBalance')} />
+        <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label="Total Purchase (Today)" value={money(summary?.totalPurchaseToday)} actions={actionsFor('totalPurchaseToday')} />
+        <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label="Total Expenses (Today)" value={money(summary?.totalExpensesToday)} actions={actionsFor('totalExpensesToday')} />
+        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label="Sale on Cash" value={money(summary?.saleOnCash)} actions={actionsFor('saleOnCash')} />
+        <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label="Sale on Bank" value={money(summary?.saleOnBank)} actions={actionsFor('saleOnBank')} />
+        <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label="Sale on Udhar (Credit)" value={money(summary?.saleOnCredit)} valueColor="text-rose-600" actions={actionsFor('saleOnCredit')} />
+        <OverviewTile
+          icon={<CheckCircle2 size={18} />}
+          color="bg-emerald-50 text-emerald-500"
+          label="Total Recovery (Today)"
+          value={money(summary?.totalRecoveryToday)}
+          valueColor="text-emerald-600"
+          actions={[{ icon: <List size={12} />, onClick: onOpenRecoveryHistory, label: 'Details' }, ...actionsFor('totalRecoveryToday')]}
+        />
       </div>
     </div>
   );
@@ -509,28 +597,42 @@ function OverviewTile({
   label,
   value,
   valueColor = 'text-gray-900',
-  action,
+  actions,
+  onTileClick,
 }: {
   icon: React.ReactNode;
   color: string;
   label: string;
   value: string;
   valueColor?: string;
-  action?: { icon: React.ReactNode; onClick: () => void; label: string };
+  actions?: { icon: React.ReactNode; onClick: () => void; label: string }[];
+  onTileClick?: () => void;
 }) {
   return (
-    <div className="relative rounded-2xl border border-gray-50 bg-[#F8F9FB] p-4">
+    <div
+      className={`relative rounded-2xl border border-gray-50 bg-[#F8F9FB] p-4 ${onTileClick ? 'cursor-pointer transition hover:border-gray-200' : ''}`}
+      onClick={onTileClick}
+      role={onTileClick ? 'button' : undefined}
+    >
       <div className="flex items-center justify-between">
         <div className={`rounded-full p-2 ${color}`}>{icon}</div>
-        {action ? (
-          <button
-            type="button"
-            onClick={action.onClick}
-            title={action.label}
-            className="rounded-full bg-white p-1.5 text-gray-400 shadow-sm transition hover:bg-gray-100 hover:text-gray-700"
-          >
-            {action.icon}
-          </button>
+        {actions && actions.length > 0 ? (
+          <div className="flex gap-1">
+            {actions.map((action) => (
+              <button
+                key={action.label}
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  action.onClick();
+                }}
+                title={action.label}
+                className="rounded-full bg-white p-1.5 text-gray-400 shadow-sm transition hover:bg-gray-100 hover:text-gray-700"
+              >
+                {action.icon}
+              </button>
+            ))}
+          </div>
         ) : null}
       </div>
       <h4 className={`mt-3 truncate text-lg font-black xl:text-xl ${valueColor}`}>{value}</h4>
@@ -625,6 +727,539 @@ function AdjustCashModal({
         >
           {saving ? 'Saving...' : 'Save Correction'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+type HistoryRangeMode = 'all' | 'today' | 'month' | 'custom';
+
+// Shared shell for the history-style modals below (Cash in Hand / a
+// generic tile's corrections) - same in/out, dated, with-note list look as
+// BankPage.tsx's own transaction history, just fed from whichever endpoint
+// the caller already fetched. `pdfTitle`/`pdfFilename` turn on the same
+// All/Today/This Month/Custom date-range pills BankPage.tsx's own history
+// uses, plus a PDF download of whatever range is currently picked - the
+// owner's own ask ("download pdf ho today month aur date custom vise").
+// Purely a client-side filter/render concern - the real rows and their
+// balanceAfter/totalAfter are never touched, same rule every other range
+// filter in this app already follows.
+function HistoryModalShell({
+  title,
+  subtitle,
+  onClose,
+  loading,
+  rows,
+  pdfTitle,
+  pdfFilename,
+}: {
+  title: string;
+  subtitle: string;
+  onClose: () => void;
+  loading: boolean;
+  rows: { direction: 'in' | 'out'; amount: number; note: string; createdBy: string; createdAt: string }[];
+  pdfTitle?: string;
+  pdfFilename?: string;
+}) {
+  useBackspaceToClose(onClose);
+  const enableFilterAndPdf = Boolean(pdfTitle);
+  const [rangeMode, setRangeMode] = useState<HistoryRangeMode>('all');
+  const [customFrom, setCustomFrom] = useState(todayDateInputValue());
+  const [customTo, setCustomTo] = useState(todayDateInputValue());
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+
+  const filteredRows = useMemo(() => {
+    if (!enableFilterAndPdf || rangeMode === 'all') return rows;
+    if (rangeMode === 'today') {
+      const todayStr = todayDateInputValue();
+      return rows.filter((row) => {
+        const d = new Date(row.createdAt);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr;
+      });
+    }
+    if (rangeMode === 'month') {
+      const now = new Date();
+      return rows.filter((row) => {
+        const d = new Date(row.createdAt);
+        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+      });
+    }
+    if (!customFrom || !customTo) return rows;
+    const from = new Date(`${customFrom}T00:00:00`);
+    const to = new Date(`${customTo}T23:59:59.999`);
+    return rows.filter((row) => {
+      const d = new Date(row.createdAt);
+      return d >= from && d <= to;
+    });
+  }, [rows, enableFilterAndPdf, rangeMode, customFrom, customTo]);
+
+  const rangeLabel =
+    rangeMode === 'today' ? 'Today'
+    : rangeMode === 'month' ? 'This Month'
+    : rangeMode === 'custom' ? `${customFrom} to ${customTo}`
+    : 'All Time';
+
+  async function handleDownloadPdf() {
+    setIsDownloadingPdf(true);
+    try {
+      const { ReportPdfDocument, downloadPdfDocument } = await import('@/lib/pdf-export');
+      const totalIn = filteredRows.filter((r) => r.direction === 'in').reduce((sum, r) => sum + r.amount, 0);
+      const totalOut = filteredRows.filter((r) => r.direction === 'out').reduce((sum, r) => sum + r.amount, 0);
+      const doc = (
+        <ReportPdfDocument
+          title={pdfTitle || title}
+          subtitle={rangeLabel}
+          stats={[
+            { label: 'Total In', value: `Rs ${totalIn.toLocaleString()}` },
+            { label: 'Total Out', value: `Rs ${totalOut.toLocaleString()}` },
+            { label: 'Net', value: `Rs ${(totalIn - totalOut).toLocaleString()}` },
+          ]}
+          tables={[
+            {
+              title: 'History',
+              columns: [
+                { label: 'Date', width: 1.4 },
+                { label: 'Type', width: 1 },
+                { label: 'Note', width: 2 },
+                { label: 'By', width: 1 },
+                { label: 'In', width: 1, align: 'right' },
+                { label: 'Out', width: 1, align: 'right' },
+              ],
+              rows: filteredRows.map((row) => [
+                new Date(row.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+                row.direction === 'in' ? 'In' : 'Out',
+                row.note || '—',
+                row.createdBy || '—',
+                row.direction === 'in' ? `Rs ${row.amount.toLocaleString()}` : '—',
+                row.direction === 'out' ? `Rs ${row.amount.toLocaleString()}` : '—',
+              ]),
+              footer: ['', '', '', 'Total', `Rs ${totalIn.toLocaleString()}`, `Rs ${totalOut.toLocaleString()}`],
+              emptyMessage: 'No transactions in this range.',
+            },
+          ]}
+        />
+      );
+      await downloadPdfDocument(doc, `${(pdfFilename || title).replace(/\s+/g, '_')}.pdf`);
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-md flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-black text-gray-900">{title}</h2>
+            <p className="mt-1 text-xs text-gray-400">{subtitle}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+
+        {enableFilterAndPdf ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {(['all', 'today', 'month', 'custom'] as HistoryRangeMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setRangeMode(mode)}
+                className={`rounded-full px-3 py-1.5 text-[11px] font-black uppercase tracking-wide transition ${rangeMode === mode ? 'bg-black text-white' : 'bg-gray-100 text-gray-500'}`}
+              >
+                {mode === 'all' ? 'All' : mode === 'today' ? 'Today' : mode === 'month' ? 'This Month' : 'Custom'}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => void handleDownloadPdf()}
+              disabled={isDownloadingPdf || filteredRows.length === 0}
+              className="ml-auto flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-600 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isDownloadingPdf ? 'Preparing...' : 'PDF'}
+            </button>
+          </div>
+        ) : null}
+
+        {enableFilterAndPdf && rangeMode === 'custom' ? (
+          <div className="mt-2 flex items-center gap-2">
+            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-bold" />
+            <span className="text-xs text-gray-400">to</span>
+            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-bold" />
+          </div>
+        ) : null}
+
+        <div className="mt-4 flex-1 space-y-2 overflow-y-auto pr-1">
+          {loading ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">Loading...</p>
+          ) : filteredRows.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No history yet.</p>
+          ) : (
+            filteredRows.map((row, index) => (
+              <div key={index} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <div className="min-w-0">
+                  <p className={`text-sm font-black ${row.direction === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {row.direction === 'in' ? '+' : '-'}Rs {row.amount.toLocaleString()}
+                  </p>
+                  {row.note ? <p className="truncate text-[11px] text-gray-500">{row.note}</p> : null}
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">
+                    {new Date(row.createdAt).toLocaleString()}
+                    {row.createdBy ? ` · ${row.createdBy}` : ''}
+                  </p>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Task 2: clicking the Cash in Hand tile - GET /api/cash's own history[],
+// same data the "Adjust" pencil's balance already comes from.
+function CashHistoryModal({ onClose }: { onClose: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState<CashTransaction[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const data = await fetchCashSummary();
+      if (!cancelled && data) setHistory(data.history || []);
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <HistoryModalShell
+      title="Cash in Hand History"
+      subtitle="Every sale, due recovery, purchase, advance and refund that moved the till."
+      onClose={onClose}
+      loading={loading}
+      pdfTitle="Cash in Hand History"
+      pdfFilename="cash_in_hand_history"
+      rows={history.map((entry) => ({
+        direction: entry.direction,
+        amount: entry.amount,
+        note: entry.note || entry.type,
+        createdBy: entry.createdBy || '',
+        createdAt: entry.createdAt,
+      }))}
+    />
+  );
+}
+
+// Task 1/3: history of manual corrections made to any other Accounting
+// Overview tile - GET /api/dashboard-adjustments/:key/history.
+function TileHistoryModal({ tileKey, onClose }: { tileKey: DashboardAdjustmentKey; onClose: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState<DashboardAdjustmentHistoryEntry[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const data = await fetchDashboardAdjustmentHistory(tileKey);
+      if (!cancelled && data) setHistory(data.history || []);
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tileKey]);
+
+  return (
+    <HistoryModalShell
+      title="Correction History"
+      subtitle="Manual corrections made to this figure - the real transactions behind it are never changed."
+      onClose={onClose}
+      loading={loading}
+      pdfTitle="Correction History"
+      pdfFilename={`${tileKey}_correction_history`}
+      rows={history}
+    />
+  );
+}
+
+// Task 1: the same manual +/- correction AdjustCashModal already does for
+// Cash in Hand, generalized to any other tile via one shared endpoint.
+function TileAdjustModal({
+  tileKey,
+  onClose,
+  onSubmit,
+}: {
+  tileKey: DashboardAdjustmentKey;
+  onClose: () => void;
+  onSubmit: (amount: number, direction: 'in' | 'out', note: string) => void;
+}) {
+  useBackspaceToClose(onClose);
+  const [amount, setAmount] = useState('');
+  const [direction, setDirection] = useState<'in' | 'out'>('in');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    const value = Number(amount);
+    if (!value || value <= 0) return;
+    setSaving(true);
+    try {
+      await onSubmit(value, direction, note.trim());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <h2 className="text-lg font-black text-gray-900">Correct This Figure</h2>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-gray-400">This only adjusts the number shown on the Dashboard - it never touches the real orders/purchases/ledger behind it.</p>
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setDirection('in')}
+            className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${direction === 'in' ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-500'}`}
+          >
+            Add (+)
+          </button>
+          <button
+            type="button"
+            onClick={() => setDirection('out')}
+            className={`rounded-[14px] py-2.5 text-xs font-black uppercase tracking-wide transition ${direction === 'out' ? 'bg-rose-500 text-white' : 'bg-gray-100 text-gray-500'}`}
+          >
+            Remove (-)
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Amount</label>
+          <input
+            value={amount}
+            onChange={(event) => {
+              if (!/^\d*$/.test(event.target.value)) return;
+              setAmount(event.target.value);
+            }}
+            placeholder="0"
+            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
+          />
+        </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-gray-400">Note (optional)</label>
+          <input
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why is this being corrected?"
+            className="mt-1 w-full rounded-[16px] border border-gray-200 px-4 py-3 text-sm font-bold outline-none focus:border-gray-400"
+          />
+        </div>
+
+        <button
+          type="button"
+          disabled={saving || !amount}
+          onClick={() => void submit()}
+          className="mt-5 w-full rounded-[20px] bg-black py-3.5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save Correction'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Task 4: "just the customer name + their advance amount, nothing else".
+function CustomerAdvancesModal({
+  advances,
+  onClose,
+}: {
+  advances: { name: string; phone: string; amount: number }[];
+  onClose: () => void;
+}) {
+  useBackspaceToClose(onClose);
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-sm flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <h2 className="text-lg font-black text-gray-900">Customer Advances</h2>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+        <div className="mt-4 flex-1 space-y-2 overflow-y-auto pr-1">
+          {advances.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No customer currently has an advance.</p>
+          ) : (
+            advances.map((customer) => (
+              <div key={customer.phone || customer.name} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <p className="truncate text-sm font-bold text-gray-800">{customer.name}</p>
+                <p className="text-sm font-black text-emerald-600">Rs {customer.amount.toLocaleString()}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function todayDateInputValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+function firstOfMonthDateInputValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+// Downloads a CSV Blob client-side - no PDF library dependency needed, and
+// it opens straight into Excel/Sheets the same way the other exports on
+// Record/Ledger pages already do.
+function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const escape = (value: string | number) => {
+    const str = String(value);
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+  const csv = [headers, ...rows].map((row) => row.map(escape).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// Task 3: Recovery "Details" - every real due-payment (Cash or Bank) any
+// customer has made, with a Today/This Month/Custom/All date filter (same
+// idea as IngredientStockSection.tsx's own Ledger range pills) and a CSV
+// download. Recovery already flows automatically into Cash in Hand (a
+// Cash-method payment) or that Bank's own balance (a Bank-method payment) -
+// see customerController.settleCustomerDues - this modal is purely a read
+// view of what already happened, nothing here changes any total.
+type RecoveryRangeMode = 'all' | 'today' | 'month' | 'custom';
+
+function RecoveryHistoryModal({ onClose }: { onClose: () => void }) {
+  useBackspaceToClose(onClose);
+  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState<RecoveryHistoryRow[]>([]);
+  const [rangeMode, setRangeMode] = useState<RecoveryRangeMode>('all');
+  const [customFrom, setCustomFrom] = useState(todayDateInputValue());
+  const [customTo, setCustomTo] = useState(todayDateInputValue());
+
+  const { startDate, endDate } = useMemo(() => {
+    if (rangeMode === 'today') return { startDate: todayDateInputValue(), endDate: todayDateInputValue() };
+    if (rangeMode === 'month') return { startDate: firstOfMonthDateInputValue(), endDate: todayDateInputValue() };
+    if (rangeMode === 'custom') return { startDate: customFrom, endDate: customTo };
+    return { startDate: undefined, endDate: undefined };
+  }, [rangeMode, customFrom, customTo]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      const data = await fetchRecoveryHistory(startDate, endDate);
+      if (!cancelled && data) setRows(data.rows || []);
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [startDate, endDate]);
+
+  const total = rows.reduce((sum, row) => sum + row.amount, 0);
+
+  function download() {
+    downloadCsv(
+      `recovery-history-${startDate || 'all'}-to-${endDate || 'all'}.csv`,
+      ['Date', 'Customer', 'Phone', 'Amount', 'Method', 'Bank', 'Note', 'Recorded By'],
+      rows.map((row) => [
+        new Date(row.createdAt).toLocaleString(),
+        row.customerName,
+        row.customerPhone,
+        row.amount,
+        row.paymentMethod,
+        row.bankName,
+        row.note,
+        row.createdBy,
+      ])
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-black text-gray-900">Recovery History</h2>
+            <p className="mt-1 text-xs text-gray-400">Every due payment collected from a customer, Cash or Bank.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {(['all', 'today', 'month', 'custom'] as RecoveryRangeMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setRangeMode(mode)}
+              className={`rounded-full px-3 py-1.5 text-[11px] font-black uppercase tracking-wide transition ${rangeMode === mode ? 'bg-black text-white' : 'bg-gray-100 text-gray-500'}`}
+            >
+              {mode === 'all' ? 'All' : mode === 'today' ? 'Today' : mode === 'month' ? 'This Month' : 'Custom'}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={download}
+            disabled={rows.length === 0}
+            className="ml-auto rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-600 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Download CSV
+          </button>
+        </div>
+
+        {rangeMode === 'custom' ? (
+          <div className="mt-2 flex items-center gap-2">
+            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-bold" />
+            <span className="text-xs text-gray-400">to</span>
+            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-bold" />
+          </div>
+        ) : null}
+
+        <p className="mt-3 text-sm font-black text-emerald-600">Total: Rs {total.toLocaleString()}</p>
+
+        <div className="mt-2 flex-1 space-y-2 overflow-y-auto pr-1">
+          {loading ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">Loading...</p>
+          ) : rows.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No recovery in this range.</p>
+          ) : (
+            rows.map((row, index) => (
+              <div key={index} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-gray-800">{row.customerName}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">
+                    {new Date(row.createdAt).toLocaleString()} · {row.paymentMethod === 'bank' ? row.bankName || 'Bank' : 'Cash'}
+                  </p>
+                </div>
+                <p className="text-sm font-black text-emerald-600">Rs {row.amount.toLocaleString()}</p>
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

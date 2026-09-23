@@ -66,6 +66,7 @@ export const pos = {
   paymentCard: "کارڈ",
   paymentEWallet: "ای-والیٹ",
   itemsTotal: "آئٹمز کا کل",
+  discountLabel: "رعایت",
   taxLabel: "ٹیکس ({{rate}}%)",
   totalPayable: "قابلِ ادائیگی کل رقم",
   savingOrder: "آرڈر محفوظ ہو رہا ہے...",

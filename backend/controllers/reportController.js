@@ -8,6 +8,7 @@ const Product = require("../models/Product");
 const Ingredient = require("../models/Ingredient");
 const Bank = require("../models/Bank");
 const CashRegister = require("../models/CashRegister");
+const DashboardAdjustment = require("../models/DashboardAdjustment");
 const { shopScope } = require("../middleware/attachShopScope");
 
 // The fixed category heading every ingredient-purchase batch is grouped
@@ -456,6 +457,7 @@ exports.getDashboardSummary = async (req, res) => {
       todaysExpenseAgg,
       customers,
       customerOrderDueAgg,
+      dashboardAdjustmentDocs,
     ] = await Promise.all([
       // Today's Sale / Sale on Cash / Sale on Bank / Sale on Credit - one
       // pass over today's non-cancelled orders, split by paymentMethod the
@@ -503,12 +505,20 @@ exports.getDashboardSummary = async (req, res) => {
       // customerController.getCustomerLedger uses for one customer's own
       // totalDue, just aggregated across every customer here. duesHistory
       // also gives Total Recovery (today) below, off the very same read.
-      Customer.find({ shopId: shopObjectId }).select("previousDues duesHistory").lean(),
+      Customer.find({ shopId: shopObjectId }).select("name phone previousDues duesHistory").lean(),
       Order.aggregate([
         { $match: { shopId: shopObjectId, status: { $ne: "cancelled" }, "customer.phone": { $exists: true, $ne: "" } } },
         { $group: { _id: "$customer.phone", due: { $sum: "$remainingAmount" } } },
       ]),
+      // Manual per-tile corrections (Task 1's "every box editable" ask) -
+      // see DashboardAdjustment.js's own comment on why cashInHand/
+      // balanceOnBank are excluded (they already own a real edit home).
+      DashboardAdjustment.find({ shopId: shopObjectId }).select("key total").lean(),
     ]);
+    const adjustmentByKey = {};
+    dashboardAdjustmentDocs.forEach((doc) => {
+      adjustmentByKey[doc.key] = Number(doc.total || 0);
+    });
 
     let saleOnCash = 0;
     let saleOnBank = 0;
@@ -548,10 +558,19 @@ exports.getDashboardSummary = async (req, res) => {
     let customerUdharTotal = 0;
     let customerAdvanceTotal = 0;
     let totalRecoveryToday = 0;
+    // Task 4: the Dashboard's Customer Advance "Details" button just wants
+    // a plain name + amount list, nothing else - one row per customer who
+    // is currently in credit (totalDue < 0, i.e. they've paid the shop more
+    // than they currently owe it).
+    const customerAdvances = [];
     for (const customer of customers) {
       const totalDue = (orderDueByPhone.get(customer.phone) || 0) + Number(customer.previousDues || 0);
-      if (totalDue > 0) customerUdharTotal += totalDue;
-      else if (totalDue < 0) customerAdvanceTotal += Math.abs(totalDue);
+      if (totalDue > 0) {
+        customerUdharTotal += totalDue;
+      } else if (totalDue < 0) {
+        customerAdvanceTotal += Math.abs(totalDue);
+        customerAdvances.push({ name: customer.name || customer.phone, phone: customer.phone, amount: Math.abs(totalDue) });
+      }
 
       for (const entry of customer.duesHistory || []) {
         if (entry.type !== "settle") continue;
@@ -561,22 +580,80 @@ exports.getDashboardSummary = async (req, res) => {
         }
       }
     }
+    customerAdvances.sort((a, b) => b.amount - a.amount);
+
+    // Task 1: fold each tile's manual correction on top of its own real
+    // computed figure - see DashboardAdjustment.js's own comment. cashInHand
+    // and balanceOnBank are deliberately never touched here; they already
+    // have their own real editable home (CashRegister/Bank).
+    const adjusted = (key, value) => value + (adjustmentByKey[key] || 0);
 
     res.json({
       date: start.toISOString().slice(0, 10),
-      totalSaleToday,
-      saleOnCash,
-      saleOnBank,
-      saleOnCredit,
-      totalPurchaseToday,
-      totalExpensesToday,
-      totalRecoveryToday,
+      totalSaleToday: adjusted("totalSaleToday", totalSaleToday),
+      saleOnCash: adjusted("saleOnCash", saleOnCash),
+      saleOnBank: adjusted("saleOnBank", saleOnBank),
+      saleOnCredit: adjusted("saleOnCredit", saleOnCredit),
+      totalPurchaseToday: adjusted("totalPurchaseToday", totalPurchaseToday),
+      totalExpensesToday: adjusted("totalExpensesToday", totalExpensesToday),
+      totalRecoveryToday: adjusted("totalRecoveryToday", totalRecoveryToday),
       cashInHand,
       balanceOnBank,
-      stockValue,
-      vendorBalance,
-      customerUdharTotal,
-      customerAdvanceTotal,
+      stockValue: adjusted("stockValue", stockValue),
+      vendorBalance: adjusted("vendorBalance", vendorBalance),
+      customerUdharTotal: adjusted("customerUdharTotal", customerUdharTotal),
+      customerAdvanceTotal: adjusted("customerAdvanceTotal", customerAdvanceTotal),
+      customerAdvances,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/reports/recovery-history?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+//
+// Task 3's "Recovery" Details button: a flat, date-filterable, newest-first
+// list of every real due-payment ("- Pay Dues"/"Clear" on Customer Dues) any
+// customer has ever made, whichever method it came in on - same duesHistory
+// type:"settle" rows the Dashboard's own totalRecoveryToday already sums,
+// just returned as a full list instead of one number, with a chosen range
+// instead of always "today". No date params = every recovery ever recorded
+// (the modal's own "All" pill on the frontend).
+exports.getRecoveryHistory = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+    const { startDate, endDate } = req.query;
+    const rangeStart = startDate ? new Date(`${startDate}T00:00:00.000Z`) : null;
+    const rangeEnd = endDate ? new Date(`${endDate}T23:59:59.999Z`) : null;
+
+    const customers = await Customer.find({ shopId: shopObjectId }).select("name phone duesHistory").lean();
+
+    const rows = [];
+    for (const customer of customers) {
+      for (const entry of customer.duesHistory || []) {
+        if (entry.type !== "settle") continue;
+        const entryDate = entry.createdAt ? new Date(entry.createdAt) : null;
+        if (!entryDate) continue;
+        if (rangeStart && entryDate < rangeStart) continue;
+        if (rangeEnd && entryDate > rangeEnd) continue;
+        rows.push({
+          customerName: customer.name || customer.phone,
+          customerPhone: customer.phone,
+          amount: Number(entry.amount || 0),
+          paymentMethod: entry.paymentMethod || "cash",
+          bankName: entry.bankName || "",
+          note: entry.note || "",
+          createdBy: entry.createdBy || "",
+          createdAt: entry.createdAt,
+        });
+      }
+    }
+    rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({
+      total: rows.reduce((sum, row) => sum + row.amount, 0),
+      rows,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

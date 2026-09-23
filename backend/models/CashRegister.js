@@ -14,11 +14,22 @@ const cashHistorySchema = new mongoose.Schema(
   {
     // "sale" = a Cash-method order payment came in; "due_recovery" = a
     // Cash-method Pay Dues action came in; "purchase" = cash paid out for
-    // stock (kept for future use, nothing writes it yet - purchases are
-    // currently recorded through IngredientPurchase.paidAmount only, with
-    // no cash/bank split of their own); "adjustment" = the owner corrected
-    // this figure by hand from the Dashboard.
-    type: { type: String, enum: ["sale", "due_recovery", "purchase", "adjustment"], required: true },
+    // stock (ingredientPurchaseController.js - createPurchase/
+    // receivePurchaseOrder/recordPayment, since a purchase batch has no
+    // cash/bank choice of its own and is always assumed to leave the
+    // till); "due_given" = a Cash-method "+ Add Dues" handed the customer
+    // an advance/credit, so real cash left the till the other way
+    // (customerController.updateCustomerDues); "refund" = a cancelled
+    // order's paidAmount going back out of the till because the product
+    // was returned (orderController.cancelOrderCore - only when that
+    // order wasn't paid via a Bank, which gets its own withdrawal
+    // instead); "adjustment" = the owner corrected this figure by hand
+    // from the Dashboard.
+    type: {
+      type: String,
+      enum: ["sale", "due_recovery", "purchase", "due_given", "refund", "adjustment"],
+      required: true,
+    },
     direction: { type: String, enum: ["in", "out"], required: true },
     amount: { type: Number, required: true, min: 0 },
     note: { type: String, default: "" },

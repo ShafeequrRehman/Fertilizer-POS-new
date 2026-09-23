@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -279,6 +279,49 @@ export async function adjustCash(amount: number, direction: 'in' | 'out', note?:
 export async function fetchDashboardSummary() {
   try {
     const response = await api.get<DashboardSummary>('/reports/dashboard-summary');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Task 1: every Accounting Overview tile is editable - see
+// backend/models/DashboardAdjustment.js. `key` matches DashboardSummary's
+// own field names (excluding cashInHand/balanceOnBank, which already have
+// a real editable home of their own - Cash in Hand's adjustCash above, and
+// each Bank's own page).
+export async function fetchDashboardAdjustmentHistory(key: DashboardAdjustmentKey) {
+  try {
+    const response = await api.get<{ key: string; total: number; history: DashboardAdjustmentHistoryEntry[] }>(
+      `/dashboard-adjustments/${key}/history`
+    );
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function adjustDashboardTile(key: DashboardAdjustmentKey, amount: number, direction: 'in' | 'out', note?: string) {
+  try {
+    const response = await api.post<{ key: string; total: number }>(`/dashboard-adjustments/${key}/adjust`, {
+      amount,
+      direction,
+      note,
+    });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Task 3: Recovery "Details" - every real due-payment any customer has
+// made, optionally scoped to a date range (YYYY-MM-DD, inclusive) - see
+// backend/controllers/reportController.js's getRecoveryHistory.
+export async function fetchRecoveryHistory(startDate?: string, endDate?: string) {
+  try {
+    const response = await api.get<{ total: number; rows: RecoveryHistoryRow[] }>('/reports/recovery-history', {
+      params: { startDate, endDate },
+    });
     return response.data;
   } catch (error) {
     handleApiError(error);

@@ -4,7 +4,7 @@ const { requireShopMember } = require("../middleware/roleGuards");
 const requireLicenseValid = require("../middleware/requireLicenseValid");
 const requirePermission = require("../middleware/requirePermission");
 const requireAnyPermission = require("../middleware/requireAnyPermission");
-const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions, getDashboardSummary } = require("../controllers/reportController");
+const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions, getDashboardSummary, getRecoveryHistory } = require("../controllers/reportController");
 
 const router = express.Router();
 
@@ -33,5 +33,9 @@ router.get("/inventory", requireAnyPermission("reports.view", "reports.view.inve
 // meant for the same audience as the Dashboard page itself, which is a
 // wider group than who can open the full Reports section.
 router.get("/dashboard-summary", requirePermission("view.dashboard"), getDashboardSummary);
+
+// Task 3's Recovery "Details" - same audience as the Dashboard tile it's
+// opened from (view.dashboard), not the narrower "reports.view".
+router.get("/recovery-history", requirePermission("view.dashboard"), getRecoveryHistory);
 
 module.exports = router;

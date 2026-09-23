@@ -7,6 +7,7 @@ const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { toMilliUnits, fromMilliUnits } = require("../config/ingredientUnits");
 const { reverseIngredientReceipt } = require("../services/stockService");
+const { recordCashMovement } = require("./cashController");
 
 // Unified Khata: resolves an optional `customerId` from a purchase request
 // body into that Customer's own document (just id/name - all that's needed
@@ -16,6 +17,14 @@ const { reverseIngredientReceipt } = require("../services/stockService");
 // orderController.createOrder's own customer-sync try/catch already
 // follows - an invalid/missing/cross-shop id just means this purchase
 // isn't linked to a Khata contact, not a 500.
+// Same pattern as cashController/customerController/bankController's own
+// copy - the JWT never carries a display name, only id/role/shopId.
+async function currentUserName(req) {
+  if (!req.user?.id) return "";
+  const user = await User.findById(req.user.id).select("name username").lean();
+  return user?.name || user?.username || "";
+}
+
 async function resolveLinkedCustomer(customerId, req) {
   if (!customerId || !mongoose.Types.ObjectId.isValid(customerId)) return null;
   try {
@@ -209,6 +218,22 @@ exports.createPurchase = async (req, res) => {
     // recorded), the average is simply this batch's own rate - there's
     // nothing to average against yet.
     await applyPurchaseToIngredientStock(ingredient, qty, purchaseRate);
+
+    // Cash in Hand (Dashboard): a purchase batch has no cash/bank choice of
+    // its own (CashRegister.js's own comment) - whatever was actually paid
+    // to the supplier right now is assumed to have left the till.
+    // Best-effort/non-fatal, same as every other recordCashMovement call
+    // site - never blocks the purchase itself.
+    if (paid > 0) {
+      await recordCashMovement({
+        shopId: req.user.shopId,
+        type: "purchase",
+        direction: "out",
+        amount: paid,
+        note: `Purchase ${purchaseOrderNumber} - ${purchase.companyName || "supplier"}`,
+        createdBy: await currentUserName(req),
+      });
+    }
 
     // Returns both the new purchase record AND the now-updated ingredient
     // (new currentStock/averageCost) in one response - saves the frontend
@@ -423,6 +448,21 @@ exports.receivePurchaseOrder = async (req, res) => {
       }
     }
 
+    // Cash in Hand (Dashboard): same reasoning as createPurchase above -
+    // whatever was actually paid to the supplier at delivery/billing time
+    // is assumed to have left the till, since a purchase has no cash/bank
+    // choice of its own.
+    if (paidTotal > 0) {
+      await recordCashMovement({
+        shopId: req.user.shopId,
+        type: "purchase",
+        direction: "out",
+        amount: paidTotal,
+        note: `Purchase ${purchaseOrderNumber} received`,
+        createdBy: await currentUserName(req),
+      });
+    }
+
     res.json({
       purchaseOrderNumber,
       lines,
@@ -464,6 +504,19 @@ exports.recordPayment = async (req, res) => {
   purchase.paidAmount = Number(purchase.paidAmount || 0) + amount;
   purchase.remainingAmount = Math.max(purchase.totalAmount - purchase.paidAmount, 0);
   await purchase.save();
+
+  // Cash in Hand (Dashboard): paying down a supplier due later is still
+  // cash leaving the till right now, same reasoning as createPurchase/
+  // receivePurchaseOrder above.
+  await recordCashMovement({
+    shopId: req.user.shopId,
+    type: "purchase",
+    direction: "out",
+    amount,
+    note: `Due payment - Purchase ${purchase.purchaseOrderNumber || purchase._id} - ${purchase.companyName || "supplier"}`,
+    createdBy: await currentUserName(req),
+  });
+
   res.json(purchase);
 };
 

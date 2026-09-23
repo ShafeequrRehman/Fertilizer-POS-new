@@ -441,7 +441,19 @@ export default function RecordPage() {
     const totalAmount = charged.reduce((sum, order) => sum + Number(order.total || 0), 0);
     const paidAmount = charged.reduce((sum, order) => sum + Number(order.paidAmount ?? order.total ?? 0), 0);
     const remainingAmount = charged.reduce((sum, order) => sum + Number(order.remainingAmount ?? 0), 0);
-    return { totalOrders: dayOrders.length, totalAmount, paidAmount, remainingAmount };
+    // Cash in Hand vs Bank split of paidAmount above - same
+    // "paymentMethod === 'Bank' -> bank, else -> cash" rule
+    // reportController.js's getDashboardSummary (saleOnCash/saleOnBank) and
+    // this page's own itemSales/categorySales Cash/Bank columns already
+    // use, so this stat row always foots against both of those.
+    let cashAmount = 0;
+    let bankAmount = 0;
+    charged.forEach((order) => {
+      const paid = Number(order.paidAmount ?? order.total ?? 0);
+      if (order.paymentMethod === 'Bank') bankAmount += paid;
+      else cashAmount += paid;
+    });
+    return { totalOrders: dayOrders.length, totalAmount, paidAmount, cashAmount, bankAmount, remainingAmount };
   }, [dayOrders]);
 
   function clearRange() {
@@ -546,13 +558,15 @@ export default function RecordPage() {
       [
         { value: t('record.stats.totalOrders'), style: statLabelStyle },
         { value: t('record.export.totalSales'), style: statLabelStyle },
-        { value: t('record.paid'), style: statLabelStyle },
+        { value: t('record.stats.cashAmount'), style: statLabelStyle },
+        { value: t('record.stats.bankAmount'), style: statLabelStyle },
         { value: t('record.remaining'), style: statLabelStyle },
       ],
       [
         { value: orderStats.totalOrders },
         { value: orderStats.totalAmount, style: moneyStyle },
-        { value: orderStats.paidAmount, style: moneyStyle },
+        { value: orderStats.cashAmount, style: moneyStyle },
+        { value: orderStats.bankAmount, style: moneyStyle },
         { value: orderStats.remainingAmount, style: moneyStyle },
       ],
       [],
@@ -738,6 +752,8 @@ export default function RecordPage() {
           { label: t('record.stats.totalOrders'), value: String(orderStats.totalOrders) },
           { label: t('record.stats.totalAmount'), value: formatMoney(orderStats.totalAmount) },
           { label: t('record.stats.paidAmount'), value: formatMoney(orderStats.paidAmount) },
+          { label: t('record.stats.cashAmount'), value: formatMoney(orderStats.cashAmount) },
+          { label: t('record.stats.bankAmount'), value: formatMoney(orderStats.bankAmount) },
           { label: t('record.stats.remainingAmount'), value: formatMoney(orderStats.remainingAmount) },
         ]}
         tables={[
@@ -1060,10 +1076,12 @@ export default function RecordPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard label={t('record.stats.totalOrders')} value={String(orderStats.totalOrders)} />
         <StatCard label={t('record.stats.totalAmount')} value={`Rs ${orderStats.totalAmount}`} tone="text-sky-600" />
         <StatCard label={t('record.stats.paidAmount')} value={`Rs ${orderStats.paidAmount}`} tone="text-emerald-600" />
+        <StatCard label={t('record.stats.cashAmount')} value={`Rs ${orderStats.cashAmount}`} tone="text-teal-600" />
+        <StatCard label={t('record.stats.bankAmount')} value={`Rs ${orderStats.bankAmount}`} tone="text-indigo-600" />
         <StatCard label={t('record.stats.remainingAmount')} value={`Rs ${orderStats.remainingAmount}`} tone="text-rose-600" />
       </div>
 

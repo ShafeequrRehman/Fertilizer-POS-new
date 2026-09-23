@@ -452,6 +452,24 @@ exports.updateCustomerDues = async (req, res) => {
     });
   }
 
+  // Cash in Hand (Dashboard): a Cash-method "+ Add Dues" is the shop
+  // physically handing the customer an advance/credit - real cash leaving
+  // the till right now, the mirror image of settleCustomerDues's
+  // due_recovery below. Only when it wasn't already a bank withdrawal
+  // above (paymentMethod:"bank" moves that bank's own balance instead).
+  if (paymentMethod === "cash" && delta > 0) {
+    await recordCashMovement({
+      shopId: scope.shopId,
+      type: "due_given",
+      direction: "out",
+      amount: delta,
+      note: note || `Advance/credit given - ${customer.name || customer.phone}`,
+      relatedCustomerName: customer.name,
+      relatedCustomerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
   // Zero-delta manual "saves" (e.g. re-submitting the same figure) aren't
   // worth a history row - only a real change is.
   if (delta !== 0) {

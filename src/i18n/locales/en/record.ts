@@ -28,6 +28,8 @@ export const record = {
     totalOrders: "Total Orders",
     totalAmount: "Total Amount",
     paidAmount: "Paid Amount",
+    cashAmount: "Cash in Hand Sale",
+    bankAmount: "Bank Sale",
     remainingAmount: "Remaining Amount",
   },
   discount: {

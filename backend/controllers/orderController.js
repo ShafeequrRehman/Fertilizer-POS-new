@@ -1738,6 +1738,41 @@ async function cancelOrderCore(orderId, key, reason, req) {
   // and non-fatal, same as the deduction side - never blocks a cancellation
   // the Cancel Order Key already authorized.
   await restoreStockForOrder(order);
+  // Refund whatever this order actually collected - the customer is getting
+  // their product taken back, so the shop has to give that money back too,
+  // out of wherever it really landed: the same Bank (bankId) if it was a
+  // Bank-method sale, otherwise Cash in Hand. Best-effort/non-fatal, same
+  // as the stock restore above - never blocks a cancellation.
+  const refundAmount = Number(order.paidAmount || 0);
+  if (refundAmount > 0) {
+    const refundLabel = order.dailyOrderNumber ?? order.shopSequenceNumber ?? String(order._id).slice(-4);
+    const refundNote = `Refund - Order #${refundLabel} cancelled`;
+    const refundCreatedBy = user?.name || user?.username || "";
+    if (order.bankId) {
+      await recordCustomerBankMovement({
+        bankId: order.bankId,
+        shopId: order.shopId,
+        type: "withdrawal",
+        amount: refundAmount,
+        note: refundNote,
+        customerName: order.customer?.name || "",
+        customerPhone: order.customer?.phone || "",
+        createdBy: refundCreatedBy,
+      });
+    } else {
+      await recordCashMovement({
+        shopId: order.shopId,
+        type: "refund",
+        direction: "out",
+        amount: refundAmount,
+        note: refundNote,
+        relatedOrderId: order._id,
+        relatedCustomerName: order.customer?.name || "",
+        relatedCustomerPhone: order.customer?.phone || "",
+        createdBy: refundCreatedBy,
+      });
+    }
+  }
   return order;
 }
 

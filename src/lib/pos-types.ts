@@ -91,7 +91,7 @@ export interface Bank {
 // Cash-method order payment/due recovery, plus a manual "Adjust Cash"
 // correction from the Dashboard.
 export interface CashTransaction {
-  type: 'sale' | 'due_recovery' | 'purchase' | 'adjustment';
+  type: 'sale' | 'due_recovery' | 'purchase' | 'due_given' | 'refund' | 'adjustment';
   direction: 'in' | 'out';
   amount: number;
   note: string;
@@ -158,6 +158,48 @@ export interface DashboardSummary {
   vendorBalance: number;
   customerUdharTotal: number;
   customerAdvanceTotal: number;
+  // Task 4: Customer Advance "Details" - just a name + amount per customer
+  // currently in credit, nothing else. Sorted biggest-advance-first by the
+  // backend already.
+  customerAdvances?: { name: string; phone: string; amount: number }[];
+}
+
+// Task 1: every Accounting Overview tile is editable - see
+// backend/models/DashboardAdjustment.js and dashboardAdjustmentController.js.
+// Keyed the same way DashboardSummary's own fields are.
+export type DashboardAdjustmentKey =
+  | 'totalSaleToday'
+  | 'customerUdharTotal'
+  | 'customerAdvanceTotal'
+  | 'stockValue'
+  | 'vendorBalance'
+  | 'totalPurchaseToday'
+  | 'totalExpensesToday'
+  | 'saleOnCash'
+  | 'saleOnBank'
+  | 'saleOnCredit'
+  | 'totalRecoveryToday';
+
+export interface DashboardAdjustmentHistoryEntry {
+  direction: 'in' | 'out';
+  amount: number;
+  note: string;
+  totalAfter: number;
+  createdBy: string;
+  createdAt: string;
+}
+
+// Task 3: one real due-payment ("- Pay Dues"/"Clear") from any customer -
+// see backend/controllers/reportController.js's getRecoveryHistory.
+export interface RecoveryHistoryRow {
+  customerName: string;
+  customerPhone: string;
+  amount: number;
+  paymentMethod: 'cash' | 'bank';
+  bankName: string;
+  note: string;
+  createdBy: string;
+  createdAt: string;
 }
 
 export interface LedgerOrder {
@@ -745,6 +787,20 @@ export interface CartItem {
   // Carried straight off the Product this cart row was added from - see
   // Product.specialType's own comment. "" / undefined for every ordinary item.
   specialType?: '' | 'electricity_bill' | 'cash';
+  // Per-line discount (a flat Rs amount off this line's price*quantity
+  // total, e.g. Urea PKR 4600 with a 100 discount sells for 4500) - see
+  // POSPage.tsx's handleItemDiscountChange. `price` itself always stays
+  // the untouched catalog price (never mutated) so every discount typed
+  // across the cart can be summed and sent as one order-level Discount
+  // (see handleSaveOrder's orderPayload.discount) - the exact same
+  // {type:'value', value, amount} shape SalesPage.tsx's own post-order
+  // discount editor already produces, so the backend's existing
+  // recalculateTotals/buildDiscountRecord, the printed receipt's
+  // "Discount" line, and RecordPage's "Total Discount Today" all pick
+  // this up with no changes of their own. Undefined/0 for every line with
+  // no discount applied - never set for a specialType (bill/cash) row,
+  // which has no catalog price to discount off of.
+  discount?: number;
 }
 
 export interface OrderFormData {

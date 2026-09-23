@@ -70,6 +70,7 @@ export const pos = {
   paymentCard: "Card",
   paymentEWallet: "E-Wallet",
   itemsTotal: "Items Total",
+  discountLabel: "Discount",
   taxLabel: "Tax ({{rate}}%)",
   totalPayable: "Total Payable",
   savingOrder: "Saving Order...",
