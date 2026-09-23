@@ -13,8 +13,9 @@ import {
   cancelIngredientPurchase,
   deleteDuesHistoryEntry,
   fetchBanks,
+  fetchGrains,
 } from '@/lib/pos-api';
-import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank } from '@/lib/pos-types';
+import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
@@ -23,6 +24,12 @@ import { useToast } from '@/lib/toast';
 import OrderDetailModal from '@/components/OrderDetailModal';
 import PurchaseDetailModal from '@/components/PurchaseDetailModal';
 import DuesHistoryDetailModal from '@/components/DuesHistoryDetailModal';
+
+// A "+ Add Dues"/"- Pay Dues" action can route through the shop's own Bank
+// OR its own Grain Stock instead of plain Cash - exactly one of bankId or
+// (grainId + grainKg) is ever set, never both (see CustomerCard's own
+// Cash/Bank/Grain Stock picker below).
+type DuesPaymentOption = { bankId?: string; grainId?: string; grainKg?: number };
 
 // This page used to source its list from fetchAllCustomers(), which only
 // ever carries the OLD, manually-set lump-sum Customer.previousDues field -
@@ -43,6 +50,11 @@ export default function CustomerDuesPage() {
   // CustomerCard's Cash/Bank payment-method picker can offer the same
   // up-to-date list without each card fetching it separately.
   const [banks, setBanks] = useState<Bank[]>([]);
+  // The shop's own grain stock (see GrainStockPage.tsx) - same idea as
+  // banks above, so every CustomerCard's Cash/Bank/Grain Stock
+  // payment-method picker can offer whichever grains the shop has added
+  // (Rice, Gandam, ...) without each card fetching its own list.
+  const [grains, setGrains] = useState<Grain[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
@@ -59,6 +71,7 @@ export default function CustomerDuesPage() {
     loadCustomers();
     checkWhatsapp();
     void loadBanks();
+    void loadGrains();
     // WhatsApp's socket can take a few seconds to finish (re)connecting
     // after the backend starts, so the very first status check right after
     // this page mounts can catch it mid-handshake and report "not
@@ -130,6 +143,15 @@ export default function CustomerDuesPage() {
     }
   };
 
+  const loadGrains = async () => {
+    try {
+      const data = await fetchGrains();
+      if (data) setGrains(data);
+    } catch {
+      // Non-fatal - a card just falls back to Cash/Bank-only if this fails.
+    }
+  };
+
   const checkWhatsapp = async () => {
     try {
       const status = await fetchWhatsappStatus();
@@ -191,19 +213,29 @@ export default function CustomerDuesPage() {
   // amount field on a real success, and surfaces a toast either way
   // instead of silently doing nothing on failure (updateCustomerDues
   // throws on any HTTP error).
-  const handleAddManualDue = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
+  const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
     const nextPreviousDues = (customer.previousDues || 0) + amount;
+    const bankId = payment?.bankId;
+    const grainId = payment?.grainId;
+    const grainKg = payment?.grainKg || 0;
 
     try {
-      const updated = await updateCustomerDues(phone, nextPreviousDues, note, bankId ? { bankId } : undefined);
+      const updated = await updateCustomerDues(
+        phone,
+        nextPreviousDues,
+        note,
+        bankId ? { bankId } : undefined,
+        grainId ? { grainId, grainKg } : undefined,
+      );
       if (!updated) {
         toast.error('Could not update dues.');
         return false;
       }
       await loadCustomers();
       if (bankId) await loadBanks();
+      if (grainId) await loadGrains();
       toast.success('Dues updated.');
       return true;
     } catch (error) {
@@ -212,7 +244,14 @@ export default function CustomerDuesPage() {
       // the error below.
       if (isDesktopApp() && isConnectivityFailure(error)) {
         try {
-          const patched = await queueAddDueOffline(customer, { previousDues: nextPreviousDues, note, paymentMethod: bankId ? 'bank' : 'cash', bankId });
+          const patched = await queueAddDueOffline(customer, {
+            previousDues: nextPreviousDues,
+            note,
+            paymentMethod: bankId ? 'bank' : grainId ? 'grain' : 'cash',
+            bankId,
+            grainId,
+            grainKg,
+          });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success('Saved offline - will sync automatically once online.');
           return true;
@@ -231,25 +270,42 @@ export default function CustomerDuesPage() {
   // Deliberately NOT capped at totalDue any more - a payment can exceed
   // what's currently owed, which leaves the customer in credit (previousDues
   // goes negative, shown as an advance) rather than being silently clipped.
-  const handleSettlePayment = async (phone: string, amount: number, note: string, bankId?: string): Promise<boolean> => {
+  const handleSettlePayment = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
+    const bankId = payment?.bankId;
+    const grainId = payment?.grainId;
+    const grainKg = payment?.grainKg || 0;
 
     try {
-      const result = await settleCustomerDues(phone, amount, note, bankId ? { bankId } : undefined);
+      const result = await settleCustomerDues(
+        phone,
+        amount,
+        note,
+        bankId ? { bankId } : undefined,
+        grainId ? { grainId, grainKg } : undefined,
+      );
       if (!result) {
         toast.error('Could not record payment.');
         return false;
       }
       await loadCustomers();
       if (bankId) await loadBanks();
+      if (grainId) await loadGrains();
       toast.success(`₨${result.appliedAmount} recorded.`);
       return true;
     } catch (error) {
       // See handleAddCustomer's own comment on isConnectivityFailure.
       if (isDesktopApp() && isConnectivityFailure(error)) {
         try {
-          const patched = await queueSettleDueOffline(customer, { amount, note, paymentMethod: bankId ? 'bank' : 'cash', bankId });
+          const patched = await queueSettleDueOffline(customer, {
+            amount,
+            note,
+            paymentMethod: bankId ? 'bank' : grainId ? 'grain' : 'cash',
+            bankId,
+            grainId,
+            grainKg,
+          });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success(`₨${amount} saved offline - will sync automatically once online.`);
           return true;
@@ -437,6 +493,7 @@ export default function CustomerDuesPage() {
                   key={c.id}
                   customer={c}
                   banks={banks}
+                  grains={grains}
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
@@ -473,6 +530,7 @@ export default function CustomerDuesPage() {
                   key={c.id}
                   customer={c}
                   banks={banks}
+                  grains={grains}
                   onAddManual={handleAddManualDue}
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
@@ -525,18 +583,26 @@ function todayDateInputValue() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], onAddManual: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, bankId?: string) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
+function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], grains: Grain[], onAddManual: (phone: string, amount: number, note: string, payment?: DuesPaymentOption) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, payment?: DuesPaymentOption) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
-  // Cash vs Bank - "+ Add Dues" via Bank means the shop handed the
-  // customer that credit out of the picked bank (its balance goes down);
-  // "- Pay Dues"/"Clear" via Bank means the customer's payment landed IN
-  // the picked bank (its balance goes up) - see
-  // customerController.updateCustomerDues/settleCustomerDues.
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank'>('cash');
+  // Cash vs Bank vs Grain Stock - "+ Add Dues" via Bank/Grain Stock means
+  // the shop handed the customer that credit out of the picked bank/grain
+  // (its balance goes down); "- Pay Dues"/"Clear" via Bank/Grain Stock
+  // means the customer's payment landed IN the picked bank/grain (its
+  // balance goes up) - see
+  // customerController.applyUpdateCustomerDues/applySettleCustomerDues.
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'grain'>('cash');
   const [bankId, setBankId] = useState<string>('');
+  const [grainId, setGrainId] = useState<string>('');
+  const [grainKg, setGrainKg] = useState<string>('');
+  const grainKgValue = Number(grainKg) || 0;
+  const paymentOption: DuesPaymentOption | undefined =
+    paymentMethod === 'bank' ? { bankId } : paymentMethod === 'grain' ? { grainId, grainKg: grainKgValue } : undefined;
+  const paymentIncomplete =
+    (paymentMethod === 'bank' && !bankId) || (paymentMethod === 'grain' && (!grainId || grainKgValue <= 0));
   // Dues Statement PDF (Download/Send): a full, printable record of
   // everything that makes up this customer's balance - same historyEntries
   // trail already shown in the on-screen History dropdown below, just as a
@@ -601,6 +667,8 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
         ? 'Payment received'
         : entry.paymentMethod === 'bank' && entry.bankName
         ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.bankName}`
+        : entry.paymentMethod === 'grain' && entry.grainName
+        ? `${entry.note ? `${entry.note} - ` : ''}via ${entry.grainName} (${entry.grainKg || 0}kg)`
         : (entry.note || 'No note'),
       tone: entry.type === 'add' ? 'text-red-600' : 'text-green-600',
       by: entry.createdBy,
@@ -1127,27 +1195,36 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
           className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none focus:border-indigo-500"
         />
 
-        {/* Cash vs Bank - only shows the bank picker once "Bank" is chosen,
-            and only if the shop has added at least one bank on the Bank
-            page. Defaults back to Cash whenever no bank is available, so
-            this never blocks Add/Pay Dues for a shop that hasn't set one
-            up yet. */}
+        {/* Cash vs Bank vs Grain Stock - only shows the relevant picker once
+            "Bank"/"Grain Stock" is chosen, and only if the shop has added
+            at least one bank/grain. Defaults back to Cash whenever none is
+            available, so this never blocks Add/Pay Dues for a shop that
+            hasn't set one up yet. */}
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => { setPaymentMethod('cash'); setBankId(''); }}
+            onClick={() => { setPaymentMethod('cash'); setBankId(''); setGrainId(''); setGrainKg(''); }}
             className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors ${paymentMethod === 'cash' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
           >
             Cash
           </button>
           <button
             type="button"
-            onClick={() => setPaymentMethod('bank')}
+            onClick={() => { setPaymentMethod('bank'); setGrainId(''); setGrainKg(''); }}
             disabled={banks.length === 0}
             title={banks.length === 0 ? 'Add a bank on the Bank page first' : 'This payment goes through a bank'}
             className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'bank' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
           >
             Bank
+          </button>
+          <button
+            type="button"
+            onClick={() => { setPaymentMethod('grain'); setBankId(''); }}
+            disabled={grains.length === 0}
+            title={grains.length === 0 ? 'Add a grain on the Grain Stock page first' : 'This payment goes through grain stock (kg + amount)'}
+            className={`flex-1 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${paymentMethod === 'grain' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+          >
+            Grain Stock
           </button>
         </div>
         {paymentMethod === 'bank' ? (
@@ -1162,16 +1239,37 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
             ))}
           </select>
         ) : null}
+        {paymentMethod === 'grain' ? (
+          <div className="space-y-2">
+            <select
+              value={grainId}
+              onChange={e => setGrainId(e.target.value)}
+              className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-amber-500"
+            >
+              <option value="">Select grain...</option>
+              {grains.map(g => (
+                <option key={g.id} value={g.id}>{g.name} ({g.totalKg.toLocaleString()} kg)</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              placeholder="Kg of grain..."
+              value={grainKg}
+              onChange={e => setGrainKg(e.target.value)}
+              className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-amber-500"
+            />
+          </div>
+        ) : null}
 
         <div className="flex gap-2">
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
+              const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); }
+              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
-            disabled={saving || amountValue <= 0 || (paymentMethod === 'bank' && !bankId)}
+            disabled={saving || amountValue <= 0 || paymentIncomplete}
             className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
           >
             {saving ? 'Saving...' : '+ Add Dues'}
@@ -1179,11 +1277,11 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
           <button
             onClick={async () => {
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
+              const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); }
+              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
-            disabled={saving || amountValue <= 0 || (paymentMethod === 'bank' && !bankId)}
+            disabled={saving || amountValue <= 0 || paymentIncomplete}
             className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
             title={amountValue > totalDue ? `More than the ₨${totalDue} owed - the extra becomes an advance` : 'Record a payment against everything owed'}
           >
@@ -1194,11 +1292,11 @@ function CustomerCard({ customer, banks, onAddManual, onSettlePayment, onRemind,
               const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
               if (!confirmed) return;
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentMethod === 'bank' ? bankId : undefined);
+              const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); }
+              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
-            disabled={saving || totalDue <= 0 || (paymentMethod === 'bank' && !bankId)}
+            disabled={saving || totalDue <= 0 || paymentIncomplete}
             className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Record a full payment, clearing everything this customer owes"
           >

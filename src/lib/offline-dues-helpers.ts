@@ -65,7 +65,13 @@ function pendingCreateToLedgerCustomer(action: LocalCustomerActionRecord): Ledge
 // synced - exactly what a shop owner needs to see to keep working through
 // a slow/offline stretch without the numbers looking wrong or stale.
 function applyPendingDuesAction(customer: LedgerCustomer, action: LocalCustomerActionRecord): LedgerCustomer {
-  const payload = action.payload as { previousDues?: number; amount?: number; note?: string; paymentMethod?: 'cash' | 'bank' };
+  const payload = action.payload as {
+    previousDues?: number;
+    amount?: number;
+    note?: string;
+    paymentMethod?: 'cash' | 'bank' | 'grain';
+    grainKg?: number;
+  };
   const isAdd = action.kind === 'add_due';
   const nextPreviousDues = isAdd
     ? Number(payload.previousDues || 0)
@@ -80,7 +86,8 @@ function applyPendingDuesAction(customer: LedgerCustomer, action: LocalCustomerA
     balanceAfter: nextPreviousDues,
     createdBy: action.actor?.name || '',
     createdAt: action.queuedAt,
-    paymentMethod: payload.paymentMethod === 'bank' ? 'bank' : 'cash',
+    paymentMethod: payload.paymentMethod === 'bank' ? 'bank' : payload.paymentMethod === 'grain' ? 'grain' : 'cash',
+    grainKg: payload.paymentMethod === 'grain' ? payload.grainKg : undefined,
   };
 
   return {
@@ -141,7 +148,14 @@ export async function queueCreateCustomerOffline(
 // patched customer so DuesPage.tsx can update its on-screen card at once.
 export async function queueAddDueOffline(
   customer: LedgerCustomer,
-  body: { previousDues: number; note?: string; paymentMethod?: 'cash' | 'bank'; bankId?: string },
+  body: {
+    previousDues: number;
+    note?: string;
+    paymentMethod?: 'cash' | 'bank' | 'grain';
+    bankId?: string;
+    grainId?: string;
+    grainKg?: number;
+  },
   actor?: { name?: string },
 ): Promise<LedgerCustomer> {
   const record = await queueCustomerAction('add_due', { phone: customer.phone, ...body }, actor);
@@ -153,7 +167,14 @@ export async function queueAddDueOffline(
 // queueAddDueOffline above, for the settle side.
 export async function queueSettleDueOffline(
   customer: LedgerCustomer,
-  body: { amount: number; note?: string; paymentMethod?: 'cash' | 'bank'; bankId?: string },
+  body: {
+    amount: number;
+    note?: string;
+    paymentMethod?: 'cash' | 'bank' | 'grain';
+    bankId?: string;
+    grainId?: string;
+    grainKg?: number;
+  },
   actor?: { name?: string },
 ): Promise<LedgerCustomer> {
   const record = await queueCustomerAction('settle_due', { phone: customer.phone, ...body }, actor);

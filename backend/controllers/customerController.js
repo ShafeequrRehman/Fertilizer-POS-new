@@ -6,6 +6,7 @@ const User = require("../models/User");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { recordCustomerBankMovement } = require("./bankController");
+const { recordCustomerGrainMovement } = require("./grainController");
 const { recordCashMovement } = require("./cashController");
 
 // The JWT (req.user) only ever carries id/role/shopId/permissions - never
@@ -431,8 +432,10 @@ exports.getCustomerOutstanding = async (req, res) => {
 async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
   const nextPreviousDues = Number(body.previousDues || 0);
   const note = String(body.note || "").trim();
-  const paymentMethod = body.paymentMethod === "bank" ? "bank" : "cash";
+  const paymentMethod = body.paymentMethod === "bank" ? "bank" : body.paymentMethod === "grain" ? "grain" : "cash";
   const bankId = body.bankId ? String(body.bankId) : "";
+  const grainId = body.grainId ? String(body.grainId) : "";
+  const grainKg = Math.max(Number(body.grainKg) || 0, 0);
 
   const customer = await Customer.findOne({ phone, ...scope });
   if (!customer) {
@@ -461,11 +464,30 @@ async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
     });
   }
 
+  // Same idea, but for grain stock - the shop handing a customer credit
+  // "via Grain Stock" means grain (kg + its rupee value) leaves that
+  // grain's own balance instead of Cash in Hand - see
+  // grainController.recordCustomerGrainMovement.
+  let grain = null;
+  if (paymentMethod === "grain" && grainId && delta > 0) {
+    grain = await recordCustomerGrainMovement({
+      grainId,
+      shopId: scope.shopId,
+      type: "withdrawal",
+      kg: grainKg,
+      amount: delta,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
   // Cash in Hand (Dashboard): a Cash-method "+ Add Dues" is the shop
   // physically handing the customer an advance/credit - real cash leaving
   // the till right now, the mirror image of settleCustomerDues's
-  // due_recovery below. Only when it wasn't already a bank withdrawal
-  // above (paymentMethod:"bank" moves that bank's own balance instead).
+  // due_recovery below. Only when it wasn't already a bank withdrawal or a
+  // grain withdrawal above (those move their own balance instead).
   if (paymentMethod === "cash" && delta > 0) {
     await recordCashMovement({
       shopId: scope.shopId,
@@ -488,8 +510,10 @@ async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
       note,
       balanceAfter: nextPreviousDues,
       createdBy,
-      paymentMethod: bank ? "bank" : "cash",
+      paymentMethod: bank ? "bank" : grain ? "grain" : "cash",
       bankName: bank?.name || "",
+      grainName: grain?.name || "",
+      grainKg: grain ? grainKg : 0,
     });
   }
   await customer.save();
@@ -532,8 +556,10 @@ exports.updateCustomerDues = async (req, res) => {
 async function applySettleCustomerDues(scope, phone, body, createdBy) {
   const amount = Math.max(Number(body.amount) || 0, 0);
   const note = String(body.note || "").trim();
-  const paymentMethod = body.paymentMethod === "bank" ? "bank" : "cash";
+  const paymentMethod = body.paymentMethod === "bank" ? "bank" : body.paymentMethod === "grain" ? "grain" : "cash";
   const bankId = body.bankId ? String(body.bankId) : "";
+  const grainId = body.grainId ? String(body.grainId) : "";
+  const grainKg = Math.max(Number(body.grainKg) || 0, 0);
   if (amount <= 0) {
     throw Object.assign(new Error("amount must be greater than 0"), { statusCode: 400 });
   }
@@ -548,7 +574,7 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
 
   // Move the bank's own money FIRST (if applicable) so its real name is
   // known before building the duesHistory entry below - see
-  // updateCustomerDues's own comment on the same ordering.
+  // applyUpdateCustomerDues's own comment on the same ordering.
   let bank = null;
   if (paymentMethod === "bank" && bankId) {
     bank = await recordCustomerBankMovement({
@@ -563,14 +589,33 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
     });
   }
 
+  // Same idea, but for grain stock - a customer paying dues "via Grain
+  // Stock" means the grain they handed over (kg + its rupee value) adds
+  // onto that grain's own balance instead of Cash in Hand - see
+  // grainController.recordCustomerGrainMovement.
+  let grain = null;
+  if (paymentMethod === "grain" && grainId) {
+    grain = await recordCustomerGrainMovement({
+      grainId,
+      shopId: scope.shopId,
+      type: "deposit",
+      kg: grainKg,
+      amount,
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
+
   // Total Recovery / Cash in Hand (Dashboard): a Cash-method "Pay Dues"
   // is real cash landing at the till right now, same as a Cash-method
   // order payment (orderController.js's own completeAndSettle branch) -
   // recorded here so the Dashboard's Cash in Hand figure and today's
   // Total Recovery both reflect it. Only when the money did NOT already
-  // go into a bank above (paymentMethod:"bank" moves the bank's own
-  // balance instead, via recordCustomerBankMovement).
-  if (!bank) {
+  // go into a bank or grain stock above (those move their own balance
+  // instead, via recordCustomerBankMovement/recordCustomerGrainMovement).
+  if (!bank && !grain) {
     await recordCashMovement({
       shopId: scope.shopId,
       type: "due_recovery",
@@ -589,8 +634,10 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
     note,
     balanceAfter: previousDues,
     createdBy,
-    paymentMethod: bank ? "bank" : "cash",
+    paymentMethod: bank ? "bank" : grain ? "grain" : "cash",
     bankName: bank?.name || "",
+    grainName: grain?.name || "",
+    grainKg: grain ? grainKg : 0,
   });
 
   await customer.save();

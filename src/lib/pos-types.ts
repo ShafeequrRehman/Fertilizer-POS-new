@@ -86,6 +86,36 @@ export interface Bank {
   createdAt: string;
 }
 
+// Grain Stock page's own khata - same idea as Bank above, but the shop
+// keeps grain (Rice, Gandam, ...) on hand instead of money, and also
+// tracks its running rupee value the exact same way a bank balance works.
+// history is newest-first (see backend/controllers/grainController.js's
+// serializeGrain). relatedCustomerName/Phone are only ever set on an entry
+// pushed by a Customer Dues "+ Add Dues"/"- Pay Dues" action made "via
+// Grain Stock" - see pos-api.ts's updateCustomerDues/settleCustomerDues
+// grainPayment parameter.
+export interface GrainTransaction {
+  type: 'deposit' | 'withdrawal';
+  kg: number;
+  amount: number;
+  note: string;
+  balanceAfterKg: number;
+  balanceAfter: number;
+  relatedCustomerPhone?: string;
+  relatedCustomerName?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface Grain {
+  id: string;
+  name: string;
+  totalKg: number;
+  balance: number;
+  history: GrainTransaction[];
+  createdAt: string;
+}
+
 // "Cash in Hand" - the till's own khata, same shape as BankTransaction
 // above (see backend/models/CashRegister.js). Fed automatically by a
 // Cash-method order payment/due recovery, plus a manual "Adjust Cash"
@@ -160,6 +190,10 @@ export interface DashboardSummary {
   totalRecoveryToday: number;
   cashInHand: number;
   balanceOnBank: number;
+  // Total rupee value of grain currently on hand across every grain the
+  // shop has added (Grain Stock page) - see
+  // backend/controllers/reportController.js's getDashboardSummary.
+  grainStockValue: number;
   stockValue: number;
   vendorBalance: number;
   customerUdharTotal: number;
@@ -243,8 +277,13 @@ export interface DuesHistoryEntry {
   // one of the shop's own Bank accounts (see the Bank page) and bankName
   // says which one. Absent/undefined on older entries recorded before
   // this existed - treat as 'cash'.
-  paymentMethod?: 'cash' | 'bank';
+  paymentMethod?: 'cash' | 'bank' | 'grain';
   bankName?: string;
+  // Set only when paymentMethod is 'grain' - which grain and how many kg
+  // moved, purely for display here (see backend/models/Customer.js's
+  // grainName/grainKg).
+  grainName?: string;
+  grainKg?: number;
 }
 
 // One linked-purchase row on a Unified Khata contact's statement - the

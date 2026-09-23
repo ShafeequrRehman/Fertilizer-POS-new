@@ -66,6 +66,11 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   // above, since Bank exists to back Customer Dues payments made "via
   // Bank" (see BankPage.tsx/DuesPage.tsx's paymentMethod picker).
   { key: 'bank', label: 'Bank', href: '/dashboard/bank', permission: 'dues.manage' },
+  // The shop's own grain stock (Rice, Gandam, ...) - same dues.manage gate
+  // as Bank above, since Grain Stock exists to back Customer Dues payments
+  // made "via Grain Stock" (see GrainStockPage.tsx/DuesPage.tsx's
+  // paymentMethod picker).
+  { key: 'grain-stock', label: 'Grain Stock', href: '/dashboard/grain-stock', permission: 'dues.manage' },
   { key: 'record', label: 'Record', href: '/dashboard/record', permission: 'orders.record.view' },
   { key: 'shifts', label: 'Shifts', href: '/dashboard/shifts', permission: 'shop.session.manage' },
   // Sidebar/Route Bypass Bug Fix: same story as Dining Tables above - used

@@ -7,6 +7,7 @@ const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const Ingredient = require("../models/Ingredient");
 const Bank = require("../models/Bank");
+const Grain = require("../models/Grain");
 const CashRegister = require("../models/CashRegister");
 const DashboardAdjustment = require("../models/DashboardAdjustment");
 const { shopScope } = require("../middleware/attachShopScope");
@@ -511,6 +512,7 @@ exports.getDashboardSummary = async (req, res) => {
       products,
       ingredients,
       banks,
+      grains,
       cashRegister,
       vendorDueAgg,
       todaysPurchaseAgg,
@@ -544,6 +546,10 @@ exports.getDashboardSummary = async (req, res) => {
       // (see balanceAsOfEnd above) but is always selected here since which
       // range is active is only known after this query already ran.
       Bank.find({ shopId: shopObjectId }).select("balance history").lean(),
+      // Grain Stock - every grain (Rice, Gandam, ...) this shop has added
+      // (Grain Stock page), same "current rupee value on hand" idea as
+      // Bank above - see grainController.js's own comment.
+      Grain.find({ shopId: shopObjectId }).select("balance history").lean(),
       CashRegister.findOne({ shopId: shopObjectId }).select("balance history").lean(),
       // Vendor Balance - total still owed to suppliers across every
       // received (not pending/cancelled) stock batch ever logged, same
@@ -612,6 +618,7 @@ exports.getDashboardSummary = async (req, res) => {
     }, 0);
     const stockValue = ingredientStockValue + untrackedProductStockValue;
     const balanceOnBank = banks.reduce((sum, b) => sum + balanceAsOfEnd(b.balance, b.history), 0);
+    const grainStockValue = grains.reduce((sum, g) => sum + balanceAsOfEnd(g.balance, g.history), 0);
     const cashInHand = balanceAsOfEnd(cashRegister?.balance, cashRegister?.history);
     const vendorBalance = vendorDueAgg[0]?.total || 0;
     const totalPurchaseToday = todaysPurchaseAgg[0]?.total || 0;
@@ -665,6 +672,7 @@ exports.getDashboardSummary = async (req, res) => {
       totalRecoveryToday: adjusted("totalRecoveryToday", totalRecoveryToday),
       cashInHand,
       balanceOnBank,
+      grainStockValue,
       stockValue: adjusted("stockValue", stockValue),
       vendorBalance: adjusted("vendorBalance", vendorBalance),
       customerUdharTotal: adjusted("customerUdharTotal", customerUdharTotal),

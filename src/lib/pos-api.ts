@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, Expense, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, Expense, Grain, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LedgerCustomer, LedgerTransactionsResponse, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -158,13 +158,15 @@ export async function updateCustomer(id: string, payload: Partial<Customer>) {
 // customer that credit - its balance goes down by the same amount (see
 // backend/controllers/customerController.js's updateCustomerDues). Omit or
 // leave undefined for a plain cash entry, unchanged from before.
-export async function updateCustomerDues(phone: string, previousDues: number, note?: string, bankPayment?: { bankId: string }) {
+export async function updateCustomerDues(phone: string, previousDues: number, note?: string, bankPayment?: { bankId: string }, grainPayment?: { grainId: string; grainKg: number }) {
   try {
     const response = await api.patch<Customer & { _id?: string }>(`/customers/dues/${phone}`, {
       previousDues,
       note,
-      paymentMethod: bankPayment?.bankId ? 'bank' : 'cash',
+      paymentMethod: bankPayment?.bankId ? 'bank' : grainPayment?.grainId ? 'grain' : 'cash',
       bankId: bankPayment?.bankId,
+      grainId: grainPayment?.grainId,
+      grainKg: grainPayment?.grainKg,
     });
     return normalizeCustomer(response.data as Customer & { _id?: string; updatedAt?: string });
   } catch (error) {
@@ -199,13 +201,15 @@ export async function deleteDuesHistoryEntry(phone: string, entry: { createdAt: 
 // shop's own banks it landed in - its balance goes up by whatever actually
 // got applied (see backend/controllers/customerController.js's
 // settleCustomerDues). Omit for a plain cash payment, unchanged from before.
-export async function settleCustomerDues(phone: string, amount: number, note?: string, bankPayment?: { bankId: string }) {
+export async function settleCustomerDues(phone: string, amount: number, note?: string, bankPayment?: { bankId: string }, grainPayment?: { grainId: string; grainKg: number }) {
   try {
     const response = await api.post<{ appliedAmount: number; unapplied: number }>(`/customers/${phone}/settle-dues`, {
       amount,
       note,
-      paymentMethod: bankPayment?.bankId ? 'bank' : 'cash',
+      paymentMethod: bankPayment?.bankId ? 'bank' : grainPayment?.grainId ? 'grain' : 'cash',
       bankId: bankPayment?.bankId,
+      grainId: grainPayment?.grainId,
+      grainKg: grainPayment?.grainKg,
     });
     return response.data;
   } catch (error) {
@@ -246,6 +250,46 @@ export async function createBank(name: string, openingAmount: number, note?: str
 export async function addBankTransaction(bankId: string, type: 'deposit' | 'withdrawal', amount: number, note?: string) {
   try {
     const response = await api.post<Bank>(`/banks/${bankId}/transactions`, { type, amount, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// --- Grain Stock page (the shop's own grain stock, e.g. Rice/Gandam) ---
+// Mirrors the Bank page pattern above - each grain has a running kg total
+// and rupee value, plus a history of movements - but tracks stock (kg)
+// alongside money. See backend/models/Grain.js.
+export async function fetchGrains() {
+  try {
+    const response = await api.get<Grain[]>('/grains');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Adding a grain and its very first stock in one step, e.g. "Rice" with an
+// opening 500kg worth Rs150,000 - same "add my bank, add a payment" flow
+// createBank was built for. Both opening fields can be 0 to just create an
+// empty grain.
+export async function createGrain(name: string, openingKg: number, openingAmount: number, note?: string) {
+  try {
+    const response = await api.post<Grain>('/grains', { name, openingKg, openingAmount, note });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// A manual deposit/withdrawal recorded directly on the Grain Stock page
+// itself - grain the owner put into or took out of this grain's stock with
+// no customer involved (a customer-linked movement is recorded
+// automatically instead, via updateCustomerDues/settleCustomerDues's own
+// grainPayment above).
+export async function addGrainTransaction(grainId: string, type: 'deposit' | 'withdrawal', kg: number, amount: number, note?: string) {
+  try {
+    const response = await api.post<Grain>(`/grains/${grainId}/transactions`, { type, kg, amount, note });
     return response.data;
   } catch (error) {
     handleApiError(error);
