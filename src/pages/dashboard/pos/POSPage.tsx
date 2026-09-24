@@ -48,11 +48,6 @@ type ProductGroup = {
   variations: Product[];
 };
 
-// How often this screen refreshes pendingItemQuantities (the "N Pending"
-// product-card badge) - there's no push/websocket channel in this app, so a
-// short poll is how a second terminal's order shows up here.
-const PENDING_ITEMS_POLL_MS = 5000;
-
 export default function POSPage() {
   const { t } = useLanguage();
   const { isOpen: shopIsOpen, session: shopSession, loading: shopSessionLoading, refresh: refreshShopSession, openLocally: openShopLocally } = useShopSession();
@@ -63,15 +58,6 @@ export default function POSPage() {
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
   const [waiters, setWaiters] = useState<Waiter[]>([]);
-  // How many units of each product are sitting in a currently-pending order
-  // right now (across every order type) - keyed by the product's own name,
-  // lowercased/trimmed, since order line items only ever carry a plain
-  // name/variation (no productId - see OrderPayload's own comment on
-  // items). Drives the green "N Pending" badge on each POS product card
-  // below. Refreshed on a poll (see loadPendingItemQuantities/
-  // PENDING_ITEMS_POLL_MS) plus right after this till saves a new order, so
-  // it feels real-time without a websocket.
-  const [pendingItemQuantities, setPendingItemQuantities] = useState<Record<string, number>>({});
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -316,52 +302,6 @@ export default function POSPage() {
   // message up here instead once it's actually called window.print(); this
   // is what shows the popup for real, on screen. See print-notify.ts.
   useEffect(() => listenForPrintSentMessages(shopToast), [shopToast]);
-
-  // Sums item quantities across every currently-pending order (any order
-  // type) into pendingItemQuantities. Also folds in this till's own
-  // still-queued (not yet synced) local orders - an offline order should
-  // bump the badge instantly on this till, not just once it's synced and
-  // shows up in the next cloud fetch.
-  async function loadPendingItemQuantities() {
-    try {
-      const orders = await fetchOrders({ status: 'pending' });
-      const next: Record<string, number> = {};
-      (orders ?? []).forEach((order) => {
-        if (order.status !== 'pending') return;
-        order.items?.forEach((item) => {
-          const key = item.name.trim().toLowerCase();
-          next[key] = (next[key] || 0) + item.quantity;
-        });
-      });
-      if (isDesktopApp()) {
-        try {
-          const pendingLocal = await getPendingLocalOrders();
-          pendingLocal.forEach((record) => {
-            const payload = record.payload as { status?: string; items?: Array<{ name: string; quantity: number }> };
-            if (payload.status && payload.status !== 'pending') return;
-            (payload.items ?? []).forEach((item) => {
-              const key = item.name.trim().toLowerCase();
-              next[key] = (next[key] || 0) + item.quantity;
-            });
-          });
-        } catch {
-          // Local Hub unreachable - server-known pending quantities above still apply.
-        }
-      }
-      setPendingItemQuantities(next);
-    } catch (error) {
-      console.error('Failed to refresh pending item quantities:', error);
-      // Leave the last-known quantities in place rather than blanking every badge out.
-    }
-  }
-
-  useEffect(() => {
-    void loadPendingItemQuantities();
-    const interval = setInterval(() => {
-      void loadPendingItemQuantities();
-    }, PENDING_ITEMS_POLL_MS);
-    return () => clearInterval(interval);
-  }, []);
 
   // Quick Delivery Charges preset only ever means anything on a Delivery
   // order - switching the order type away from Delivery (even after
@@ -1237,10 +1177,6 @@ export default function POSPage() {
 
       setCart([]);
       resetOrderForm();
-      // Instant feedback for the pending-quantity badges - don't wait up to
-      // PENDING_ITEMS_POLL_MS for this order's own items to show up on the
-      // product cards that were just used to build it.
-      void loadPendingItemQuantities();
       orderFinalized = true;
       // Bring up the Complete Payment popup right away for this order -
       // see completePaymentTarget's own comment above for why.
@@ -1496,10 +1432,6 @@ export default function POSPage() {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
-              // How many units of THIS product are sitting in a pending order
-              // right now (see pendingItemQuantities' own comment) - 0 when
-              // nothing's pending, which hides the badge below entirely.
-              const pendingQty = pendingItemQuantities[group.name.trim().toLowerCase()] || 0;
               // Keyboard Shortcuts - grid navigation: a visible ring around
               // whichever card the Arrow keys currently point to (see the
               // POS-local keydown effect above) - Space adds this exact
@@ -1510,65 +1442,17 @@ export default function POSPage() {
                   <div className={`relative overflow-hidden rounded-[14px] bg-slate-100 shrink-0 shadow-inner ${viewMode === 'list' ? 'h-16 w-16' : 'mb-2 h-[110px] w-full'}`}>
                     <img src={resolveProductImage(group)} alt={group.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-110" />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent" />
-                    {/* Pending-order notification badge - opposite corner
-                        from the Product Code badge below, same small-pill
-                        treatment as the Family Table "F" badge. Shown only
-                        while this product has at least one unit sitting in a
-                        currently-pending order (any order type); shows the
-                        live count (e.g. "3 Pending") and disappears the
-                        instant that count reaches 0 - see
-                        pendingItemQuantities/loadPendingItemQuantities. */}
-                    {pendingQty > 0 ? (
-                      <span className="absolute left-1 top-1 rounded-full bg-emerald-500/90 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={t(pendingQty === 1 ? 'pos.pendingTooltipOne' : 'pos.pendingTooltipMany', { count: pendingQty, name: group.name })}>
-                        {t('pos.pendingBadge', { count: pendingQty })}
-                      </span>
-                    ) : null}
-                    {/* Product Code badge - same small-pill-in-the-corner
-                        treatment as the Family Table "F" badge on the
-                        Dine-In table grid. Only shown for a single-variation
-                        card (one real SKU) - a size/variant group has no
-                        single code to represent. Pink when a real code is
-                        assigned (scannable), muted gray "null" when the
-                        cashier hasn't set one yet, so it's obvious at a
-                        glance which products still need a code/barcode
-                        assigned. Positioned inside the image bounds
-                        (top-1/right-1, not a negative offset) since both
-                        this container and the card button have
-                        overflow-hidden. */}
-                    {!hasVariations ? (
-                      group.variations[0].productCode ? (
-                        <span className="absolute right-1 top-1 rounded-full bg-pink-500/90 px-1.5 py-0.5 text-[8px] font-black leading-none text-white shadow-sm">
-                          {group.variations[0].productCode}
-                        </span>
-                      ) : (
-                        <span className="absolute right-1 top-1 rounded-full bg-slate-500/80 px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm" title={t('pos.noCodeAssignedYet')}>
-                          {t('pos.noCodeBadge')}
-                        </span>
-                      )
-                    ) : (
-                      // Multi-size/variant card (e.g. Small/Large/XL) has no
-                      // single code to show - so list every variation's own
-                      // code, in variation order, comma-separated (e.g.
-                      // "1,2,3,4"), instead of just a count. A variation with
-                      // no code yet shows as "null" in its slot so it's
-                      // obvious which specific size still needs one. Pink =
-                      // every size is coded, gray = none are, amber = a mix.
-                      (() => {
-                        const codedCount = group.variations.filter((v) => v.productCode).length;
-                        const totalCount = group.variations.length;
-                        const codeList = group.variations.map((v) => v.productCode || t('pos.noCodeBadge')).join(',');
-                        const colorClass =
-                          codedCount === totalCount ? 'bg-pink-500/90' : codedCount === 0 ? 'bg-slate-500/80' : 'bg-amber-500/90';
-                        return (
-                          <span
-                            className={`absolute right-1 top-1 max-w-[80%] truncate rounded-full ${colorClass} px-1.5 py-0.5 text-[8px] font-black uppercase leading-none text-white shadow-sm`}
-                            title={group.variations.map((v) => `${v.variation}: ${v.productCode || t('pos.noCodeAssigned')}`).join(' · ')}
-                          >
-                            {codeList}
-                          </span>
-                        );
-                      })()
-                    )}
+                    {/* Stock badge - top-right corner of the product
+                        image, same small-pill treatment as the Family Table
+                        "F" badge. Shows the live total stock count across
+                        every variation (e.g. "200") so the cashier can see
+                        at a glance how much of this product is left, right
+                        on the card, without opening it. Replaces the old
+                        Pending-order and Product Code/"null" badges that
+                        used to occupy these corners. */}
+                    <span className="absolute right-1 top-1 rounded-full bg-[#D6E332] px-1.5 py-0.5 text-[8px] font-black leading-none text-gray-900 shadow-sm" title={t('pos.stockBadgeTooltip', { count: totalStock })}>
+                      {totalStock}
+                    </span>
                   </div>
                   <div className={`flex flex-col justify-between overflow-hidden ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
                     <div className="min-h-0 overflow-hidden">

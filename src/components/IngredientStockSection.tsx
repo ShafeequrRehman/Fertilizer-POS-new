@@ -190,6 +190,17 @@ export function IngredientStockSection({
   const [purchaseProductDetails, setPurchaseProductDetails] = useState("");
   const [purchaseQty, setPurchaseQty] = useState("");
   const [purchaseRate, setPurchaseRate] = useState("");
+  // Reverse Rate Calculation: the Total Amount field used to be a plain
+  // read-only Quantity x Rate display. It's now editable too, so the Stock
+  // Manager can type Quantity + Total Amount instead of Quantity + Rate and
+  // have the per-piece Rate work itself out automatically. purchaseTotalInput
+  // holds whatever's actually typed into that field, and purchaseAmountSource
+  // tracks which of Rate / Total Amount was MOST RECENTLY typed into by hand
+  // - the effect below always derives the other one from Quantity + whichever
+  // field is the current source, so both directions (Rate->Total and
+  // Total->Rate) stay in sync as Quantity changes too.
+  const [purchaseTotalInput, setPurchaseTotalInput] = useState("");
+  const [purchaseAmountSource, setPurchaseAmountSource] = useState<'rate' | 'total'>('rate');
   // Correct Payment & Dues Logic: `purchasePaid` is the ONE figure the
   // Stock Manager actually types (or the Full Payment button fills in) -
   // what's actually being handed to the supplier right now. Due Amount is
@@ -227,6 +238,8 @@ export function IngredientStockSection({
     setPurchaseProductDetails("");
     setPurchaseQty("");
     setPurchaseRate("");
+    setPurchaseTotalInput("");
+    setPurchaseAmountSource('rate');
     setPurchasePaid("");
     setPurchaseCustomerId(null);
     setPurchaseLinkedCustomer(null);
@@ -495,6 +508,35 @@ export function IngredientStockSection({
       popup({ tone: "error", title: t('ingredientStock.toasts.updateStockFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.updateStockFailedMessage') });
     }
   }
+
+  // Keeps Rate and Total Amount in sync with each other (and with
+  // Quantity) no matter which one the Stock Manager is actually typing
+  // into - see purchaseAmountSource's own comment above. Only ever writes
+  // to the NON-source field, so typing in one never fights the other.
+  useEffect(() => {
+    const qty = Number(purchaseQty);
+    if (purchaseAmountSource === 'total') {
+      if (purchaseTotalInput === "") {
+        if (purchaseRate !== "") setPurchaseRate("");
+        return;
+      }
+      const total = Number(purchaseTotalInput);
+      if (qty > 0 && total >= 0) {
+        const computedRate = String(Math.round((total / qty) * 100) / 100);
+        if (computedRate !== purchaseRate) setPurchaseRate(computedRate);
+      }
+    } else {
+      if (purchaseRate === "") {
+        if (purchaseTotalInput !== "") setPurchaseTotalInput("");
+        return;
+      }
+      const rate = Number(purchaseRate);
+      if (qty > 0 && rate >= 0) {
+        const computedTotal = String(Math.round(qty * rate * 100) / 100);
+        if (computedTotal !== purchaseTotalInput) setPurchaseTotalInput(computedTotal);
+      }
+    }
+  }, [purchaseQty, purchaseRate, purchaseTotalInput, purchaseAmountSource]);
 
   const purchaseTotal = purchaseQty && purchaseRate ? Number(purchaseQty) * Number(purchaseRate) : 0;
   // Amount Paid, clamped to what's actually payable on this batch - a
@@ -1525,7 +1567,7 @@ export function IngredientStockSection({
                         <input
                           type="number"
                           value={purchaseRate}
-                          onChange={(e) => setPurchaseRate(e.target.value)}
+                          onChange={(e) => { setPurchaseRate(e.target.value); setPurchaseAmountSource('rate'); }}
                           title={t('ingredientStock.purchaseForm.rateTitle')}
                           className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
                         />
@@ -1541,9 +1583,13 @@ export function IngredientStockSection({
                       </div>
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.totalAmountLabel')}</label>
-                        <div className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-100 px-4 py-2.5 text-sm font-black text-slate-700">
-                          {formatMoney(purchaseTotal)}
-                        </div>
+                        <input
+                          type="number"
+                          value={purchaseTotalInput}
+                          onChange={(e) => { setPurchaseTotalInput(e.target.value); setPurchaseAmountSource('total'); }}
+                          title={t('ingredientStock.purchaseForm.totalAmountTitle')}
+                          className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+                        />
                       </div>
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">{t('ingredientStock.purchaseForm.amountPaidLabel')}</label>

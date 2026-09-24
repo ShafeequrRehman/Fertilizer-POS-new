@@ -147,6 +147,7 @@ export const ingredientStock = {
     rateTitle: "The exact cost this batch was bought at - saved on the batch and folded into this ingredient's average cost.",
     quantityLabel: "Quantity ({{unit}})",
     totalAmountLabel: "Total Amount",
+    totalAmountTitle: "Type the total amount instead and the per-piece Rate will be worked out automatically from Quantity + Total.",
     amountPaidLabel: "Amount Paid",
     amountPaidTitle: "How much is actually being paid to this company right now. Leave blank if nothing is being paid - the full total becomes Due.",
     fullPayment: "Full Payment",

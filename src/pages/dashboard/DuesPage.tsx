@@ -1103,14 +1103,16 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
         <div>
           <p className="text-xs font-black uppercase text-slate-400 tracking-wider">Net Outstanding Balance</p>
           {/* Khata convention the shop owner asked for: money still to be
-              COLLECTED from this contact is shown as a minus figure in red
-              (unka humpar udhaar), money the shop itself owes them is a
-              plus figure in green - the opposite of netBalance's own raw
-              sign (see LedgerCustomer.netBalance's own comment: positive
-              netBalance = they owe the shop), so this deliberately negates
-              it purely for display. */}
+              COLLECTED from this contact is shown as "Due ₨..." in red
+              (unka humpar udhaar), money the shop itself owes them is
+              shown as "Adv ₨..." in green (an advance) - the opposite of
+              netBalance's own raw sign (see LedgerCustomer.netBalance's
+              own comment: positive netBalance = they owe the shop), so
+              this deliberately negates it purely for display. Previously
+              a bare "-"/"+" prefix - "Due"/"Adv" per the owner's own
+              request, since a lone sign alone wasn't clear enough. */}
           <p className={`text-2xl font-black ${netBalance > 0 ? 'text-red-600' : netBalance < 0 ? 'text-green-600' : 'text-slate-800'}`}>
-            {netBalance > 0 ? `-₨${netBalance}` : netBalance < 0 ? `+₨${Math.abs(netBalance)}` : 'Settled'}
+            {netBalance > 0 ? `Due ₨${netBalance}` : netBalance < 0 ? `Adv ₨${Math.abs(netBalance)}` : 'Settled'}
           </p>
           {fromOrders > 0 || fromLumpSum > 0 ? (
             <p className="text-[11px] font-bold text-slate-400 mt-1">
