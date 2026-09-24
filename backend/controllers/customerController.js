@@ -517,15 +517,38 @@ async function applyUpdateCustomerDues(scope, phone, body, createdBy) {
       createdBy,
     });
   }
+  // Munshi's "+ Add Dues"/"Paid Amount" runs the OPPOSITE way from every
+  // other payment method here (see this function's DuesPage.tsx caller,
+  // handleAddManualDue, for the full reasoning): the shop owner treats it
+  // as the customer's due being cleared THROUGH the Munshi, who holds the
+  // money on the shop's behalf rather than it landing at the till. So a
+  // Munshi "Paid Amount" always sends a NEGATIVE delta (previousDues goes
+  // DOWN), and that money is deposited into the Munshi khata instead of
+  // being drawn out of it - Cash in Hand is deliberately left untouched
+  // (see the paymentMethod !== "munshi" guard below).
+  if (paymentMethod === "munshi" && delta < 0) {
+    await recordCustomerMunshiMovement({
+      shopId: scope.shopId,
+      type: "due_recovery",
+      direction: "in",
+      amount: Math.abs(delta),
+      note,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      createdBy,
+    });
+  }
 
-  // Cash in Hand (Dashboard): a Cash/Labour/Munshi-method "+ Add Dues" is
-  // the shop physically handing the customer an advance/credit - real cash
+  // Cash in Hand (Dashboard): a Cash/Labour-method "+ Add Dues" is the
+  // shop physically handing the customer an advance/credit - real cash
   // leaving the till right now, the mirror image of settleCustomerDues's
   // due_recovery below. Only when it wasn't already a bank withdrawal or a
   // grain withdrawal above (those move their own balance INSTEAD of Cash
-  // in Hand - Labour/Munshi move it ON TOP of Cash in Hand, see their own
-  // comment above, so cash still moves for them too).
-  if (!bank && !grain && delta > 0) {
+  // in Hand - Labour moves it ON TOP of Cash in Hand, see its own comment
+  // above, so cash still moves for it too). Munshi is excluded entirely -
+  // see its own comment just above, its "Paid Amount" never touches Cash
+  // in Hand at all, only the Munshi khata and this customer's own due.
+  if (!bank && !grain && paymentMethod !== "munshi" && delta > 0) {
     await recordCashMovement({
       shopId: scope.shopId,
       type: "due_given",
@@ -663,11 +686,19 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
       createdBy,
     });
   }
+  // Munshi's "- Pay Dues"/"Received Amount" runs the opposite direction
+  // from Cash/Labour here - the shop owner treats collecting a due
+  // "through Munshi" as cash actually being handed OUT to/via the Munshi
+  // (drawing down what's held in the Munshi khata), not received into the
+  // till, so both the khata and Cash in Hand go DOWN. See
+  // applyUpdateCustomerDues's own comment on why Munshi's "Paid Amount"
+  // runs opposite too, for the same "money moves through the Munshi, not
+  // the till" reasoning.
   if (paymentMethod === "munshi") {
     await recordCustomerMunshiMovement({
       shopId: scope.shopId,
-      type: "due_recovery",
-      direction: "in",
+      type: "due_given",
+      direction: "out",
       amount,
       note,
       customerName: customer.name,
@@ -676,20 +707,21 @@ async function applySettleCustomerDues(scope, phone, body, createdBy) {
     });
   }
 
-  // Total Recovery / Cash in Hand (Dashboard): a Cash/Labour/Munshi-method
+  // Total Recovery / Cash in Hand (Dashboard): a Cash/Labour-method
   // "Pay Dues" is real cash landing at the till right now, same as a
   // Cash-method order payment (orderController.js's own completeAndSettle
   // branch) - recorded here so the Dashboard's Cash in Hand figure and
   // today's Total Recovery both reflect it. Only when the money did NOT
   // already go into a bank or grain stock above (those move their own
-  // balance INSTEAD of Cash in Hand - Labour/Munshi move it ON TOP of Cash
-  // in Hand, see their own comment above, so cash still moves for them
-  // too).
+  // balance INSTEAD of Cash in Hand - Labour moves it ON TOP of Cash in
+  // Hand, see its own comment above, so cash still moves for it too).
+  // Munshi moves Cash in Hand OUT instead of in - see its own comment
+  // just above.
   if (!bank && !grain) {
     await recordCashMovement({
       shopId: scope.shopId,
-      type: "due_recovery",
-      direction: "in",
+      type: paymentMethod === "munshi" ? "due_given" : "due_recovery",
+      direction: paymentMethod === "munshi" ? "out" : "in",
       amount,
       note: note || `Due payment - ${customer.name || customer.phone}`,
       relatedCustomerName: customer.name,

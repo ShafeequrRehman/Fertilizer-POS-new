@@ -19,7 +19,7 @@ import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Gra
 import { isDesktopApp } from '@/lib/api';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer } from 'lucide-react';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 import OrderDetailModal from '@/components/OrderDetailModal';
 import PurchaseDetailModal from '@/components/PurchaseDetailModal';
@@ -54,6 +54,7 @@ export default function CustomerDuesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '', previousDues: 0 });
+  const [isAddingCustomer, setIsAddingCustomer] = useState(false);
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,6 +162,7 @@ export default function CustomerDuesPage() {
       toast.error('Name and phone are required.');
       return;
     }
+    setIsAddingCustomer(true);
     try {
       const created = await createCustomer(newCustomer);
       if (!created) {
@@ -196,6 +198,8 @@ export default function CustomerDuesPage() {
         }
       }
       toast.error(error instanceof Error ? error.message : 'Could not add customer.');
+    } finally {
+      setIsAddingCustomer(false);
     }
   };
 
@@ -211,7 +215,16 @@ export default function CustomerDuesPage() {
   const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
-    const nextPreviousDues = (customer.previousDues || 0) + amount;
+    // Munshi is the one payment method where "+ Paid Amount" runs
+    // backwards from every other method: the shop owner treats a
+    // Munshi-routed "Paid Amount" as the customer's due being cleared
+    // THROUGH the Munshi (who holds the money on the shop's behalf, not
+    // handed over at the till) - see customerController.applyUpdateCustomerDues's
+    // own comment on this. So it lowers previousDues instead of raising
+    // it, the mirror image of every other method here.
+    const nextPreviousDues = payment?.method === 'munshi'
+      ? (customer.previousDues || 0) - amount
+      : (customer.previousDues || 0) + amount;
 
     try {
       const updated = await updateCustomerDues(phone, nextPreviousDues, note, payment);
@@ -450,8 +463,8 @@ export default function CustomerDuesPage() {
               className="p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold outline-none focus:ring-2 focus:ring-indigo-500" 
             />
           </div>
-          <button onClick={handleAddCustomer} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700">
-            <Save size={16} /> Save Customer
+          <button onClick={handleAddCustomer} disabled={isAddingCustomer} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed">
+            {isAddingCustomer ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} {isAddingCustomer ? 'Saving...' : 'Save Customer'}
           </button>
         </div>
       )}
@@ -1289,9 +1302,9 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
               if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
-            className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
+            className="flex-1 flex items-center justify-center gap-1.5 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
           >
-            {saving ? 'Saving...' : '+ Paid Amount'}
+            {saving ? <Loader2 size={14} className="animate-spin" /> : null} {saving ? 'Saving...' : '+ Paid Amount'}
           </button>
           <button
             onClick={async () => {
@@ -1301,10 +1314,10 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
               if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
-            className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
+            className="flex-1 flex items-center justify-center gap-1.5 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
             title={amountValue > totalDue ? `More than the ₨${totalDue} owed - the extra becomes an advance` : 'Record a payment against everything owed'}
           >
-            {saving ? 'Saving...' : '- Received Amount'}
+            {saving ? <Loader2 size={14} className="animate-spin" /> : null} {saving ? 'Saving...' : '- Received Amount'}
           </button>
           <button
             onClick={async () => {
@@ -1316,10 +1329,10 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
               if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
             }}
             disabled={saving || totalDue <= 0 || paymentIncomplete}
-            className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Record a full payment, clearing everything this customer owes"
           >
-            {saving ? '...' : 'Clear'}
+            {saving ? <Loader2 size={14} className="animate-spin" /> : 'Clear'}
           </button>
         </div>
 
