@@ -52,3 +52,5 @@ const cashRegisterSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("CashRegister", cashRegisterSchema);
+module.exports.cashHistorySchema = cashHistorySchema;
+
