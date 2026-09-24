@@ -11,7 +11,6 @@ export const sidebar = {
   accounting: "Accounting",
   purchase: "Purchase",
   "ingredient-stock": "Stock",
-  management: "Customers & HR",
   dues: "Customer Dues",
   ledger: "Ledger",
   bank: "Bank",

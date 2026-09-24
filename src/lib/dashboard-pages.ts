@@ -59,7 +59,6 @@ export const DASHBOARD_PAGES: DashboardPageDef[] = [
   // deliberately excluded from Recipe Management below, matching that
   // role's "Ingredient Stock only" restriction).
   { key: 'ingredient-stock', label: 'Ingredient Stock', href: '/dashboard/ingredient-stock', permission: ['inventory.manage', 'stock.manage'], hotkey: 'F5' },
-  { key: 'management', label: 'Customers & HR', href: '/dashboard/management', permission: 'customers.manage', hotkey: 'F6' },
   { key: 'dues', label: 'Customer Dues', href: '/dashboard/dues', permission: 'dues.manage', hotkey: 'F7' },
   { key: 'ledger', label: 'Ledger', href: '/dashboard/ledger', permission: 'dues.manage', hotkey: 'F8' },
   // The shop's own bank accounts - same dues.manage gate as Dues/Ledger

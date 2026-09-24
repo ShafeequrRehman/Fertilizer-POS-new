@@ -635,7 +635,12 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     ...customer.duesHistory.map((entry) => ({
       key: `manual-${entry.createdAt}-${entry.amount}`,
       date: entry.createdAt,
-      label: entry.type === 'add' ? `+ Rs ${entry.amount} added` : `- Rs ${entry.amount} paid`,
+      // Wording matches the renamed buttons above ('+ Paid Amount' /
+      // '- Received Amount') - an 'add' entry is money the shop PAID
+      // out (increasing what's owed), a 'settle' entry is money the shop
+      // RECEIVED back (paying the balance down). Previously "added"/
+      // "paid" here, which no longer matched those button names.
+      label: entry.type === 'add' ? `+ Rs ${entry.amount} paid` : `- Rs ${entry.amount} received`,
       // Bank-routed entries say so right in the History row - "took/gave
       // via <bank>" - not just on the Bank page's own history (see
       // customerController.js's updateCustomerDues/settleCustomerDues).
