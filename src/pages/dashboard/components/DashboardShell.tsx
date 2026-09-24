@@ -2,10 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, ShoppingCart, BarChart3, Calculator,
-  Package, Users, DollarSign, FileText, Settings, HelpCircle,
+  Package, DollarSign, FileText, Settings, HelpCircle,
   Search, Cloud, MessageCircle, Bell, LogOut, UserCog, BookText,
   Store, Lock, ClipboardList, Wifi, WifiOff, Download, RefreshCcw,
-  Menu, X, Smartphone, Boxes, Landmark
+  Menu, X, Smartphone, Boxes, Landmark, Wheat, HardHat
 } from 'lucide-react';
 import { clearAuthSession, getAuthRole, getAuthShop, hasPermission, hasAnyPermission, isPageEnabled, getIsDashboardHidden } from '@/lib/auth';
 import { DASHBOARD_PAGES } from '@/lib/dashboard-pages';
@@ -33,10 +33,12 @@ const PAGE_ICONS: Record<string, React.ReactNode> = {
   accounting: <Calculator size={18} />,
   purchase: <Package size={18} />,
   'ingredient-stock': <Boxes size={18} />,
-  management: <Users size={18} />,
   dues: <FileText size={18} />,
   ledger: <BookText size={18} />,
   bank: <Landmark size={18} />,
+  'grain-stock': <Wheat size={18} />,
+  'labour-khata': <HardHat size={18} />,
+  'munshi-khata': <UserCog size={18} />,
   record: <ClipboardList size={18} />,
   shifts: <Store size={18} />,
   offline: <Wifi size={18} />,
