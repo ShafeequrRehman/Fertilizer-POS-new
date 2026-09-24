@@ -538,7 +538,28 @@ export function IngredientStockSection({
     }
   }, [purchaseQty, purchaseRate, purchaseTotalInput, purchaseAmountSource]);
 
-  const purchaseTotal = purchaseQty && purchaseRate ? Number(purchaseQty) * Number(purchaseRate) : 0;
+  // The Rate input shown to the Stock Manager is always rounded to 2
+  // decimals for readability (see the sync effect above). That's fine when
+  // Rate is what they actually typed, but when they typed the TOTAL AMOUNT
+  // instead, multiplying Quantity by that rounded-off rate can land a rupee
+  // or two short of the real total they entered (e.g. 305 / 800 = 0.38125,
+  // rounds to 0.38 for display, but 800 x 0.38 = 304, not 305). So the
+  // actual figure used for the bill/Due Amount/submission - purchaseTotal
+  // and purchaseEffectiveRate below - is computed from the FULL-PRECISION
+  // division, not the rounded display value, whenever Total Amount is the
+  // field the Stock Manager is actually typing into. The Rate box itself
+  // keeps showing the friendly rounded number either way.
+  const qtyForCalc = Number(purchaseQty);
+  const purchaseEffectiveRate =
+    purchaseAmountSource === 'total' && qtyForCalc > 0 && purchaseTotalInput !== ""
+      ? Number(purchaseTotalInput) / qtyForCalc
+      : Number(purchaseRate);
+  const purchaseTotal =
+    purchaseAmountSource === 'total' && purchaseTotalInput !== ""
+      ? Number(purchaseTotalInput) || 0
+      : purchaseQty && purchaseRate
+        ? Number(purchaseQty) * Number(purchaseRate)
+        : 0;
   // Amount Paid, clamped to what's actually payable on this batch - a
   // blank field reads as "nothing paid yet" (the whole total becomes Due),
   // same default this had before. Due Amount is ALWAYS this derived value,
@@ -548,7 +569,7 @@ export function IngredientStockSection({
 
   async function handleConfirmPurchase(ingredient: Ingredient) {
     const quantity = Number(purchaseQty);
-    const rate = Number(purchaseRate);
+    const rate = purchaseEffectiveRate;
     if (!quantity || quantity <= 0) {
       popup({ tone: "error", title: t('ingredientStock.toasts.missingQuantityTitle'), message: t('ingredientStock.toasts.quantityGreaterThanZero') });
       return;

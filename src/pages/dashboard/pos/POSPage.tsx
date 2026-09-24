@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { AlertCircle, Banknote, Barcode, CreditCard, Grid, List, Minus, Plus, Search, ShoppingBag, Trash2, UserPlus, Wallet } from 'lucide-react';
-import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchOrders, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
+import { ApiError, checkPendingOrder, claimKitchenPrint, createOrder, fetchCustomerSearch, fetchIngredients, fetchOrders, fetchProducts, fetchWaiters, isAuthenticated, updateCustomer, sendWhatsappMessage, openShopSession } from '@/lib/pos-api';
 import { CartItem, Customer, OrderFormData, OrderPayload, Product, Waiter } from '@/lib/pos-types';
 import { resolveProductImage } from '@/lib/food-images';
 import { getStoreSettings } from '@/lib/pos-settings';
@@ -57,6 +57,18 @@ export default function POSPage() {
   const [isOpeningShop, setIsOpeningShop] = useState(false);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [products, setProducts] = useState<Product[]>([]);
+  // Stock-Card Number Fix: the Stock page tracks raw ingredient inventory
+  // (Ingredient.currentStock, moved by Log Purchase) completely separately
+  // from a POS Product's own `stock` field (moved by restocking/selling the
+  // product itself) - two different collections that happen to often share
+  // the same name (a shop buys "Urea" as an ingredient and also sells a
+  // "Urea" product). The shop owner expects the number on the POS card to
+  // match whatever the Stock page shows for that same name, so this maps
+  // ingredient name (trimmed/lowercased) -> currentStock, and the POS card
+  // badge below prefers this figure over the product's own `stock` whenever
+  // a same-named ingredient exists - display only, doesn't touch either
+  // record's real stock-tracking/decrement logic.
+  const [ingredientStockByName, setIngredientStockByName] = useState<Record<string, number>>({});
   const [waiters, setWaiters] = useState<Waiter[]>([]);
   const [activeCategory, setActiveCategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
@@ -294,6 +306,24 @@ export default function POSPage() {
       }
     }
     void loadProducts();
+  }, [isOnline]);
+
+  useEffect(() => {
+    async function loadIngredientStock() {
+      try {
+        const ingredients = await fetchIngredients();
+        const next: Record<string, number> = {};
+        (ingredients ?? []).forEach((ingredient) => {
+          next[ingredient.name.trim().toLowerCase()] = ingredient.currentStock;
+        });
+        setIngredientStockByName(next);
+      } catch (error) {
+        console.error('Failed to load ingredient stock for POS cards:', error);
+        // Leave the last-known map in place - the cards just fall back to
+        // each product's own stock figure until the next successful load.
+      }
+    }
+    void loadIngredientStock();
   }, [isOnline]);
 
   // The hidden auto-print iframe (see printReadyUrl below) loads
@@ -1432,6 +1462,8 @@ export default function POSPage() {
               const hasVariations = group.variations.length > 1;
               const cheapestPrice = Math.min(...group.variations.map((v) => v.price));
               const totalStock = group.variations.reduce((sum, v) => sum + (v.stock || 0), 0);
+              const matchingIngredientStock = ingredientStockByName[group.name.trim().toLowerCase()];
+              const displayStock = matchingIngredientStock !== undefined ? matchingIngredientStock : totalStock;
               // Keyboard Shortcuts - grid navigation: a visible ring around
               // whichever card the Arrow keys currently point to (see the
               // POS-local keydown effect above) - Space adds this exact
@@ -1450,8 +1482,8 @@ export default function POSPage() {
                         on the card, without opening it. Replaces the old
                         Pending-order and Product Code/"null" badges that
                         used to occupy these corners. */}
-                    <span className="absolute right-1 top-1 rounded-full bg-[#D6E332] px-1.5 py-0.5 text-[8px] font-black leading-none text-gray-900 shadow-sm" title={t('pos.stockBadgeTooltip', { count: totalStock })}>
-                      {totalStock}
+                    <span className="absolute right-1 top-1 rounded-full bg-[#D6E332] px-1.5 py-0.5 text-[8px] font-black leading-none text-gray-900 shadow-sm" title={t('pos.stockBadgeTooltip', { count: displayStock })}>
+                      {displayStock}
                     </span>
                   </div>
                   <div className={`flex flex-col justify-between overflow-hidden ${viewMode === 'list' ? 'flex-1 min-w-0' : 'w-full flex-1'}`}>
