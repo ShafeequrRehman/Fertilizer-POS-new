@@ -215,14 +215,15 @@ export default function CustomerDuesPage() {
   const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
-    // Munshi is the one payment method where "+ Paid Amount" runs
+    // Labour/Munshi are the payment methods where "+ Paid Amount" runs
     // backwards from every other method: the shop owner treats a
-    // Munshi-routed "Paid Amount" as the customer's due being cleared
-    // THROUGH the Munshi (who holds the money on the shop's behalf, not
-    // handed over at the till) - see customerController.applyUpdateCustomerDues's
-    // own comment on this. So it lowers previousDues instead of raising
-    // it, the mirror image of every other method here.
-    const nextPreviousDues = payment?.method === 'munshi'
+    // Labour/Munshi-routed "Paid Amount" as the customer's due being
+    // cleared THROUGH that khata (which holds the money on the shop's
+    // behalf, not handed over at the till) - see
+    // customerController.applyUpdateCustomerDues's own comment on this.
+    // So it lowers previousDues instead of raising it, the mirror image
+    // of every other method here.
+    const nextPreviousDues = payment?.method === 'munshi' || payment?.method === 'labour'
       ? (customer.previousDues || 0) - amount
       : (customer.previousDues || 0) + amount;
 
