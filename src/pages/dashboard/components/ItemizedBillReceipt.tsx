@@ -17,7 +17,12 @@ import { amountInWords } from '@/lib/number-to-words';
 export default function ItemizedBillReceipt({
   order,
   logoSrc,
-  previousDues = 0,
+  // Renamed (not removed) - see the removed Due/Arrears block below and
+  // ThermalReceipt.tsx's matching comment: the shop owner asked for this
+  // bill to show only the payment made against it, never a running
+  // arrears/account-balance figure, so this is unused now but kept as a
+  // prop so callers don't need touching.
+  previousDues: _previousDues = 0,
 }: {
   order: SavedOrder;
   logoSrc?: string | null;
@@ -43,7 +48,6 @@ export default function ItemizedBillReceipt({
   const discountAmount = order.discount?.amount || 0;
   const billTotal = order.total ?? Math.max(subtotal + scAmount - discountAmount, 0);
   const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
-  const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
   // Change-Return Calculation - see ThermalReceipt.tsx's matching comment;
   // same idea here, just laid out to match this template's own style.
   const cashReceived = order.cashReceived || 0;
@@ -192,7 +196,7 @@ export default function ItemizedBillReceipt({
         <span className="pr-[1mm]">{billTotal.toFixed(0)}</span>
       </div>
 
-      {(amountTendered !== undefined || cashReceived > 0 || dueAmount > 0 || previousDues > 0) && (
+      {(amountTendered !== undefined || cashReceived > 0) && (
         <div className="mt-2 space-y-0.5">
           {/* Change-Return Calculation: the exact Total Bill / Cash
               Tendered-Received / Change Returned rows, same as a standard
@@ -218,29 +222,6 @@ export default function ItemizedBillReceipt({
             </>
           ) : (
             amountTendered !== undefined && <p>Amount Tendered: {amountTendered.toFixed(0)}</p>
-          )}
-          {dueAmount > 0 && <p>Due: {dueAmount.toFixed(0)}</p>}
-          {previousDues > 0 && (
-            // Full arrears breakdown - only for a customer who actually
-            // has previous dues (see this component's own doc comment on
-            // `previousDues`); a customer with none never sees any of
-            // this, everything else on the receipt stays exactly as it
-            // was.
-            <>
-              <p>Arrears: {previousDues.toFixed(0)}</p>
-              <div className="flex justify-between">
-                <span>Arrears+Inv Balance:</span>
-                <span className="pr-[1mm]">{(previousDues + billTotal).toFixed(0)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Invoice Balance:</span>
-                <span className="pr-[1mm]">{dueAmount.toFixed(0)}</span>
-              </div>
-              <div className="flex justify-between font-bold">
-                <span>Account Balance:</span>
-                <span className="pr-[1mm]">{(previousDues + dueAmount).toFixed(0)}</span>
-              </div>
-            </>
           )}
         </div>
       )}

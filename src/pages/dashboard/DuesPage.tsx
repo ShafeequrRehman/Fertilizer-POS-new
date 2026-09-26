@@ -281,7 +281,7 @@ export default function CustomerDuesPage() {
         const freshCustomer = fresh?.find((c) => c.phone === phone);
         const newestEntry = newestDuesEntry(freshCustomer?.duesHistory);
         if (freshCustomer && newestEntry) {
-          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry, freshCustomer.netBalance);
+          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
         } else {
           printWindow.close();
         }
@@ -306,7 +306,7 @@ export default function CustomerDuesPage() {
           if (printWindow && !printWindow.closed) {
             const newestEntry = newestDuesEntry(patched.duesHistory);
             if (newestEntry) {
-              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry, patched.netBalance);
+              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
             } else {
               printWindow.close();
             }
@@ -348,7 +348,7 @@ export default function CustomerDuesPage() {
         const freshCustomer = fresh?.find((c) => c.phone === phone);
         const newestEntry = newestDuesEntry(freshCustomer?.duesHistory);
         if (freshCustomer && newestEntry) {
-          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry, freshCustomer.netBalance);
+          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
         } else {
           printWindow.close();
         }
@@ -371,7 +371,7 @@ export default function CustomerDuesPage() {
           if (printWindow && !printWindow.closed) {
             const newestEntry = newestDuesEntry(patched.duesHistory);
             if (newestEntry) {
-              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry, patched.netBalance);
+              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
             } else {
               printWindow.close();
             }
@@ -1043,19 +1043,14 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
 
   // Manual "Print" button in History - reuses the same shared builder the
   // auto-print in DuesPage's handleAddManualDue/handleSettlePayment now
-  // calls directly, so both stay in sync from one definition. Passes this
-  // card's current customer.netBalance (the same figure the dashboard's
-  // own "NET OUTSTANDING BALANCE" shows), not entry.balanceAfter - see
-  // writeDuesEntryReceiptToWindow's own comment on why those two numbers
-  // are NOT the same thing, and why printing the latter was the bug the
-  // shop owner reported (slip disagreeing with the dashboard).
+  // calls directly, so both stay in sync from one definition.
   function handlePrintDuesEntry(entry: DuesHistoryEntry) {
     const printWindow = window.open('', '_blank', 'width=380,height=500');
     if (!printWindow) {
       toast.error('Could not open the print window - check your browser\'s popup blocker.');
       return;
     }
-    writeDuesEntryReceiptToWindow(printWindow, customer.name, entry, customer.netBalance);
+    writeDuesEntryReceiptToWindow(printWindow, customer.name, entry);
   }
 
   // Delete-a-manual-dues-entry: the one History row type that never had

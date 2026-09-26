@@ -6,14 +6,18 @@ export default function ThermalReceipt({
   order,
   type,
   logoSrc,
-  previousDues = 0,
+  // Renamed (not removed) - kept as a prop so PrintOrderPage.tsx/
+  // ReceiptPrintPage.tsx don't need their own fetchCustomerOutstanding
+  // call touched, but no longer used to render anything: the shop owner
+  // asked for this receipt to show only the payment made against THIS
+  // bill, never a running arrears/account-balance figure (see the
+  // removed DUE/ARREARS block below, and order-receipt-print.ts's
+  // matching comment on the reprint version of this same slip).
+  previousDues: _previousDues = 0,
 }: {
   order: SavedOrder;
   type: 'kitchen' | 'cashier';
   logoSrc?: string | null;
-  // Dues carried forward from the customer's OTHER unpaid orders, not this
-  // one - passed in by whoever renders this receipt (see PrintOrderPage.tsx
-  // / ReceiptPrintPage.tsx, which fetch it via fetchCustomerOutstanding).
   previousDues?: number;
 }) {
   const [settings, setSettings] = useState(defaultSettings);
@@ -32,7 +36,6 @@ export default function ThermalReceipt({
   const billTotal = order.total ?? itemsTotal;
   const discountAmount = order.discount?.amount || 0;
   const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
-  const dueAmount = Math.max(billTotal - (amountTendered ?? 0), 0);
   // Change-Return Calculation: order.cashReceived is the raw cash the
   // customer actually handed over (see backend/models/Order.js's own
   // comment) - independent of paidAmount/amountTendered above, which is
@@ -234,31 +237,6 @@ export default function ThermalReceipt({
               amountTendered !== undefined && (
                 <p>AMOUNT TENDERED: Rs {amountTendered.toFixed(2)}</p>
               )
-            )}
-            {dueAmount > 0 && (
-              <p>DUE: Rs {dueAmount.toFixed(2)}</p>
-            )}
-            {previousDues > 0 && (
-              // Full arrears breakdown - only for a customer who actually
-              // has previous dues (see this component's own doc comment
-              // on `previousDues`); a customer with none never sees any
-              // of this, everything else on the receipt stays exactly as
-              // it was.
-              <>
-                <p className="mt-1">ARREARS: Rs {previousDues.toFixed(2)}</p>
-                <div className="flex justify-between">
-                  <span>ARREARS+INV BALANCE:</span>
-                  <span className="pr-[1mm]">Rs {(previousDues + billTotal).toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>INVOICE BALANCE:</span>
-                  <span className="pr-[1mm]">Rs {dueAmount.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between font-bold">
-                  <span>ACCOUNT BALANCE:</span>
-                  <span className="pr-[1mm]">Rs {(previousDues + dueAmount).toFixed(2)}</span>
-                </div>
-              </>
             )}
           </div>
         </div>

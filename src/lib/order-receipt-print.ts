@@ -77,15 +77,21 @@ export function buildReceiptShellHtml(title: string, bodyHtml: string, titleSub?
 }
 
 // Same field set/order as ThermalReceipt.tsx's cashier copy (items,
-// discount, total, paid/tendered/change, due, arrears) - see that
-// component's own comments for why each one is computed the way it is;
-// this mirrors it rather than re-deriving its own rules.
-function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
+// discount, total, paid/tendered/change) - see that component's own
+// comments for why each one is computed the way it is; this mirrors it
+// rather than re-deriving its own rules.
+//
+// Deliberately NOT showing any remaining/outstanding balance figure (no
+// DUE, no arrears, no overall account balance) - the shop owner asked for
+// this slip to show only the payment actually made against THIS bill
+// (AMOUNT TENDERED / CASH TENDERED-RECEIVED / CHANGE RETURNED below),
+// never a running total. See ThermalReceipt.tsx's matching comment - the
+// live checkout receipt got the identical change for the same reason.
+function buildOrderReceiptBodyHtml(order: SavedOrder) {
   const itemsTotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const billTotal = order.total ?? itemsTotal;
   const discountAmount = order.discount?.amount || 0;
   const amountTendered = order.paidAmount !== undefined ? Math.min(order.paidAmount, billTotal) : undefined;
-  const dueAmount = Math.max(billTotal - (amountTendered ?? 0), 0);
   const cashReceived = order.cashReceived || 0;
   const changeReturned = Math.max(cashReceived - billTotal, 0);
   const date = order.createdAt ? new Date(order.createdAt) : null;
@@ -126,25 +132,6 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
       <div class="row"><span>CASH TENDERED/RECEIVED:</span><span>Rs ${cashReceived.toFixed(2)}</span></div>
       <div class="row bold"><span>CHANGE RETURNED:</span><span>Rs ${changeReturned.toFixed(2)}</span></div>
     ` : amountTendered !== undefined ? `<p>AMOUNT TENDERED: Rs ${amountTendered.toFixed(2)}</p>` : ''}
-    ${dueAmount > 0 ? `<p>DUE (THIS ORDER): Rs ${dueAmount.toFixed(2)}</p>` : ''}
-    ${previousDues !== 0 ? `<p>OTHER DUES/ADVANCE: Rs ${previousDues.toFixed(2)}</p>` : ''}
-    <div class="dashed"></div>
-    ${(() => {
-      // Same Due (customer owes the shop)/Advance (shop owes the
-      // customer) convention DuesPage.tsx's own Dues Entry slip and Net
-      // Outstanding Balance label use - this is the customer's WHOLE
-      // account balance (this order's own remaining PLUS whatever they
-      // separately owe/are owed), not just this one order, so a cashier
-      // reprinting an old receipt sees the same "how do we stand overall"
-      // figure the Dues Entry slip already gives.
-      const overallBalance = previousDues + dueAmount;
-      const label = overallBalance > 0
-        ? `Due: Rs ${overallBalance.toFixed(2)}`
-        : overallBalance < 0
-          ? `Advance: Rs ${Math.abs(overallBalance).toFixed(2)}`
-          : 'Settled';
-      return `<div class="row bold"><span>ACCOUNT BALANCE:</span><span>${label}</span></div>`;
-    })()}
   `;
 }
 
@@ -156,29 +143,16 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
 // and the manual "Print" button in History both render from one
 // definition.
 //
-// `netBalance` - NOT entry.balanceAfter - is what gets printed as
-// "BALANCE AFTER" below. entry.balanceAfter is only ever the manual
-// previousDues ledger figure (see backend's applyUpdateCustomerDues/
-// applySettleCustomerDues - both literally store `balanceAfter:
-// previousDues`, by design, for a separate Dues Statement reconciliation
-// feature that deliberately nets against orders at read time instead).
-// It quietly diverges from the customer's real, on-screen "NET
-// OUTSTANDING BALANCE" (LedgerCustomer.netBalance - totalOrderBalance +
-// previousDues, minus totalPurchaseBalance) the moment this customer has
-// ANY order-linked due or linked-purchase balance - which is exactly
-// what the shop owner reported: the dashboard card was right, the slip
-// printed a different, smaller/wrong-looking number. Every caller now
-// passes the customer's actual current netBalance instead, so the slip
-// always matches the same figure the dashboard shows.
-export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName: string, entry: DuesHistoryEntry, netBalance: number) {
+// Deliberately shows ONLY the payment itself - the amount and which
+// method it moved through (Cash/Bank/Grain/Labour/Munshi) - and never a
+// balance total. This used to also print a "BALANCE AFTER" line (first
+// entry.balanceAfter, the raw previousDues-only ledger figure, then
+// later the customer's real netBalance once that mismatch was found and
+// fixed) - the shop owner then asked for no balance figure here at all,
+// only the transaction, so that line is gone entirely rather than fixed
+// again.
+export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName: string, entry: DuesHistoryEntry) {
   const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-  // Same Due (red, they owe the shop)/Advance (green, shop owes them)
-  // convention as DuesPage.tsx's own Net Outstanding Balance label.
-  const balanceLabel = netBalance > 0
-    ? `Due: Rs ${netBalance}`
-    : netBalance < 0
-      ? `Advance: Rs ${Math.abs(netBalance)}`
-      : 'Settled';
   // Same "+ Rs X paid"/"- Rs X received" wording DuesPage.tsx's own
   // History row uses for this exact entry.type.
   const actionLabel = entry.type === 'add' ? 'PAID' : 'RECEIVED';
@@ -197,7 +171,6 @@ export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName:
     <div class="dashed"></div>
     <div class="row bold"><span>${actionLabel}:</span><span>Rs ${entry.amount}</span></div>
     <p>VIA: ${paymentMethodLabel}</p>
-    <div class="row bold"><span>BALANCE AFTER:</span><span>${balanceLabel}</span></div>
     <div class="dashed"></div>
     <p>NOTE: ${entry.note || 'No note'}</p>
     <p>BY: ${entry.createdBy || '—'}</p>
@@ -237,7 +210,6 @@ export function writePurchaseReceiptToWindow(printWindow: Window, purchase: Purc
     <div class="row"><span>INGREDIENT:</span><span>${purchase.ingredientName}</span></div>
     <div class="row"><span>QUANTITY:</span><span>${purchase.quantity} ${purchase.unit}</span></div>
     <div class="row"><span>PAID:</span><span>Rs ${purchase.paidAmount ?? 0}</span></div>
-    <div class="row"><span>REMAINING:</span><span>Rs ${purchase.remainingAmount ?? 0}</span></div>
     <div class="dashed"></div>
     <div class="row bold"><span>TOTAL:</span><span>Rs ${purchase.totalAmount}</span></div>
   `;
@@ -252,9 +224,17 @@ export function writePurchaseReceiptToWindow(printWindow: Window, purchase: Purc
 // Callers open the window THEMSELVES, synchronously at click time (see
 // each call site's own comment) so the popup blocker never gets a chance
 // to kill it while the order/previousDues data is still being fetched.
-export function writeOrderReceiptToWindow(printWindow: Window, order: SavedOrder, previousDues: number) {
+//
+// `_previousDues` is intentionally unused now - see
+// buildOrderReceiptBodyHtml's own comment on why this slip no longer
+// shows any balance figure. Kept as a parameter (not removed) purely so
+// every existing call site (DuesPage.tsx/RecordPage.tsx/
+// CompleteOrderModal.tsx, which still fetch it for other reasons) keeps
+// working unchanged - only its name changed, to satisfy the unused-var
+// lint rule.
+export function writeOrderReceiptToWindow(printWindow: Window, order: SavedOrder, _previousDues: number) {
   const orderNumber = String(order.dailyOrderNumber ?? order.id.slice(-3)).padStart(3, '0');
-  const bodyHtml = buildOrderReceiptBodyHtml(order, previousDues);
+  const bodyHtml = buildOrderReceiptBodyHtml(order);
   printWindow.document.open();
   printWindow.document.write(buildReceiptShellHtml('Order No.', bodyHtml, orderNumber));
   printWindow.document.close();
