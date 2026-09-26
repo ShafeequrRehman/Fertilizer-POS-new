@@ -833,7 +833,6 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   const [viewOrder, setViewOrder] = useState<SavedOrder | null>(null);
   const [viewPurchase, setViewPurchase] = useState<LedgerPurchase | null>(null);
   const [viewDuesEntry, setViewDuesEntry] = useState<DuesHistoryEntry | null>(null);
-  const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set());
 
   function setBusy(key: string, busy: boolean) {
@@ -856,12 +855,23 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     }
   }
 
-  // Same hidden-iframe auto-print page RecordPage.tsx's own
-  // printCustomerReceipt uses for its Print button - this page has no
-  // counter-printer/Electron context of its own, so it always goes
-  // through that page rather than trying to duplicate the direct-IPC path.
+  // Opens the Manual Print Center page (same page a Complete Order's own
+  // "Print Receipt" button uses) in a real, visible new tab instead of a
+  // hidden iframe - the hidden-iframe auto-print route (setPrintReadyUrl)
+  // this used to go through never reliably fired window.print() from here
+  // or from RecordPage.tsx's own row Print button (the shop owner
+  // confirmed neither ever produced a slip), even though the exact same
+  // mechanism happens to work from inside SalesPage.tsx. Rather than
+  // chase why a hidden/display:none iframe's print call is unreliable, this
+  // reuses the one path already proven to work everywhere: a real,
+  // visible tab with `autoPrint=true` in the URL, so PrintOrderPage's own
+  // effect calls window.print() the instant the order loads - same as
+  // manually opening this same link and clicking Print yourself.
   function handlePrintOrder(orderId: string) {
-    setPrintReadyUrl(`/dashboard/sales/print/${orderId}?auto=true&type=cashier`);
+    const printWindow = window.open(`/dashboard/sales/print/${orderId}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+    if (!printWindow) {
+      toast.error('Could not open the print window - check your browser\'s popup blocker.');
+    }
   }
 
   // Direct-cancel-no-popup, same as RecordPage.tsx's own handleDeleteOrder
@@ -1013,11 +1023,31 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       : entry.balanceAfter < 0
         ? `Advance: Rs ${Math.abs(entry.balanceAfter)}`
         : 'Settled';
+    // Same "+ Rs X paid"/"- Rs X received" wording the on-screen History
+    // row already uses for this exact entry.type (see historyEntries'
+    // own comment above: 'add' = money the shop PAID out, 'settle' =
+    // money the shop RECEIVED back) - the slip used to say "DUES ADDED"/
+    // "DUES PAID" instead, which didn't match that on-screen wording at
+    // all and read backwards to the shop owner.
+    const actionLabel = entry.type === 'add' ? 'PAID' : 'RECEIVED';
+    // Same via-<method> phrasing as historyEntries' own `detail` field
+    // above - the slip previously never said how the payment moved
+    // (cash/bank/grain/labour/munshi) at all.
+    const paymentMethodLabel = entry.paymentMethod === 'bank' && entry.bankName
+      ? `Bank - ${entry.bankName}`
+      : entry.paymentMethod === 'grain' && entry.grainName
+        ? `Grain - ${entry.grainName} (${entry.grainKg || 0}kg)`
+        : entry.paymentMethod === 'labour'
+          ? 'Labour Khata'
+          : entry.paymentMethod === 'munshi'
+            ? 'Munshi Khata'
+            : 'Cash';
     const duesBodyHtml = `
       <p>DATE: ${date}</p>
       <p>CUSTOMER: ${customer.name.toUpperCase()}</p>
       <div class="dashed"></div>
-      <div class="row bold"><span>${entry.type === 'add' ? 'DUES ADDED' : 'DUES PAID'}:</span><span>Rs ${entry.amount}</span></div>
+      <div class="row bold"><span>${actionLabel}:</span><span>Rs ${entry.amount}</span></div>
+      <p>VIA: ${paymentMethodLabel}</p>
       <div class="row bold"><span>BALANCE AFTER:</span><span>${balanceLabel}</span></div>
       <div class="dashed"></div>
       <p>NOTE: ${entry.note || 'No note'}</p>
@@ -1642,7 +1672,6 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       {viewOrder ? <OrderDetailModal order={viewOrder} onClose={() => setViewOrder(null)} /> : null}
       {viewPurchase ? <PurchaseDetailModal purchase={viewPurchase} onClose={() => setViewPurchase(null)} /> : null}
       {viewDuesEntry ? <DuesHistoryDetailModal customerName={customer.name} entry={viewDuesEntry} onClose={() => setViewDuesEntry(null)} /> : null}
-      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title="Auto Print Frame" onLoad={() => window.setTimeout(() => setPrintReadyUrl(null), 4000)} /> : null}
     </div>
   );
 }

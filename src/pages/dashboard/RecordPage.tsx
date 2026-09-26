@@ -37,7 +37,14 @@ type ElectronWindow = Window & typeof globalThis & {
 // immediately if one's configured, otherwise opens the Manual Print
 // Center page. A free function (not a hook) since CompleteOrderModal is
 // the only place in this file that ever needs it.
-function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: ToastLike, setPrintReadyUrl: (url: string | null) => void) {
+// Fallback (non-Electron-counter-printer) path opens the Manual Print
+// Center in a real, visible new tab instead of the old hidden-iframe
+// auto-print route - that hidden iframe never reliably fired
+// window.print() from this row's Print button (the shop owner confirmed
+// no slip ever came out), so this reuses the one path already proven to
+// work: a real tab with autoPrint=true, same as DuesPage.tsx's own
+// handlePrintOrder fix for the exact same symptom.
+function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: ToastLike) {
   const settings = getStoreSettings();
   const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
   if (isElectron && settings && settings.counterPrinter) {
@@ -53,10 +60,12 @@ function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: Toa
         toast,
       );
     } catch {
-      setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+      const printWindow = window.open(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+      if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
     }
   } else {
-    setPrintReadyUrl(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`);
+    const printWindow = window.open(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+    if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
   }
 }
 
@@ -1297,7 +1306,6 @@ export default function RecordPage() {
                 onDelete={() => void handleDeleteOrder(order)}
                 deleting={deletingOrderIds.has(order.id)}
                 toast={toast}
-                setPrintReadyUrl={setPrintReadyUrl}
               />
             ))}
           </div>
@@ -1352,7 +1360,6 @@ function RecordRow({
   onDelete,
   deleting,
   toast,
-  setPrintReadyUrl,
 }: {
   order: SavedOrder;
   canEdit: boolean;
@@ -1362,7 +1369,6 @@ function RecordRow({
   onDelete: () => void;
   deleting: boolean;
   toast: ToastLike;
-  setPrintReadyUrl: (url: string | null) => void;
 }) {
   const { t } = useLanguage();
   const time = new Date(order.createdAt).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' });
@@ -1436,7 +1442,7 @@ function RecordRow({
           // print something this till can already print itself. Manual
           // Print Center is still what opens as the fallback when there's
           // no configured printer / this isn't the Electron app.
-          onClick={() => printCustomerReceipt(order, 0, toast, setPrintReadyUrl)}
+          onClick={() => printCustomerReceipt(order, 0, toast)}
           title={t('record.actions.printReceiptTitle')}
           className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
         >
