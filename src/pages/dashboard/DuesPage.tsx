@@ -19,7 +19,7 @@ import {
 import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain, DuesPaymentOption } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
 import { getStoreSettings } from '@/lib/pos-settings';
-import { writeOrderReceiptToWindow } from '@/lib/order-receipt-print';
+import { writeOrderReceiptToWindow, writePurchaseReceiptToWindow } from '@/lib/order-receipt-print';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
@@ -990,24 +990,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       toast.error('Could not open the print window - check your browser\'s popup blocker.');
       return;
     }
-    const purchaseDate = new Date(purchase.purchaseDate).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    const purchaseBodyHtml = `
-      <p>DATE: ${purchaseDate}</p>
-      <p>ORDER NO: ${purchase.purchaseOrderNumber}</p>
-      <p>SUPPLIER: ${customer.name.toUpperCase()}</p>
-      ${purchase.status === 'cancelled' ? '<p style="font-weight:800">CANCELLED PURCHASE</p>' : ''}
-      <div class="dashed"></div>
-      <div class="row"><span>INGREDIENT:</span><span>${purchase.ingredientName}</span></div>
-      <div class="row"><span>QUANTITY:</span><span>${purchase.quantity} ${purchase.unit}</span></div>
-      <div class="row"><span>PAID:</span><span>Rs ${purchase.paidAmount ?? 0}</span></div>
-      <div class="row"><span>REMAINING:</span><span>Rs ${purchase.remainingAmount ?? 0}</span></div>
-      <div class="dashed"></div>
-      <div class="row bold"><span>TOTAL:</span><span>Rs ${purchase.totalAmount}</span></div>
-    `;
-    printWindow.document.write(buildReceiptHtml('Purchase Receipt', purchaseBodyHtml));
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+    writePurchaseReceiptToWindow(printWindow, purchase, customer.name);
   }
 
   // Same instant direct-cancel as handleDeleteOrderClick above, just

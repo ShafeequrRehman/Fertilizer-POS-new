@@ -27,6 +27,7 @@ import { getIngredientsCache } from "@/lib/local-hub-api";
 import { estimateOfflineIngredients } from "@/lib/offline-ingredient-helpers";
 import { useLanguage } from "@/i18n";
 import { useBackspaceToClose } from "@/lib/keyboard-shortcuts";
+import { writePurchaseReceiptToWindow } from "@/lib/order-receipt-print";
 
 function formatMoney(amount: number) {
   return `Rs ${Math.round(amount).toLocaleString()}`;
@@ -578,6 +579,17 @@ export function IngredientStockSection({
       popup({ tone: "error", title: t('ingredientStock.toasts.missingPurchaseRateTitle'), message: t('ingredientStock.toasts.enterCostPerUnit', { unit: ingredient.unit }) });
       return;
     }
+    // Opened here, synchronously, before the first `await` below - the
+    // same popup-blocker-safe timing every other auto-print in this app
+    // uses (see order-receipt-print.ts's own comment) - the shop owner
+    // asked for a slip to print the instant a purchase is confirmed, not
+    // as a separate manual step.
+    const printWindow = window.open('', '_blank', 'width=420,height=600');
+    if (!printWindow) {
+      popup({ tone: "error", title: t('ingredientStock.toasts.logPurchaseFailedTitle'), message: "Could not open the print window - check your browser's popup blocker." });
+    } else {
+      printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+    }
     try {
       const result = await createIngredientPurchase({
         ingredientId: ingredient.id,
@@ -610,9 +622,15 @@ export function IngredientStockSection({
             dueOrPaid,
           }),
         });
+        if (printWindow && !printWindow.closed) {
+          writePurchaseReceiptToWindow(printWindow, result.purchase, result.purchase.companyName);
+        }
+      } else if (printWindow && !printWindow.closed) {
+        printWindow.close();
       }
       resetPurchaseForm();
     } catch (error) {
+      if (printWindow && !printWindow.closed) printWindow.close();
       popup({ tone: "error", title: t('ingredientStock.toasts.logPurchaseFailedTitle'), message: error instanceof Error ? error.message : t('ingredientStock.toasts.logPurchaseFailedMessage') });
     }
   }

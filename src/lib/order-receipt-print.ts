@@ -135,6 +135,45 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
   `;
 }
 
+// Same shell/print technique, for an ingredient purchase batch (Log
+// Purchase on the Stock page, or a reprint of one from Customer Dues'
+// History) - a minimal duck-typed shape since callers pass either an
+// IngredientPurchase or a LedgerPurchase, which already share every field
+// this needs.
+interface PurchaseReceiptData {
+  purchaseOrderNumber: string;
+  purchaseDate: string;
+  status?: string;
+  ingredientName: string;
+  quantity: number;
+  unit: string;
+  paidAmount?: number;
+  remainingAmount?: number;
+  totalAmount: number;
+}
+
+export function writePurchaseReceiptToWindow(printWindow: Window, purchase: PurchaseReceiptData, supplierName: string) {
+  const purchaseDate = new Date(purchase.purchaseDate).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const bodyHtml = `
+    <p>DATE: ${purchaseDate}</p>
+    <p>ORDER NO: ${purchase.purchaseOrderNumber}</p>
+    ${supplierName ? `<p>SUPPLIER: ${supplierName.toUpperCase()}</p>` : ''}
+    ${purchase.status === 'cancelled' ? '<p style="font-weight:800">CANCELLED PURCHASE</p>' : ''}
+    <div class="dashed"></div>
+    <div class="row"><span>INGREDIENT:</span><span>${purchase.ingredientName}</span></div>
+    <div class="row"><span>QUANTITY:</span><span>${purchase.quantity} ${purchase.unit}</span></div>
+    <div class="row"><span>PAID:</span><span>Rs ${purchase.paidAmount ?? 0}</span></div>
+    <div class="row"><span>REMAINING:</span><span>Rs ${purchase.remainingAmount ?? 0}</span></div>
+    <div class="dashed"></div>
+    <div class="row bold"><span>TOTAL:</span><span>Rs ${purchase.totalAmount}</span></div>
+  `;
+  printWindow.document.open();
+  printWindow.document.write(buildReceiptShellHtml('Purchase Receipt', bodyHtml));
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.print();
+}
+
 // Writes a full order receipt into an already-open window and prints it.
 // Callers open the window THEMSELVES, synchronously at click time (see
 // each call site's own comment) so the popup blocker never gets a chance
