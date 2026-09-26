@@ -233,6 +233,25 @@ export default function CustomerDuesPage() {
   // a customer between the Pending Dues/All Other Customers sections,
   // which unmounts/remounts that card and would silently orphan a
   // ref-held window (the bug this replaced).
+  // Picks the most-recently-created entry out of a duesHistory array,
+  // regardless of how that array happens to be ordered - the live ledger
+  // fetch (fetchCustomerLedger, via loadCustomers) returns duesHistory
+  // NEWEST FIRST (see customerController.js's ledger response, "newest
+  // first"), while the offline-queued optimistic patch
+  // (queueAddDueOffline/queueSettleDueOffline) appends its new entry at
+  // the END instead - so array position alone isn't a safe way to find
+  // "the entry this action just created" across both paths. This is what
+  // actually broke the very first version of this auto-print fix: it
+  // assumed the newest entry was always last, which printed a random old
+  // entry instead of the one just added whenever it came from the live
+  // ledger fetch.
+  const newestDuesEntry = (history: DuesHistoryEntry[] | undefined): DuesHistoryEntry | undefined => {
+    if (!history || history.length === 0) return undefined;
+    return history.reduce((latest, entry) => (
+      !latest || new Date(entry.createdAt).getTime() > new Date(latest.createdAt).getTime() ? entry : latest
+    ));
+  };
+
   const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
@@ -260,7 +279,7 @@ export default function CustomerDuesPage() {
       toast.success('Dues updated.');
       if (printWindow && !printWindow.closed) {
         const freshCustomer = fresh?.find((c) => c.phone === phone);
-        const newestEntry = freshCustomer?.duesHistory[freshCustomer.duesHistory.length - 1];
+        const newestEntry = newestDuesEntry(freshCustomer?.duesHistory);
         if (freshCustomer && newestEntry) {
           writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
         } else {
@@ -285,7 +304,7 @@ export default function CustomerDuesPage() {
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success('Saved offline - will sync automatically once online.');
           if (printWindow && !printWindow.closed) {
-            const newestEntry = patched.duesHistory[patched.duesHistory.length - 1];
+            const newestEntry = newestDuesEntry(patched.duesHistory);
             if (newestEntry) {
               writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
             } else {
@@ -327,7 +346,7 @@ export default function CustomerDuesPage() {
       toast.success(`₨${result.appliedAmount} recorded.`);
       if (printWindow && !printWindow.closed) {
         const freshCustomer = fresh?.find((c) => c.phone === phone);
-        const newestEntry = freshCustomer?.duesHistory[freshCustomer.duesHistory.length - 1];
+        const newestEntry = newestDuesEntry(freshCustomer?.duesHistory);
         if (freshCustomer && newestEntry) {
           writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
         } else {
@@ -350,7 +369,7 @@ export default function CustomerDuesPage() {
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success(`₨${amount} saved offline - will sync automatically once online.`);
           if (printWindow && !printWindow.closed) {
-            const newestEntry = patched.duesHistory[patched.duesHistory.length - 1];
+            const newestEntry = newestDuesEntry(patched.duesHistory);
             if (newestEntry) {
               writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
             } else {
