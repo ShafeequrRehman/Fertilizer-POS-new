@@ -1002,12 +1002,23 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   // there instead of continuing to feed.
   function writeDuesEntryToWindow(printWindow: Window, entry: DuesHistoryEntry) {
     const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    // Same Due (red, they owe the shop)/Adv (green, shop owes them)
+    // convention as this card's own Net Outstanding Balance label above -
+    // see that label's own comment on entry.balanceAfter/netBalance's
+    // sign. Printing the raw signed number ("Balance After: Rs -9781500")
+    // read as a mistake to the shop owner; spelling out which direction
+    // it goes, in plain Rs, is what the on-screen label already does.
+    const balanceLabel = entry.balanceAfter > 0
+      ? `Due: Rs ${entry.balanceAfter}`
+      : entry.balanceAfter < 0
+        ? `Advance: Rs ${Math.abs(entry.balanceAfter)}`
+        : 'Settled';
     const duesBodyHtml = `
       <p>DATE: ${date}</p>
       <p>CUSTOMER: ${customer.name.toUpperCase()}</p>
       <div class="dashed"></div>
       <div class="row bold"><span>${entry.type === 'add' ? 'DUES ADDED' : 'DUES PAID'}:</span><span>Rs ${entry.amount}</span></div>
-      <div class="row"><span>BALANCE AFTER:</span><span>Rs ${entry.balanceAfter}</span></div>
+      <div class="row bold"><span>BALANCE AFTER:</span><span>${balanceLabel}</span></div>
       <div class="dashed"></div>
       <p>NOTE: ${entry.note || 'No note'}</p>
       <p>BY: ${entry.createdBy || '—'}</p>
