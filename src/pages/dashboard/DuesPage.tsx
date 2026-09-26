@@ -868,7 +868,14 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   // effect calls window.print() the instant the order loads - same as
   // manually opening this same link and clicking Print yourself.
   function handlePrintOrder(orderId: string) {
-    const printWindow = window.open(`/dashboard/sales/print/${orderId}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+    // HashRouter (see main.tsx's own comment on why) means every real
+    // in-app route lives after a "#" - window.open('/dashboard/...')
+    // asks the actual SERVER for that exact path instead of letting
+    // react-router handle it client-side, and the server has no such
+    // route ("Cannot GET /dashboard/sales/print/..."). Every <Link>/
+    // navigate() call in this app goes through react-router so this
+    // never came up until a plain window.open() needed the same route.
+    const printWindow = window.open(`/#/dashboard/sales/print/${orderId}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
     if (!printWindow) {
       toast.error('Could not open the print window - check your browser\'s popup blocker.');
     }

@@ -60,11 +60,15 @@ function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: Toa
         toast,
       );
     } catch {
-      const printWindow = window.open(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+      // HashRouter (see main.tsx's own comment) - every real route lives
+      // after a "#", so window.open needs that prefix too or the server
+      // itself gets asked for the path directly ("Cannot GET /dashboard/
+      // sales/print/...") instead of react-router handling it client-side.
+      const printWindow = window.open(`/#/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
       if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
     }
   } else {
-    const printWindow = window.open(`/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+    const printWindow = window.open(`/#/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
     if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
   }
 }
