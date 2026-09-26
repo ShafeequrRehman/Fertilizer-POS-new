@@ -9,6 +9,7 @@ import {
   sendWhatsappDocument,
   fetchWhatsappStatus,
   fetchOrder,
+  fetchCustomerOutstanding,
   cancelOrder,
   cancelIngredientPurchase,
   deleteDuesHistoryEntry,
@@ -18,6 +19,7 @@ import {
 import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain, DuesPaymentOption } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
 import { getStoreSettings } from '@/lib/pos-settings';
+import { writeOrderReceiptToWindow } from '@/lib/order-receipt-print';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
@@ -867,17 +869,42 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   // visible tab with `autoPrint=true` in the URL, so PrintOrderPage's own
   // effect calls window.print() the instant the order loads - same as
   // manually opening this same link and clicking Print yourself.
-  function handlePrintOrder(orderId: string) {
-    // HashRouter (see main.tsx's own comment on why) means every real
-    // in-app route lives after a "#" - window.open('/dashboard/...')
-    // asks the actual SERVER for that exact path instead of letting
-    // react-router handle it client-side, and the server has no such
-    // route ("Cannot GET /dashboard/sales/print/..."). Every <Link>/
-    // navigate() call in this app goes through react-router so this
-    // never came up until a plain window.open() needed the same route.
-    const printWindow = window.open(`/#/dashboard/sales/print/${orderId}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
+  // Prints the order straight into a plain window instead of navigating
+  // to the full Manual Print Center page (PrintOrderPage.tsx) in a new
+  // tab - that route worked (once the HashRouter "#" was added - see
+  // this function's own earlier fix), but a brand new tab means the
+  // WHOLE app boots from scratch in it first (Redux store, auth, the
+  // "Starting POS System" splash) before the receipt even shows up,
+  // which is not what "click Print, get a slip" should feel like. The
+  // window opens SYNCHRONOUSLY here (a "Loading..." placeholder) so the
+  // popup blocker never gets a chance at it, then gets filled in and
+  // printed the instant the order (and its previous-dues arrears figure)
+  // finish loading - see order-receipt-print.ts's own comment.
+  async function handlePrintOrder(orderId: string) {
+    const printWindow = window.open('', '_blank', 'width=420,height=650');
     if (!printWindow) {
       toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      return;
+    }
+    printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading receipt...</body></html>');
+    try {
+      const order = await fetchOrder(orderId);
+      let previousDues = 0;
+      const phone = order.customer?.phone;
+      if (phone && phone !== '03000000000') {
+        try {
+          const result = await fetchCustomerOutstanding(phone, order.id);
+          previousDues = Number(result?.outstanding ?? 0);
+        } catch {
+          // Not fatal - the receipt still prints, just without the
+          // Arrears block, same as PrintOrderPage.tsx's own fallback.
+        }
+      }
+      if (printWindow.closed) return;
+      writeOrderReceiptToWindow(printWindow, order, previousDues);
+    } catch (error) {
+      if (!printWindow.closed) printWindow.close();
+      toast.error(error instanceof Error ? error.message : 'Could not load this order to print.');
     }
   }
 
@@ -967,6 +994,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     const purchaseBodyHtml = `
       <p>DATE: ${purchaseDate}</p>
       <p>ORDER NO: ${purchase.purchaseOrderNumber}</p>
+      <p>SUPPLIER: ${customer.name.toUpperCase()}</p>
       ${purchase.status === 'cancelled' ? '<p style="font-weight:800">CANCELLED PURCHASE</p>' : ''}
       <div class="dashed"></div>
       <div class="row"><span>INGREDIENT:</span><span>${purchase.ingredientName}</span></div>
@@ -1584,7 +1612,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
                       {entry.viewOrderId ? (
                         <button
                           type="button"
-                          onClick={() => handlePrintOrder(entry.viewOrderId as string)}
+                          onClick={() => void handlePrintOrder(entry.viewOrderId as string)}
                           className="flex items-center gap-1 text-[10px] font-black text-slate-500 hover:text-slate-700"
                           title="Print this order's receipt"
                         >

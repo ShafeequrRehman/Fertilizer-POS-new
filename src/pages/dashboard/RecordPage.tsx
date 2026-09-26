@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '@/i18n';
 import { Link, useNavigate } from 'react-router-dom';
 import { CheckCircle2, Download, Edit3, Eye, Printer, Search, Trash2, WifiOff, X } from 'lucide-react';
-import { cancelOrder, fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
+import { cancelOrder, fetchCustomerOutstanding, fetchOrders, fetchProducts, fetchShopSessionHistory } from '@/lib/pos-api';
+import { writeOrderReceiptToWindow } from '@/lib/order-receipt-print';
 import { SavedOrder, ShopSession, Product } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
 import { hasPermission, getAuthUser } from '@/lib/auth';
@@ -37,14 +38,14 @@ type ElectronWindow = Window & typeof globalThis & {
 // immediately if one's configured, otherwise opens the Manual Print
 // Center page. A free function (not a hook) since CompleteOrderModal is
 // the only place in this file that ever needs it.
-// Fallback (non-Electron-counter-printer) path opens the Manual Print
-// Center in a real, visible new tab instead of the old hidden-iframe
-// auto-print route - that hidden iframe never reliably fired
-// window.print() from this row's Print button (the shop owner confirmed
-// no slip ever came out), so this reuses the one path already proven to
-// work: a real tab with autoPrint=true, same as DuesPage.tsx's own
-// handlePrintOrder fix for the exact same symptom.
-function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: ToastLike) {
+// Fallback (non-Electron-counter-printer) path prints straight into a
+// plain window instead of navigating to the Manual Print Center page in
+// a new tab - that route worked, but a brand new tab means the WHOLE app
+// boots from scratch in it first (Redux store, auth, the "Starting POS
+// System" splash) before the receipt even shows up, which is not what
+// "click Print, get a slip" should feel like. See order-receipt-print.ts's
+// own comment - same fix as DuesPage.tsx's own handlePrintOrder.
+async function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: ToastLike) {
   const settings = getStoreSettings();
   const isElectron = typeof window !== 'undefined' && navigator.userAgent.includes('Electron');
   if (isElectron && settings && settings.counterPrinter) {
@@ -59,18 +60,30 @@ function printCustomerReceipt(order: SavedOrder, customerDue: number, toast: Toa
         'Customer receipt',
         toast,
       );
+      return;
     } catch {
-      // HashRouter (see main.tsx's own comment) - every real route lives
-      // after a "#", so window.open needs that prefix too or the server
-      // itself gets asked for the path directly ("Cannot GET /dashboard/
-      // sales/print/...") instead of react-router handling it client-side.
-      const printWindow = window.open(`/#/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
-      if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      // Falls through to the plain-window path below.
     }
-  } else {
-    const printWindow = window.open(`/#/dashboard/sales/print/${order.id}?auto=true&type=cashier`, '_blank', 'width=420,height=650');
-    if (!printWindow) toast.error('Could not open the print window - check your browser\'s popup blocker.');
   }
+  const printWindow = window.open('', '_blank', 'width=420,height=650');
+  if (!printWindow) {
+    toast.error('Could not open the print window - check your browser\'s popup blocker.');
+    return;
+  }
+  printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading receipt...</body></html>');
+  let previousDues = customerDue;
+  const phone = order.customer?.phone;
+  if (phone && phone !== '03000000000') {
+    try {
+      const result = await fetchCustomerOutstanding(phone, order.id);
+      previousDues = Number(result?.outstanding ?? 0);
+    } catch {
+      // Not fatal - the receipt still prints, just without a refreshed
+      // Arrears figure (falls back to whatever customerDue was passed in).
+    }
+  }
+  if (printWindow.closed) return;
+  writeOrderReceiptToWindow(printWindow, order, previousDues);
 }
 
 // Same reasoning as CancelOrderModal.tsx's own getCancelCategoryLookup -
@@ -1446,7 +1459,7 @@ function RecordRow({
           // print something this till can already print itself. Manual
           // Print Center is still what opens as the fallback when there's
           // no configured printer / this isn't the Electron app.
-          onClick={() => printCustomerReceipt(order, 0, toast)}
+          onClick={() => void printCustomerReceipt(order, 0, toast)}
           title={t('record.actions.printReceiptTitle')}
           className="flex items-center gap-1.5 rounded-full bg-[#F6F7FB] px-3 py-2 text-[11px] font-black text-gray-700 transition hover:bg-gray-100"
         >
