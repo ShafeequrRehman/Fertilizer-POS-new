@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   fetchCustomerLedger,
   createCustomer,
@@ -579,6 +579,20 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Auto-print a receipt right after "+ Paid Amount"/"- Received Amount"/
+  // "Clear" succeeds, instead of making the shop owner go find the entry
+  // in History and click Print separately. The print window has to be
+  // opened SYNCHRONOUSLY inside the button's onClick (before the `await`
+  // below) or the browser's popup blocker silently kills it - by the time
+  // the async update finishes and this component re-renders with the new
+  // entry, we're well outside the "user just clicked something" window
+  // popup blockers require. So pendingPrintWindowRef holds that
+  // pre-opened window, and the effect below watches customer.duesHistory
+  // for the new entry (via a length bump) to fill it in and print once
+  // the real entry - with its real, server-computed balanceAfter - has
+  // actually arrived through the reloaded customer prop.
+  const pendingPrintWindowRef = useRef<Window | null>(null);
+  const previousDuesHistoryLengthRef = useRef(customer.duesHistory.length);
   // Cash vs Bank vs Grain Stock - "+ Add Dues" via Bank/Grain Stock means
   // the shop handed the customer that credit out of the picked bank/grain
   // (its balance goes down); "- Pay Dues"/"Clear" via Bank/Grain Stock
@@ -888,12 +902,20 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       return;
     }
     const purchaseDate = new Date(purchase.purchaseDate).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    // See writeDuesEntryToWindow's own comment on the @page/80mm-width/
+    // auto-height recipe - same endless-blank-feed fix, same reason.
     printWindow.document.write(`<!DOCTYPE html><html><head><title>${purchase.purchaseOrderNumber}</title>
-      <style>body{font-family:sans-serif;padding:24px;color:#111}h1{font-size:18px;margin:0 0 4px}
-      p{margin:2px 0;font-size:13px}table{width:100%;margin-top:12px;border-collapse:collapse}
-      td{padding:4px 0;font-size:13px}td:last-child{text-align:right;font-weight:bold}
-      .total{border-top:1px solid #ccc;margin-top:8px;padding-top:8px;font-size:15px}</style>
+      <style>
+        @page { margin: 0; }
+        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; font-family: sans-serif; color: #111; }
+        .receipt-inner { width: 70mm; margin: 0 auto; padding: 10px 8px; box-sizing: border-box; }
+        h1{font-size:16px;margin:0 0 6px}
+        p{margin:2px 0;font-size:12px}table{width:100%;margin-top:10px;border-collapse:collapse}
+        td{padding:3px 0;font-size:12px}td:last-child{text-align:right;font-weight:bold}
+        .total{border-top:1px solid #ccc;margin-top:6px;padding-top:6px;font-size:13px}
+      </style>
       </head><body>
+      <div class="receipt-inner">
       <h1>${purchase.purchaseOrderNumber}</h1>
       <p>${purchaseDate}</p>
       <p>${purchase.status === 'cancelled' ? 'CANCELLED PURCHASE' : ''}</p>
@@ -904,6 +926,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
         <tr><td>Remaining</td><td>Rs ${purchase.remainingAmount ?? 0}</td></tr>
         <tr class="total"><td>Total</td><td>Rs ${purchase.totalAmount}</td></tr>
       </table>
+      </div>
       </body></html>`);
     printWindow.document.close();
     printWindow.focus();
@@ -929,27 +952,89 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     }
   }
 
-  function handlePrintDuesEntry(entry: DuesHistoryEntry) {
-    const printWindow = window.open('', '_blank', 'width=380,height=500');
-    if (!printWindow) {
-      toast.error('Could not open the print window - check your browser\'s popup blocker.');
-      return;
-    }
+  // Fills an already-open window with this entry's slip and prints it -
+  // split out from handlePrintDuesEntry below so the auto-print effect can
+  // reuse a window it opened earlier (synchronously, at click time - see
+  // pendingPrintWindowRef's own comment) instead of opening a fresh one.
+  //
+  // Thermal-Printer Endless-Feed Fix: this used to have no @page rule and
+  // no fixed width at all, so it inherited whatever paper size the
+  // printer driver last had (often a very tall "continuous" default) -
+  // fine on a normal office printer (just a mostly-blank A4 page), but on
+  // a thermal receipt printer that meant it kept feeding blank roll paper
+  // until it hit that huge default page length instead of stopping right
+  // after the content. Matching the same @page{margin:0}/80mm-wide/
+  // auto-height recipe PrintOrderPage.tsx's own receipt print already
+  // uses (which the shop owner confirmed prints correctly) fixes that -
+  // the page is exactly as tall as the content, so the printer stops
+  // there instead of continuing to feed.
+  function writeDuesEntryToWindow(printWindow: Window, entry: DuesHistoryEntry) {
     const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    printWindow.document.open();
     printWindow.document.write(`<!DOCTYPE html><html><head><title>Dues Entry</title>
-      <style>body{font-family:sans-serif;padding:24px;color:#111}h1{font-size:18px;margin:0 0 4px}
-      p{margin:2px 0;font-size:13px}</style>
+      <style>
+        @page { margin: 0; }
+        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; font-family: sans-serif; color: #111; }
+        .receipt-inner { width: 70mm; margin: 0 auto; padding: 10px 8px; box-sizing: border-box; }
+        h1{font-size:16px;margin:0 0 6px}
+        p{margin:2px 0;font-size:12px}
+      </style>
       </head><body>
+      <div class="receipt-inner">
       <h1>${customer.name}</h1>
       <p>${date}</p>
       <p>${entry.type === 'add' ? 'Dues Added' : 'Dues Paid'}: Rs ${entry.amount}</p>
       <p>Balance After: Rs ${entry.balanceAfter}</p>
       <p>Note: ${entry.note || 'No note'}</p>
       <p>By: ${entry.createdBy || '—'}</p>
+      </div>
       </body></html>`);
     printWindow.document.close();
     printWindow.focus();
     printWindow.print();
+  }
+
+  function handlePrintDuesEntry(entry: DuesHistoryEntry) {
+    const printWindow = window.open('', '_blank', 'width=380,height=500');
+    if (!printWindow) {
+      toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      return;
+    }
+    writeDuesEntryToWindow(printWindow, entry);
+  }
+
+  // See pendingPrintWindowRef's own comment - fires once the customer
+  // prop actually reflects the new dues entry (duesHistory grew by one),
+  // and prints it into whichever window a Paid/Received Amount/Clear
+  // click pre-opened just before its own async call.
+  useEffect(() => {
+    const newLength = customer.duesHistory.length;
+    if (pendingPrintWindowRef.current && newLength > previousDuesHistoryLengthRef.current) {
+      const newest = customer.duesHistory[newLength - 1];
+      if (!pendingPrintWindowRef.current.closed) {
+        writeDuesEntryToWindow(pendingPrintWindowRef.current, newest);
+      }
+      pendingPrintWindowRef.current = null;
+    }
+    previousDuesHistoryLengthRef.current = newLength;
+  }, [customer.duesHistory]);
+
+  // Opens a (momentarily blank) print window RIGHT NOW, synchronously,
+  // still inside the click that's about to kick off an async Paid/
+  // Received Amount/Clear action - see pendingPrintWindowRef's own
+  // comment for why the timing matters. Shows a quick "Preparing..."
+  // placeholder so it doesn't just look broken for the second it takes
+  // the real entry to arrive. Callers must clear pendingPrintWindowRef
+  // (closing this window) if the action ends up failing, since no new
+  // entry will ever arrive to fill it in.
+  function openPendingPrintWindow() {
+    const printWindow = window.open('', '_blank', 'width=380,height=500');
+    if (!printWindow) {
+      toast.error('Could not open the print window - check your browser\'s popup blocker.');
+      return;
+    }
+    printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+    pendingPrintWindowRef.current = printWindow;
   }
 
   // Delete-a-manual-dues-entry: the one History row type that never had
@@ -1297,10 +1382,16 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
         <div className="flex gap-2">
           <button
             onClick={async () => {
+              openPendingPrintWindow();
               setSaving(true);
               const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
+              if (ok) {
+                setAmount(''); setNote(''); setGrainKg('');
+              } else {
+                pendingPrintWindowRef.current?.close();
+                pendingPrintWindowRef.current = null;
+              }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
             className="flex-1 flex items-center justify-center gap-1.5 bg-red-100 hover:bg-red-200 text-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
@@ -1309,10 +1400,16 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
           </button>
           <button
             onClick={async () => {
+              openPendingPrintWindow();
               setSaving(true);
               const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
+              if (ok) {
+                setAmount(''); setNote(''); setGrainKg('');
+              } else {
+                pendingPrintWindowRef.current?.close();
+                pendingPrintWindowRef.current = null;
+              }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
             className="flex-1 flex items-center justify-center gap-1.5 bg-green-100 hover:bg-green-200 text-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-2 rounded-xl font-bold text-xs transition-colors"
@@ -1324,10 +1421,16 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             onClick={async () => {
               const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
               if (!confirmed) return;
+              openPendingPrintWindow();
               setSaving(true);
               const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentOption);
               setSaving(false);
-              if (ok) { setAmount(''); setNote(''); setGrainKg(''); }
+              if (ok) {
+                setAmount(''); setNote(''); setGrainKg('');
+              } else {
+                pendingPrintWindowRef.current?.close();
+                pendingPrintWindowRef.current = null;
+              }
             }}
             disabled={saving || totalDue <= 0 || paymentIncomplete}
             className="px-3 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-xl font-bold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
