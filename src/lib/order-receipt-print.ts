@@ -16,7 +16,7 @@
 // of the same underlying fields for the "reprint an old order later"
 // case, not the primary at-checkout receipt path (which keeps using
 // ThermalReceipt/PrintOrderPage as before, unchanged).
-import { SavedOrder } from '@/lib/pos-types';
+import { SavedOrder, DuesHistoryEntry } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
 
 // Same shop-header/bordered-title-block/footer shell DuesPage.tsx's own
@@ -133,6 +133,52 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
       return `<div class="row bold"><span>ACCOUNT BALANCE:</span><span>${label}</span></div>`;
     })()}
   `;
+}
+
+// Same shell/print technique, for a manual Dues Entry ("+ Paid Amount"/
+// "- Received Amount"/"Clear") - pulled out of DuesPage.tsx so the
+// auto-print that fires right after the API call succeeds (driven from
+// DuesPage's own top-level handlers, which never unmount - see those
+// handlers' own comment on why a per-card ref+effect wasn't reliable)
+// and the manual "Print" button in History both render from one
+// definition.
+export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName: string, entry: DuesHistoryEntry) {
+  const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  // Same Due (red, they owe the shop)/Advance (green, shop owes them)
+  // convention as DuesPage.tsx's own Net Outstanding Balance label.
+  const balanceLabel = entry.balanceAfter > 0
+    ? `Due: Rs ${entry.balanceAfter}`
+    : entry.balanceAfter < 0
+      ? `Advance: Rs ${Math.abs(entry.balanceAfter)}`
+      : 'Settled';
+  // Same "+ Rs X paid"/"- Rs X received" wording DuesPage.tsx's own
+  // History row uses for this exact entry.type.
+  const actionLabel = entry.type === 'add' ? 'PAID' : 'RECEIVED';
+  const paymentMethodLabel = entry.paymentMethod === 'bank' && entry.bankName
+    ? `Bank - ${entry.bankName}`
+    : entry.paymentMethod === 'grain' && entry.grainName
+      ? `Grain - ${entry.grainName} (${entry.grainKg || 0}kg)`
+      : entry.paymentMethod === 'labour'
+        ? 'Labour Khata'
+        : entry.paymentMethod === 'munshi'
+          ? 'Munshi Khata'
+          : 'Cash';
+  const bodyHtml = `
+    <p>DATE: ${date}</p>
+    <p>CUSTOMER: ${customerName.toUpperCase()}</p>
+    <div class="dashed"></div>
+    <div class="row bold"><span>${actionLabel}:</span><span>Rs ${entry.amount}</span></div>
+    <p>VIA: ${paymentMethodLabel}</p>
+    <div class="row bold"><span>BALANCE AFTER:</span><span>${balanceLabel}</span></div>
+    <div class="dashed"></div>
+    <p>NOTE: ${entry.note || 'No note'}</p>
+    <p>BY: ${entry.createdBy || '—'}</p>
+  `;
+  printWindow.document.open();
+  printWindow.document.write(buildReceiptShellHtml('Dues Receipt', bodyHtml));
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.print();
 }
 
 // Same shell/print technique, for an ingredient purchase batch (Log

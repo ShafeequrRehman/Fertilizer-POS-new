@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   fetchCustomerLedger,
   createCustomer,
@@ -18,8 +18,7 @@ import {
 } from '@/lib/pos-api';
 import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain, DuesPaymentOption } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
-import { getStoreSettings } from '@/lib/pos-settings';
-import { writeOrderReceiptToWindow, writePurchaseReceiptToWindow } from '@/lib/order-receipt-print';
+import { writeOrderReceiptToWindow, writePurchaseReceiptToWindow, writeDuesEntryReceiptToWindow } from '@/lib/order-receipt-print';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
@@ -98,9 +97,15 @@ export default function CustomerDuesPage() {
   // of a blank "Loading customers..." screen. The real cloud fetch below
   // still runs whenever possible, refining this with up-to-date numbers
   // and refreshing the cache for next time (pushCurrentCustomersLedgerCache).
-  const loadCustomers = async () => {
+  // Returns the freshly-loaded array (not just painting state) so a
+  // caller that needs the just-arrived data right away - the dues-entry
+  // auto-print below, which needs this customer's real, server-computed
+  // new duesHistory entry - doesn't have to trust the (still-stale-at-
+  // that-point) `customers` closure variable.
+  const loadCustomers = async (): Promise<LedgerCustomer[] | undefined> => {
     setErrorMessage(null);
     let paintedFromCache = false;
+    let latest: LedgerCustomer[] | undefined;
     if (isDesktopApp()) {
       try {
         const cached = await loadCustomersFromLocalHub();
@@ -108,6 +113,7 @@ export default function CustomerDuesPage() {
           setCustomers(cached);
           setLoading(false);
           paintedFromCache = true;
+          latest = cached;
         }
       } catch {
         // Local Hub itself unreachable (rare) - falls through to the
@@ -119,6 +125,7 @@ export default function CustomerDuesPage() {
       const data = await fetchCustomerLedger();
       if (data) {
         setCustomers(data);
+        latest = data;
         if (isDesktopApp()) void pushCurrentCustomersLedgerCache();
       }
     } catch (error) {
@@ -131,6 +138,7 @@ export default function CustomerDuesPage() {
     } finally {
       setLoading(false);
     }
+    return latest;
   };
 
   const loadBanks = async () => {
@@ -215,7 +223,17 @@ export default function CustomerDuesPage() {
   // amount field on a real success, and surfaces a toast either way
   // instead of silently doing nothing on failure (updateCustomerDues
   // throws on any HTTP error).
-  const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
+  // `printWindow`, when given, is a window the caller (CustomerCard's "+
+  // Paid Amount" button) already opened SYNCHRONOUSLY at click time (see
+  // that button's own comment on why the timing matters for popup
+  // blockers). It's filled in and printed here, at the DuesPage level,
+  // once the reload after a successful save has this customer's real,
+  // server-computed new duesHistory entry - never by watching
+  // CustomerCard's own props, since a Paid/Received/Clear action can move
+  // a customer between the Pending Dues/All Other Customers sections,
+  // which unmounts/remounts that card and would silently orphan a
+  // ref-held window (the bug this replaced).
+  const handleAddManualDue = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
     // Labour/Munshi are the payment methods where "+ Paid Amount" runs
@@ -236,10 +254,19 @@ export default function CustomerDuesPage() {
         toast.error('Could not update dues.');
         return false;
       }
-      await loadCustomers();
+      const fresh = await loadCustomers();
       if (payment?.bankId) await loadBanks();
       if (payment?.grainId) await loadGrains();
       toast.success('Dues updated.');
+      if (printWindow && !printWindow.closed) {
+        const freshCustomer = fresh?.find((c) => c.phone === phone);
+        const newestEntry = freshCustomer?.duesHistory[freshCustomer.duesHistory.length - 1];
+        if (freshCustomer && newestEntry) {
+          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
+        } else {
+          printWindow.close();
+        }
+      }
       return true;
     } catch (error) {
       // See handleAddCustomer's own comment on isConnectivityFailure - net
@@ -257,11 +284,20 @@ export default function CustomerDuesPage() {
           });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success('Saved offline - will sync automatically once online.');
+          if (printWindow && !printWindow.closed) {
+            const newestEntry = patched.duesHistory[patched.duesHistory.length - 1];
+            if (newestEntry) {
+              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
+            } else {
+              printWindow.close();
+            }
+          }
           return true;
         } catch {
           // Local Hub itself unreachable too - fall through below.
         }
       }
+      if (printWindow && !printWindow.closed) printWindow.close();
       toast.error(error instanceof Error ? error.message : 'Could not update dues.');
       return false;
     }
@@ -273,7 +309,9 @@ export default function CustomerDuesPage() {
   // Deliberately NOT capped at totalDue any more - a payment can exceed
   // what's currently owed, which leaves the customer in credit (previousDues
   // goes negative, shown as an advance) rather than being silently clipped.
-  const handleSettlePayment = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption): Promise<boolean> => {
+  // See handleAddManualDue's own comment on `printWindow` - same idea,
+  // for "- Received Amount"/"Clear".
+  const handleSettlePayment = async (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null): Promise<boolean> => {
     const customer = customers.find(c => c.phone === phone);
     if (!customer || amount <= 0) return false;
 
@@ -283,10 +321,19 @@ export default function CustomerDuesPage() {
         toast.error('Could not record payment.');
         return false;
       }
-      await loadCustomers();
+      const fresh = await loadCustomers();
       if (payment?.bankId) await loadBanks();
       if (payment?.grainId) await loadGrains();
       toast.success(`₨${result.appliedAmount} recorded.`);
+      if (printWindow && !printWindow.closed) {
+        const freshCustomer = fresh?.find((c) => c.phone === phone);
+        const newestEntry = freshCustomer?.duesHistory[freshCustomer.duesHistory.length - 1];
+        if (freshCustomer && newestEntry) {
+          writeDuesEntryReceiptToWindow(printWindow, freshCustomer.name, newestEntry);
+        } else {
+          printWindow.close();
+        }
+      }
       return true;
     } catch (error) {
       // See handleAddCustomer's own comment on isConnectivityFailure.
@@ -302,11 +349,20 @@ export default function CustomerDuesPage() {
           });
           setCustomers((previous) => previous.map((c) => (c.phone === phone ? patched : c)));
           toast.success(`₨${amount} saved offline - will sync automatically once online.`);
+          if (printWindow && !printWindow.closed) {
+            const newestEntry = patched.duesHistory[patched.duesHistory.length - 1];
+            if (newestEntry) {
+              writeDuesEntryReceiptToWindow(printWindow, patched.name, newestEntry);
+            } else {
+              printWindow.close();
+            }
+          }
           return true;
         } catch {
           // Local Hub itself unreachable too - fall through below.
         }
       }
+      if (printWindow && !printWindow.closed) printWindow.close();
       toast.error(error instanceof Error ? error.message : 'Could not record payment.');
       return false;
     }
@@ -577,25 +633,23 @@ function todayDateInputValue() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], grains: Grain[], onAddManual: (phone: string, amount: number, note: string, payment?: DuesPaymentOption) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, payment?: DuesPaymentOption) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
+function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], grains: Grain[], onAddManual: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
   // Auto-print a receipt right after "+ Paid Amount"/"- Received Amount"/
   // "Clear" succeeds, instead of making the shop owner go find the entry
-  // in History and click Print separately. The print window has to be
-  // opened SYNCHRONOUSLY inside the button's onClick (before the `await`
-  // below) or the browser's popup blocker silently kills it - by the time
-  // the async update finishes and this component re-renders with the new
-  // entry, we're well outside the "user just clicked something" window
-  // popup blockers require. So pendingPrintWindowRef holds that
-  // pre-opened window, and the effect below watches customer.duesHistory
-  // for the new entry (via a length bump) to fill it in and print once
-  // the real entry - with its real, server-computed balanceAfter - has
-  // actually arrived through the reloaded customer prop.
-  const pendingPrintWindowRef = useRef<Window | null>(null);
-  const previousDuesHistoryLengthRef = useRef(customer.duesHistory.length);
+  // in History and click Print separately. The print window is opened
+  // SYNCHRONOUSLY inside each button's own onClick below (before the
+  // `await`) or the browser's popup blocker would silently kill it, then
+  // handed straight to onAddManual/onSettlePayment, which fill it in and
+  // print once the reload after the save actually lands - see
+  // handleAddManualDue's own comment in DuesPage for why that's done at
+  // the DuesPage level rather than here (a Paid/Received/Clear action can
+  // move this card between the Pending Dues/All Other Customers
+  // sections, unmounting/remounting it and orphaning anything a
+  // component-local ref/effect here tried to hold onto).
   // Cash vs Bank vs Grain Stock - "+ Add Dues" via Bank/Grain Stock means
   // the shop handed the customer that credit out of the picked bank/grain
   // (its balance goes down); "- Pay Dues"/"Clear" via Bank/Grain Stock
@@ -936,50 +990,6 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     setViewPurchase(purchase);
   }
 
-  // Shared receipt "shell" - shop header (name/address/contact, same
-  // fields the POS's own Complete Order slip pulls from Settings via
-  // getStoreSettings()) + a bordered title block + whatever body rows the
-  // caller passes in + the same footer branding line every other receipt
-  // in the app already prints. Used so the Dues Entry and Purchase slips
-  // look like they belong to the same till as the Complete Order slip,
-  // instead of the old plain unbranded text dump.
-  function buildReceiptHtml(title: string, bodyHtml: string) {
-    const settings = getStoreSettings();
-    return `<!DOCTYPE html><html><head><title>${title}</title>
-      <style>
-        @page { margin: 0; }
-        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; background: #fff; }
-        .receipt { width: 70mm; margin: 0 auto; padding: 6px 8px 12px; box-sizing: border-box; font-family: 'Courier New', Courier, monospace; color: #000; font-size: 12px; line-height: 15px; }
-        .receipt * { box-sizing: border-box; }
-        .center { text-align: center; }
-        .shop-name { font-size: 18px; line-height: 20px; font-weight: 800; text-transform: uppercase; margin: 0 0 5px; }
-        .title-block { border-top: 4px solid #000; border-bottom: 4px solid #000; padding: 8px 0; margin: 10px 0; text-align: center; }
-        .title-block h2 { font-size: 16px; font-weight: 800; text-transform: uppercase; margin: 0; }
-        .dashed { border-top: 1px dashed #000; margin: 8px 0; }
-        .row { display: flex; justify-content: space-between; gap: 6px; }
-        .row.bold { font-weight: 800; font-size: 13px; }
-        p { margin: 2px 0; }
-      </style>
-      </head><body>
-      <div class="receipt">
-        <div class="center">
-          <p class="shop-name">${settings.receiptHeader || 'Store Name'}</p>
-          ${settings.receiptSubHeader ? `<p>${settings.receiptSubHeader}</p>` : ''}
-          ${settings.receiptAddress ? `<p>${settings.receiptAddress}</p>` : ''}
-          ${settings.receiptContact ? `<p>${settings.receiptContact}</p>` : ''}
-          ${settings.receiptPaymentInfo ? `<p>${settings.receiptPaymentInfo}</p>` : ''}
-        </div>
-        <div class="title-block"><h2>${title}</h2></div>
-        ${bodyHtml}
-        <div class="center" style="margin-top:16px">
-          ${settings.receiptFooterMessage ? `<p style="font-weight:800">${settings.receiptFooterMessage}</p>` : ''}
-          <p>Shafeeq Developer&apos;s Creation</p>
-          <p>03400-586000</p>
-        </div>
-      </div>
-      </body></html>`;
-  }
-
   // No print route/receipt exists for a purchase anywhere in the app yet,
   // so this builds a small printable slip on the fly (same info as
   // PurchaseDetailModal) and hands it straight to the browser's own print
@@ -1012,113 +1022,16 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     }
   }
 
-  // Fills an already-open window with this entry's slip and prints it -
-  // split out from handlePrintDuesEntry below so the auto-print effect can
-  // reuse a window it opened earlier (synchronously, at click time - see
-  // pendingPrintWindowRef's own comment) instead of opening a fresh one.
-  //
-  // Thermal-Printer Endless-Feed Fix: this used to have no @page rule and
-  // no fixed width at all, so it inherited whatever paper size the
-  // printer driver last had (often a very tall "continuous" default) -
-  // fine on a normal office printer (just a mostly-blank A4 page), but on
-  // a thermal receipt printer that meant it kept feeding blank roll paper
-  // until it hit that huge default page length instead of stopping right
-  // after the content. Matching the same @page{margin:0}/80mm-wide/
-  // auto-height recipe PrintOrderPage.tsx's own receipt print already
-  // uses (which the shop owner confirmed prints correctly) fixes that -
-  // the page is exactly as tall as the content, so the printer stops
-  // there instead of continuing to feed.
-  function writeDuesEntryToWindow(printWindow: Window, entry: DuesHistoryEntry) {
-    const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    // Same Due (red, they owe the shop)/Adv (green, shop owes them)
-    // convention as this card's own Net Outstanding Balance label above -
-    // see that label's own comment on entry.balanceAfter/netBalance's
-    // sign. Printing the raw signed number ("Balance After: Rs -9781500")
-    // read as a mistake to the shop owner; spelling out which direction
-    // it goes, in plain Rs, is what the on-screen label already does.
-    const balanceLabel = entry.balanceAfter > 0
-      ? `Due: Rs ${entry.balanceAfter}`
-      : entry.balanceAfter < 0
-        ? `Advance: Rs ${Math.abs(entry.balanceAfter)}`
-        : 'Settled';
-    // Same "+ Rs X paid"/"- Rs X received" wording the on-screen History
-    // row already uses for this exact entry.type (see historyEntries'
-    // own comment above: 'add' = money the shop PAID out, 'settle' =
-    // money the shop RECEIVED back) - the slip used to say "DUES ADDED"/
-    // "DUES PAID" instead, which didn't match that on-screen wording at
-    // all and read backwards to the shop owner.
-    const actionLabel = entry.type === 'add' ? 'PAID' : 'RECEIVED';
-    // Same via-<method> phrasing as historyEntries' own `detail` field
-    // above - the slip previously never said how the payment moved
-    // (cash/bank/grain/labour/munshi) at all.
-    const paymentMethodLabel = entry.paymentMethod === 'bank' && entry.bankName
-      ? `Bank - ${entry.bankName}`
-      : entry.paymentMethod === 'grain' && entry.grainName
-        ? `Grain - ${entry.grainName} (${entry.grainKg || 0}kg)`
-        : entry.paymentMethod === 'labour'
-          ? 'Labour Khata'
-          : entry.paymentMethod === 'munshi'
-            ? 'Munshi Khata'
-            : 'Cash';
-    const duesBodyHtml = `
-      <p>DATE: ${date}</p>
-      <p>CUSTOMER: ${customer.name.toUpperCase()}</p>
-      <div class="dashed"></div>
-      <div class="row bold"><span>${actionLabel}:</span><span>Rs ${entry.amount}</span></div>
-      <p>VIA: ${paymentMethodLabel}</p>
-      <div class="row bold"><span>BALANCE AFTER:</span><span>${balanceLabel}</span></div>
-      <div class="dashed"></div>
-      <p>NOTE: ${entry.note || 'No note'}</p>
-      <p>BY: ${entry.createdBy || '—'}</p>
-    `;
-    printWindow.document.open();
-    printWindow.document.write(buildReceiptHtml('Dues Receipt', duesBodyHtml));
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
-  }
-
+  // Manual "Print" button in History - reuses the same shared builder the
+  // auto-print in DuesPage's handleAddManualDue/handleSettlePayment now
+  // calls directly, so both stay in sync from one definition.
   function handlePrintDuesEntry(entry: DuesHistoryEntry) {
     const printWindow = window.open('', '_blank', 'width=380,height=500');
     if (!printWindow) {
       toast.error('Could not open the print window - check your browser\'s popup blocker.');
       return;
     }
-    writeDuesEntryToWindow(printWindow, entry);
-  }
-
-  // See pendingPrintWindowRef's own comment - fires once the customer
-  // prop actually reflects the new dues entry (duesHistory grew by one),
-  // and prints it into whichever window a Paid/Received Amount/Clear
-  // click pre-opened just before its own async call.
-  useEffect(() => {
-    const newLength = customer.duesHistory.length;
-    if (pendingPrintWindowRef.current && newLength > previousDuesHistoryLengthRef.current) {
-      const newest = customer.duesHistory[newLength - 1];
-      if (!pendingPrintWindowRef.current.closed) {
-        writeDuesEntryToWindow(pendingPrintWindowRef.current, newest);
-      }
-      pendingPrintWindowRef.current = null;
-    }
-    previousDuesHistoryLengthRef.current = newLength;
-  }, [customer.duesHistory]);
-
-  // Opens a (momentarily blank) print window RIGHT NOW, synchronously,
-  // still inside the click that's about to kick off an async Paid/
-  // Received Amount/Clear action - see pendingPrintWindowRef's own
-  // comment for why the timing matters. Shows a quick "Preparing..."
-  // placeholder so it doesn't just look broken for the second it takes
-  // the real entry to arrive. Callers must clear pendingPrintWindowRef
-  // (closing this window) if the action ends up failing, since no new
-  // entry will ever arrive to fill it in.
-  function openPendingPrintWindow() {
-    const printWindow = window.open('', '_blank', 'width=380,height=500');
-    if (!printWindow) {
-      toast.error('Could not open the print window - check your browser\'s popup blocker.');
-      return;
-    }
-    printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
-    pendingPrintWindowRef.current = printWindow;
+    writeDuesEntryReceiptToWindow(printWindow, customer.name, entry);
   }
 
   // Delete-a-manual-dues-entry: the one History row type that never had
@@ -1466,15 +1379,24 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
         <div className="flex gap-2">
           <button
             onClick={async () => {
-              openPendingPrintWindow();
+              // Opened synchronously, still inside this click, or the
+              // popup blocker kills it - see the comment above the ref
+              // this replaced. Handed straight to onAddManual, which
+              // fills it in once the reload lands (DuesPage level, so it
+              // survives this card moving sections/unmounting).
+              const printWindow = window.open('', '_blank', 'width=380,height=500');
+              if (printWindow) {
+                printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+              } else {
+                toast.error('Could not open the print window - check your browser\'s popup blocker.');
+              }
               setSaving(true);
-              const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentOption);
+              const ok = await onAddManual(customer.phone, amountValue, note.trim(), paymentOption, printWindow);
               setSaving(false);
               if (ok) {
                 setAmount(''); setNote(''); setGrainKg('');
-              } else {
-                pendingPrintWindowRef.current?.close();
-                pendingPrintWindowRef.current = null;
+              } else if (printWindow && !printWindow.closed) {
+                printWindow.close();
               }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
@@ -1484,15 +1406,19 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
           </button>
           <button
             onClick={async () => {
-              openPendingPrintWindow();
+              const printWindow = window.open('', '_blank', 'width=380,height=500');
+              if (printWindow) {
+                printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+              } else {
+                toast.error('Could not open the print window - check your browser\'s popup blocker.');
+              }
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentOption);
+              const ok = await onSettlePayment(customer.phone, amountValue, note.trim(), paymentOption, printWindow);
               setSaving(false);
               if (ok) {
                 setAmount(''); setNote(''); setGrainKg('');
-              } else {
-                pendingPrintWindowRef.current?.close();
-                pendingPrintWindowRef.current = null;
+              } else if (printWindow && !printWindow.closed) {
+                printWindow.close();
               }
             }}
             disabled={saving || amountValue <= 0 || paymentIncomplete}
@@ -1505,15 +1431,19 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
             onClick={async () => {
               const confirmed = await confirm(`Record a full payment of ₨${totalDue} for this customer?`, { title: 'Clear dues', confirmText: 'Clear', tone: 'danger' });
               if (!confirmed) return;
-              openPendingPrintWindow();
+              const printWindow = window.open('', '_blank', 'width=380,height=500');
+              if (printWindow) {
+                printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+              } else {
+                toast.error('Could not open the print window - check your browser\'s popup blocker.');
+              }
               setSaving(true);
-              const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentOption);
+              const ok = await onSettlePayment(customer.phone, totalDue, note.trim(), paymentOption, printWindow);
               setSaving(false);
               if (ok) {
                 setAmount(''); setNote(''); setGrainKg('');
-              } else {
-                pendingPrintWindowRef.current?.close();
-                pendingPrintWindowRef.current = null;
+              } else if (printWindow && !printWindow.closed) {
+                printWindow.close();
               }
             }}
             disabled={saving || totalDue <= 0 || paymentIncomplete}
