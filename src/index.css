@@ -166,3 +166,20 @@ button:disabled,
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -3px 8px rgba(0, 0, 0, 0.4);
   color: #fff;
 }
+
+/* No up/down increment arrows on any numeric input, app-wide - a click
+   (or even a slightly-too-long keypress-repeat) on those tiny spinner
+   arrows silently bumps a Quantity/Rate/Amount field by 1, which is easy
+   to not notice next to a keyboard-typed value. Typing (or pasting) the
+   exact number, with Enter/Tab to confirm it, is the only input method
+   these fields support now - the value itself is unaffected, this only
+   hides the spinner control. */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

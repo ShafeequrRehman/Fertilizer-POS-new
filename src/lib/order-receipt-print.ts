@@ -18,6 +18,7 @@
 // ThermalReceipt/PrintOrderPage as before, unchanged).
 import { SavedOrder, DuesHistoryEntry } from '@/lib/pos-types';
 import { getStoreSettings } from '@/lib/pos-settings';
+import { PRINT_LOGO_STORAGE_KEY } from '@/lib/print-logo';
 
 // Same shop-header/bordered-title-block/footer shell DuesPage.tsx's own
 // Dues Entry and Purchase receipts use (buildReceiptHtml there) - kept
@@ -25,8 +26,18 @@ import { getStoreSettings } from '@/lib/pos-settings';
 // belongs to the same till. `titleSub`, when given, renders as a large
 // bold line under the title (e.g. the order number) - the same "ORDER
 // NO. / 018" look the live Complete Order receipt already uses.
+//
+// Logo: same uploaded print logo (Settings > Receipt Management) and the
+// same localStorage key (PRINT_LOGO_STORAGE_KEY) the live POS receipt
+// (ThermalReceipt.tsx's cashier copy) already prints centered above the
+// shop name - reading it directly here, rather than threading a logoSrc
+// prop through every one of this shell's callers, so a Dues Entry/
+// Purchase/reprinted-order slip built through this shared shell always
+// matches the live checkout slip's branding without each caller having
+// to remember to pass it.
 export function buildReceiptShellHtml(title: string, bodyHtml: string, titleSub?: string) {
   const settings = getStoreSettings();
+  const logoSrc = typeof window === 'undefined' ? null : window.localStorage.getItem(PRINT_LOGO_STORAGE_KEY);
   return `<!DOCTYPE html><html><head><title>${title}</title>
     <style>
       @page { margin: 0; }
@@ -34,6 +45,7 @@ export function buildReceiptShellHtml(title: string, bodyHtml: string, titleSub?
       .receipt { width: 70mm; margin: 0 auto; padding: 6px 8px 12px; box-sizing: border-box; font-family: 'Courier New', Courier, monospace; color: #000; font-size: 12px; line-height: 15px; }
       .receipt * { box-sizing: border-box; }
       .center { text-align: center; }
+      .logo { max-height: 100px; width: auto; max-width: 220px; object-fit: contain; margin: 0 auto 6px; display: block; }
       .shop-name { font-size: 18px; line-height: 20px; font-weight: 800; text-transform: uppercase; margin: 0 0 5px; }
       .title-block { border-top: 4px solid #000; border-bottom: 4px solid #000; padding: 8px 0; margin: 10px 0; text-align: center; }
       .title-block h2 { font-size: 16px; font-weight: 800; text-transform: uppercase; margin: 0; }
@@ -46,6 +58,7 @@ export function buildReceiptShellHtml(title: string, bodyHtml: string, titleSub?
     </head><body>
     <div class="receipt">
       <div class="center">
+        ${logoSrc ? `<img class="logo" src="${logoSrc}" alt="" />` : ''}
         <p class="shop-name">${settings.receiptHeader || 'Store Name'}</p>
         ${settings.receiptSubHeader ? `<p>${settings.receiptSubHeader}</p>` : ''}
         ${settings.receiptAddress ? `<p>${settings.receiptAddress}</p>` : ''}

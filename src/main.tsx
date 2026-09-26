@@ -7,6 +7,7 @@ import { ToastProvider } from '@/lib/toast';
 import { NotificationProvider } from '@/lib/notifications';
 import { LanguageProvider } from '@/i18n';
 import { installGlobalClickSound } from '@/lib/audio-feedback';
+import { installNumberInputArrowGuard } from '@/lib/disable-number-arrows';
 import './index.css';
 
 // NOTE: './App' is deliberately NOT statically imported up here anymore.
@@ -94,6 +95,10 @@ Promise.all([import('@/store'), import('./App')])
     // own comment on why this needs zero changes to individual
     // button/card components anywhere else in the app.
     installGlobalClickSound();
+
+    // Same idea as installGlobalClickSound above - see
+    // disable-number-arrows.ts's own comment for what this stops.
+    installNumberInputArrowGuard();
 
     // React 18's createRoot().render() performs its initial commit
     // synchronously for the very first render, so by this point the app
