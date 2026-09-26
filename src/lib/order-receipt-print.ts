@@ -113,13 +113,25 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
       <div class="row"><span>CASH TENDERED/RECEIVED:</span><span>Rs ${cashReceived.toFixed(2)}</span></div>
       <div class="row bold"><span>CHANGE RETURNED:</span><span>Rs ${changeReturned.toFixed(2)}</span></div>
     ` : amountTendered !== undefined ? `<p>AMOUNT TENDERED: Rs ${amountTendered.toFixed(2)}</p>` : ''}
-    ${dueAmount > 0 ? `<p>DUE: Rs ${dueAmount.toFixed(2)}</p>` : ''}
-    ${previousDues > 0 ? `
-      <p style="margin-top:6px">ARREARS: Rs ${previousDues.toFixed(2)}</p>
-      <div class="row"><span>ARREARS+INV BALANCE:</span><span>Rs ${(previousDues + billTotal).toFixed(2)}</span></div>
-      <div class="row"><span>INVOICE BALANCE:</span><span>Rs ${dueAmount.toFixed(2)}</span></div>
-      <div class="row bold"><span>ACCOUNT BALANCE:</span><span>Rs ${(previousDues + dueAmount).toFixed(2)}</span></div>
-    ` : ''}
+    ${dueAmount > 0 ? `<p>DUE (THIS ORDER): Rs ${dueAmount.toFixed(2)}</p>` : ''}
+    ${previousDues !== 0 ? `<p>OTHER DUES/ADVANCE: Rs ${previousDues.toFixed(2)}</p>` : ''}
+    <div class="dashed"></div>
+    ${(() => {
+      // Same Due (customer owes the shop)/Advance (shop owes the
+      // customer) convention DuesPage.tsx's own Dues Entry slip and Net
+      // Outstanding Balance label use - this is the customer's WHOLE
+      // account balance (this order's own remaining PLUS whatever they
+      // separately owe/are owed), not just this one order, so a cashier
+      // reprinting an old receipt sees the same "how do we stand overall"
+      // figure the Dues Entry slip already gives.
+      const overallBalance = previousDues + dueAmount;
+      const label = overallBalance > 0
+        ? `Due: Rs ${overallBalance.toFixed(2)}`
+        : overallBalance < 0
+          ? `Advance: Rs ${Math.abs(overallBalance).toFixed(2)}`
+          : 'Settled';
+      return `<div class="row bold"><span>ACCOUNT BALANCE:</span><span>${label}</span></div>`;
+    })()}
   `;
 }
 

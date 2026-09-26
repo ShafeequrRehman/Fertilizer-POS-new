@@ -22,6 +22,7 @@ import { isDesktopApp } from '@/lib/api';
 import { saveOrderEditOffline } from '@/lib/offline-order-helpers';
 import { triggerBackgroundSync } from '@/lib/offline-sync';
 import { ToastLike } from '@/lib/print-notify';
+import { writeOrderReceiptToWindow } from '@/lib/order-receipt-print';
 
 export default function CompleteOrderModal({
   order,
@@ -29,14 +30,12 @@ export default function CompleteOrderModal({
   toast,
   onClose,
   onCompleted,
-  setPrintReadyUrl,
 }: {
   order: SavedOrder;
   isOnline: boolean;
   toast: ToastLike;
   onClose: () => void;
   onCompleted: (updated: SavedOrder) => void;
-  setPrintReadyUrl: (url: string | null) => void;
 }) {
   const { t } = useLanguage();
   // Single field, doubling as the change calculator - the cashier types the
@@ -150,6 +149,19 @@ export default function CompleteOrderModal({
     setSaving(true);
     setError('');
 
+    // Opened here, synchronously, before the first `await` below - same
+    // popup-blocker-safe timing DuesPage.tsx's own auto-print uses. The
+    // shop owner asked for the receipt to come out automatically the
+    // instant an order is completed from this popup (Confirm Payment,
+    // Pay Full, or Put in Pending), not just as the separate on-demand
+    // printer icon/button.
+    const printWindow = window.open('', '_blank', 'width=420,height=650');
+    if (!printWindow) {
+      toast.error("Could not open the print window - check your browser's popup blocker.");
+    } else {
+      printWindow.document.write('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Preparing receipt...</body></html>');
+    }
+
     const payload: Parameters<typeof updateOrder>[1] = {
       status: 'completed',
       action: 'completeAndSettle',
@@ -167,12 +179,15 @@ export default function CompleteOrderModal({
         // auto-print just below.
         const updated = await saveOrderEditOffline(order, payload, false, false);
         triggerBackgroundSync();
-        // No auto-print here any more, for any order type - see
-        // SalesPage.tsx's completeOrder for the full reasoning. Printing a
-        // customer receipt is now always a deliberate, on-demand action via
-        // the printer icon/button.
         toast.success(trulyOffline ? t('record.toast.orderCompletedOffline') : t('record.toast.orderCompletedSyncing'));
         onCompleted(updated);
+        // customerDue is everything else this customer owes/is owed
+        // BEFORE this payment (loaded by this modal's own effect above) -
+        // still accurate here since only this one order changed. See
+        // order-receipt-print.ts's own comment on why the slip's final
+        // ACCOUNT BALANCE line adds this order's own remaining on top of
+        // it instead of just repeating this order's own due.
+        if (printWindow && !printWindow.closed) writeOrderReceiptToWindow(printWindow, updated, customerDue);
         return;
       }
 
@@ -181,7 +196,9 @@ export default function CompleteOrderModal({
       const updated = await updateOrder(order.id, payload);
       toast.success(t('record.toast.orderCompleted'));
       onCompleted(updated);
+      if (printWindow && !printWindow.closed) writeOrderReceiptToWindow(printWindow, updated, customerDue);
     } catch (err) {
+      if (printWindow && !printWindow.closed) printWindow.close();
       setError(err instanceof Error ? err.message : t('record.errors.completeFailed'));
     } finally {
       setSaving(false);

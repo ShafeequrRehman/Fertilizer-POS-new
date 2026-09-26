@@ -191,13 +191,6 @@ export default function RecordPage() {
   const { session: cachedShopSession } = useShopSession();
   const [orders, setOrders] = useState<SavedOrder[]>([]);
   const [shopSession, setShopSession] = useState<ShopSession | null>(null);
-  // The hidden auto-print iframe for CompleteOrderModal's receipt
-  // auto-print - kept up here (not inside the modal) since the modal
-  // closes itself the instant completion succeeds, which would tear down
-  // the iframe before PrintOrderPage.tsx inside it ever got to actually
-  // call window.print() if it lived there instead. Same pattern as
-  // SalesPage.tsx's own printReadyUrl.
-  const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   // Full shift history (up to the last 60 shifts, per the backend) - needed
   // so the date-range picker can find EVERY shift that opened on a picked
   // date, not just whatever the current/latest shift happens to be. Cloud-
@@ -1360,10 +1353,8 @@ export default function RecordPage() {
           toast={toast}
           onClose={() => setCompleteOrderTarget(null)}
           onCompleted={handleOrderCompleted}
-          setPrintReadyUrl={setPrintReadyUrl}
         />
       ) : null}
-      {printReadyUrl ? <iframe src={printReadyUrl} className="hidden" title={t('record.autoPrintFrameTitle')} /> : null}
     </div>
   );
 }

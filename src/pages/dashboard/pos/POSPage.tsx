@@ -1791,7 +1791,6 @@ export default function POSPage() {
           toast={shopToast}
           onClose={() => setCompletePaymentTarget(null)}
           onCompleted={() => setCompletePaymentTarget(null)}
-          setPrintReadyUrl={setPrintReadyUrl}
         />
       ) : null}
     </div>
