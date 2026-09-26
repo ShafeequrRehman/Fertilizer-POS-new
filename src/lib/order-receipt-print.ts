@@ -155,14 +155,29 @@ function buildOrderReceiptBodyHtml(order: SavedOrder, previousDues: number) {
 // handlers' own comment on why a per-card ref+effect wasn't reliable)
 // and the manual "Print" button in History both render from one
 // definition.
-export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName: string, entry: DuesHistoryEntry) {
+//
+// `netBalance` - NOT entry.balanceAfter - is what gets printed as
+// "BALANCE AFTER" below. entry.balanceAfter is only ever the manual
+// previousDues ledger figure (see backend's applyUpdateCustomerDues/
+// applySettleCustomerDues - both literally store `balanceAfter:
+// previousDues`, by design, for a separate Dues Statement reconciliation
+// feature that deliberately nets against orders at read time instead).
+// It quietly diverges from the customer's real, on-screen "NET
+// OUTSTANDING BALANCE" (LedgerCustomer.netBalance - totalOrderBalance +
+// previousDues, minus totalPurchaseBalance) the moment this customer has
+// ANY order-linked due or linked-purchase balance - which is exactly
+// what the shop owner reported: the dashboard card was right, the slip
+// printed a different, smaller/wrong-looking number. Every caller now
+// passes the customer's actual current netBalance instead, so the slip
+// always matches the same figure the dashboard shows.
+export function writeDuesEntryReceiptToWindow(printWindow: Window, customerName: string, entry: DuesHistoryEntry, netBalance: number) {
   const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   // Same Due (red, they owe the shop)/Advance (green, shop owes them)
   // convention as DuesPage.tsx's own Net Outstanding Balance label.
-  const balanceLabel = entry.balanceAfter > 0
-    ? `Due: Rs ${entry.balanceAfter}`
-    : entry.balanceAfter < 0
-      ? `Advance: Rs ${Math.abs(entry.balanceAfter)}`
+  const balanceLabel = netBalance > 0
+    ? `Due: Rs ${netBalance}`
+    : netBalance < 0
+      ? `Advance: Rs ${Math.abs(netBalance)}`
       : 'Settled';
   // Same "+ Rs X paid"/"- Rs X received" wording DuesPage.tsx's own
   // History row uses for this exact entry.type.
