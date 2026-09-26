@@ -17,6 +17,7 @@ import {
 } from '@/lib/pos-api';
 import { LedgerCustomer, LedgerPurchase, SavedOrder, DuesHistoryEntry, Bank, Grain, DuesPaymentOption } from '@/lib/pos-types';
 import { isDesktopApp } from '@/lib/api';
+import { getStoreSettings } from '@/lib/pos-settings';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
 import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
@@ -891,6 +892,50 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     setViewPurchase(purchase);
   }
 
+  // Shared receipt "shell" - shop header (name/address/contact, same
+  // fields the POS's own Complete Order slip pulls from Settings via
+  // getStoreSettings()) + a bordered title block + whatever body rows the
+  // caller passes in + the same footer branding line every other receipt
+  // in the app already prints. Used so the Dues Entry and Purchase slips
+  // look like they belong to the same till as the Complete Order slip,
+  // instead of the old plain unbranded text dump.
+  function buildReceiptHtml(title: string, bodyHtml: string) {
+    const settings = getStoreSettings();
+    return `<!DOCTYPE html><html><head><title>${title}</title>
+      <style>
+        @page { margin: 0; }
+        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; background: #fff; }
+        .receipt { width: 70mm; margin: 0 auto; padding: 6px 8px 12px; box-sizing: border-box; font-family: 'Courier New', Courier, monospace; color: #000; font-size: 12px; line-height: 15px; }
+        .receipt * { box-sizing: border-box; }
+        .center { text-align: center; }
+        .shop-name { font-size: 18px; line-height: 20px; font-weight: 800; text-transform: uppercase; margin: 0 0 5px; }
+        .title-block { border-top: 4px solid #000; border-bottom: 4px solid #000; padding: 8px 0; margin: 10px 0; text-align: center; }
+        .title-block h2 { font-size: 16px; font-weight: 800; text-transform: uppercase; margin: 0; }
+        .dashed { border-top: 1px dashed #000; margin: 8px 0; }
+        .row { display: flex; justify-content: space-between; gap: 6px; }
+        .row.bold { font-weight: 800; font-size: 13px; }
+        p { margin: 2px 0; }
+      </style>
+      </head><body>
+      <div class="receipt">
+        <div class="center">
+          <p class="shop-name">${settings.receiptHeader || 'Store Name'}</p>
+          ${settings.receiptSubHeader ? `<p>${settings.receiptSubHeader}</p>` : ''}
+          ${settings.receiptAddress ? `<p>${settings.receiptAddress}</p>` : ''}
+          ${settings.receiptContact ? `<p>${settings.receiptContact}</p>` : ''}
+          ${settings.receiptPaymentInfo ? `<p>${settings.receiptPaymentInfo}</p>` : ''}
+        </div>
+        <div class="title-block"><h2>${title}</h2></div>
+        ${bodyHtml}
+        <div class="center" style="margin-top:16px">
+          ${settings.receiptFooterMessage ? `<p style="font-weight:800">${settings.receiptFooterMessage}</p>` : ''}
+          <p>Shafeeq Developer&apos;s Creation</p>
+          <p>03400-586000</p>
+        </div>
+      </div>
+      </body></html>`;
+  }
+
   // No print route/receipt exists for a purchase anywhere in the app yet,
   // so this builds a small printable slip on the fly (same info as
   // PurchaseDetailModal) and hands it straight to the browser's own print
@@ -902,32 +947,19 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       return;
     }
     const purchaseDate = new Date(purchase.purchaseDate).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    // See writeDuesEntryToWindow's own comment on the @page/80mm-width/
-    // auto-height recipe - same endless-blank-feed fix, same reason.
-    printWindow.document.write(`<!DOCTYPE html><html><head><title>${purchase.purchaseOrderNumber}</title>
-      <style>
-        @page { margin: 0; }
-        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; font-family: sans-serif; color: #111; }
-        .receipt-inner { width: 70mm; margin: 0 auto; padding: 10px 8px; box-sizing: border-box; }
-        h1{font-size:16px;margin:0 0 6px}
-        p{margin:2px 0;font-size:12px}table{width:100%;margin-top:10px;border-collapse:collapse}
-        td{padding:3px 0;font-size:12px}td:last-child{text-align:right;font-weight:bold}
-        .total{border-top:1px solid #ccc;margin-top:6px;padding-top:6px;font-size:13px}
-      </style>
-      </head><body>
-      <div class="receipt-inner">
-      <h1>${purchase.purchaseOrderNumber}</h1>
-      <p>${purchaseDate}</p>
-      <p>${purchase.status === 'cancelled' ? 'CANCELLED PURCHASE' : ''}</p>
-      <table>
-        <tr><td>Ingredient</td><td>${purchase.ingredientName}</td></tr>
-        <tr><td>Quantity</td><td>${purchase.quantity} ${purchase.unit}</td></tr>
-        <tr><td>Paid</td><td>Rs ${purchase.paidAmount ?? 0}</td></tr>
-        <tr><td>Remaining</td><td>Rs ${purchase.remainingAmount ?? 0}</td></tr>
-        <tr class="total"><td>Total</td><td>Rs ${purchase.totalAmount}</td></tr>
-      </table>
-      </div>
-      </body></html>`);
+    const purchaseBodyHtml = `
+      <p>DATE: ${purchaseDate}</p>
+      <p>ORDER NO: ${purchase.purchaseOrderNumber}</p>
+      ${purchase.status === 'cancelled' ? '<p style="font-weight:800">CANCELLED PURCHASE</p>' : ''}
+      <div class="dashed"></div>
+      <div class="row"><span>INGREDIENT:</span><span>${purchase.ingredientName}</span></div>
+      <div class="row"><span>QUANTITY:</span><span>${purchase.quantity} ${purchase.unit}</span></div>
+      <div class="row"><span>PAID:</span><span>Rs ${purchase.paidAmount ?? 0}</span></div>
+      <div class="row"><span>REMAINING:</span><span>Rs ${purchase.remainingAmount ?? 0}</span></div>
+      <div class="dashed"></div>
+      <div class="row bold"><span>TOTAL:</span><span>Rs ${purchase.totalAmount}</span></div>
+    `;
+    printWindow.document.write(buildReceiptHtml('Purchase Receipt', purchaseBodyHtml));
     printWindow.document.close();
     printWindow.focus();
     printWindow.print();
@@ -970,25 +1002,18 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   // there instead of continuing to feed.
   function writeDuesEntryToWindow(printWindow: Window, entry: DuesHistoryEntry) {
     const date = new Date(entry.createdAt).toLocaleString('en-PK', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const duesBodyHtml = `
+      <p>DATE: ${date}</p>
+      <p>CUSTOMER: ${customer.name.toUpperCase()}</p>
+      <div class="dashed"></div>
+      <div class="row bold"><span>${entry.type === 'add' ? 'DUES ADDED' : 'DUES PAID'}:</span><span>Rs ${entry.amount}</span></div>
+      <div class="row"><span>BALANCE AFTER:</span><span>Rs ${entry.balanceAfter}</span></div>
+      <div class="dashed"></div>
+      <p>NOTE: ${entry.note || 'No note'}</p>
+      <p>BY: ${entry.createdBy || '—'}</p>
+    `;
     printWindow.document.open();
-    printWindow.document.write(`<!DOCTYPE html><html><head><title>Dues Entry</title>
-      <style>
-        @page { margin: 0; }
-        html, body { width: 80mm; margin: 0; padding: 0; height: auto; min-height: 0; font-family: sans-serif; color: #111; }
-        .receipt-inner { width: 70mm; margin: 0 auto; padding: 10px 8px; box-sizing: border-box; }
-        h1{font-size:16px;margin:0 0 6px}
-        p{margin:2px 0;font-size:12px}
-      </style>
-      </head><body>
-      <div class="receipt-inner">
-      <h1>${customer.name}</h1>
-      <p>${date}</p>
-      <p>${entry.type === 'add' ? 'Dues Added' : 'Dues Paid'}: Rs ${entry.amount}</p>
-      <p>Balance After: Rs ${entry.balanceAfter}</p>
-      <p>Note: ${entry.note || 'No note'}</p>
-      <p>By: ${entry.createdBy || '—'}</p>
-      </div>
-      </body></html>`);
+    printWindow.document.write(buildReceiptHtml('Dues Receipt', duesBodyHtml));
     printWindow.document.close();
     printWindow.focus();
     printWindow.print();
