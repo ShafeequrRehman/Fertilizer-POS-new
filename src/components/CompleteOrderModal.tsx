@@ -308,7 +308,14 @@ export default function CompleteOrderModal({
           </button>
           <button
             type="button"
-            disabled={saving}
+            // "Put in Pending" ticked means the cashier explicitly wants
+            // to collect nothing right now (the whole bill becomes a
+            // due) - Pay Full (collect the entire bill) directly
+            // contradicts that, so it's disabled/greyed out the moment
+            // the checkbox is ticked instead of only Confirm Payment
+            // being usable. Untick it (or type an amount, which already
+            // auto-unticks it above) to get Pay Full back.
+            disabled={saving || confirmPending}
             onClick={() => void settle(true)}
             className="rounded-[20px] bg-[#E2F33C] px-4 py-3 text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
           >
