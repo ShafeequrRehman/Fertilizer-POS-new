@@ -761,11 +761,11 @@ if (!gotTheLock) {
       if (Number(orderData?.discount?.amount) > 0) h += 15; // Discount row
       const total = getItemsTotal(orderData);
       const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
-      const dueAmount = Math.max(total - (amountTendered ?? 0), 0);
       if (amountTendered !== undefined) h += 15;
-      if (dueAmount > 0) h += 15;
-      if (Number(orderData?.previousDues) > 0) h += 60; // Arrears/Arrears+Inv Balance/Invoice Balance/Account Balance rows
-      h += 15; // Dashed rule
+      // Deliberately no more DUE/ARREARS/ACCOUNT BALANCE height budget -
+      // see ReceiptPdf below, those rows were removed entirely per the
+      // shop owner's request to never show a remaining/outstanding
+      // balance figure on this slip.
     }
 
     h += 50; // Footer
@@ -916,13 +916,6 @@ if (!gotTheLock) {
     const itemsSubtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1), 0);
     const discountAmount = Number(orderData?.discount?.amount) || 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
-    const dueAmount = Math.max(total - (amountTendered ?? 0), 0);
-    // Dues carried forward from the customer's OTHER unpaid orders, not
-    // this one - attached onto orderData at print time by whoever called
-    // createReceiptPdfFromOrderData (see SalesPage.tsx's saveUpdate /
-    // sendCompletedReceiptOnWhatsApp), so it shows on the customer's
-    // receipt exactly like it shows in the Complete Payment panel.
-    const previousDues = Number(orderData?.previousDues) || 0;
     const pageHeight = estimateReceiptHeightPt(orderData, type, !!printLogo);
 
     return h(Document, null,
@@ -1028,25 +1021,12 @@ if (!gotTheLock) {
             h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${total.toFixed(2)}`)
           ),
           h(Text, { style: { marginTop: 6 } }, `PAID: ${String(orderData?.paymentMethod || "Cash").toUpperCase()}`),
+          // Deliberately NOT showing any remaining/outstanding balance
+          // figure (no DUE, no arrears, no account balance) - only the
+          // payment actually made against THIS bill (AMOUNT TENDERED
+          // above), same change as ThermalReceipt.tsx/order-receipt-print.ts
+          // (the web-rendered versions of this same slip).
           amountTendered !== undefined ? h(Text, null, `AMOUNT TENDERED: Rs ${amountTendered.toFixed(2)}`) : null,
-          dueAmount > 0 ? h(Text, null, `DUE: Rs ${dueAmount.toFixed(2)}`) : null,
-          // Full arrears breakdown - only for a customer who actually has
-          // previous dues (see this receipt's own doc comment); a
-          // customer with none never sees any of this, unchanged from
-          // before.
-          previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `ARREARS: Rs ${previousDues.toFixed(2)}`) : null,
-          previousDues > 0 ? h(View, { style: receiptStyles.row },
-            h(Text, null, "ARREARS+INV BALANCE:"),
-            h(Text, { style: receiptStyles.rowRight }, `Rs ${(total + previousDues).toFixed(2)}`)
-          ) : null,
-          previousDues > 0 ? h(View, { style: receiptStyles.row },
-            h(Text, null, "INVOICE BALANCE:"),
-            h(Text, { style: receiptStyles.rowRight }, `Rs ${dueAmount.toFixed(2)}`)
-          ) : null,
-          previousDues > 0 ? h(View, { style: receiptStyles.row },
-            h(Text, { style: receiptStyles.bold }, "ACCOUNT BALANCE:"),
-            h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, `Rs ${(previousDues + dueAmount).toFixed(2)}`)
-          ) : null,
           h(View, { style: receiptStyles.dashedRule })
         ) : null,
         h(View, { style: receiptStyles.footer },
@@ -1165,8 +1145,6 @@ if (!gotTheLock) {
     const billTotal = typeof orderData?.total === "number" ? orderData.total : Math.max(subtotal + scAmount, 0);
     const discountAmount = Number(orderData?.discount?.amount) || 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), billTotal) : undefined;
-    const dueAmount = Math.max(billTotal - (amountTendered ?? billTotal), 0);
-    const previousDues = Number(orderData?.previousDues) || 0;
     const pageHeight = estimateItemizedBillHeightPt(orderData, !!printLogo, settings);
 
     return h(Document, null,
@@ -1255,24 +1233,12 @@ if (!gotTheLock) {
           h(Text, { style: receiptStyles.bold }, "Bill Total:"),
           h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, billTotal.toFixed(0))
         ),
+        // Deliberately NOT showing any remaining/outstanding balance
+        // figure (no Due, no arrears, no account balance) - only the
+        // payment actually made against THIS bill (Amount Tendered
+        // above), same change as ItemizedBillReceipt.tsx (the web-
+        // rendered version of this same slip).
         amountTendered !== undefined ? h(Text, { style: { marginTop: 4 } }, `Amount Tendered: ${amountTendered.toFixed(0)}`) : null,
-        dueAmount > 0 ? h(Text, null, `Due: ${dueAmount.toFixed(0)}`) : null,
-        // Full arrears breakdown - only for a customer who actually has
-        // previous dues, matching ItemizedBillReceipt.tsx's own on-screen
-        // preview; a customer with none never sees any of this.
-        previousDues > 0 ? h(Text, { style: { marginTop: 4 } }, `Arrears: ${previousDues.toFixed(0)}`) : null,
-        previousDues > 0 ? h(View, { style: receiptStyles.row },
-          h(Text, null, "Arrears+Inv Balance:"),
-          h(Text, { style: receiptStyles.rowRight }, (billTotal + previousDues).toFixed(0))
-        ) : null,
-        previousDues > 0 ? h(View, { style: receiptStyles.row },
-          h(Text, null, "Invoice Balance:"),
-          h(Text, { style: receiptStyles.rowRight }, dueAmount.toFixed(0))
-        ) : null,
-        previousDues > 0 ? h(View, { style: receiptStyles.row },
-          h(Text, { style: receiptStyles.bold }, "Account Balance:"),
-          h(Text, { style: [receiptStyles.bold, receiptStyles.rowRight] }, (previousDues + dueAmount).toFixed(0))
-        ) : null,
         h(View, { style: { marginTop: 6 } },
           h(Text, { style: receiptStyles.bold }, "In Words:"),
           h(Text, null, `${numberToWordsPdf(billTotal)} ONLY.`)
@@ -1389,8 +1355,8 @@ if (!gotTheLock) {
     const total = typeof orderData?.total === "number" ? orderData.total : 0;
     const amountTendered = orderData?.paidAmount !== undefined ? Math.min(Number(orderData.paidAmount), total) : undefined;
     if (amountTendered !== undefined) h += 14;
-    if (Math.max(total - (amountTendered ?? total), 0) > 0) h += 14;
-    if (Number(orderData?.previousDues) > 0) h += 56; // Arrears/Arrears+Inv Balance/Invoice Balance/Account Balance rows
+    // Deliberately no more Due/Arrears/Account Balance height budget -
+    // see ItemizedBillReceiptPdf below, those rows were removed entirely.
     h += 40; // In Words block
     h += 50; // footer (optional footer message + fixed "Shafeeq Developer's Creation" / phone lines)
     return h;

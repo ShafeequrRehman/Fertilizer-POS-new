@@ -181,12 +181,11 @@ export default function CompleteOrderModal({
         triggerBackgroundSync();
         toast.success(trulyOffline ? t('record.toast.orderCompletedOffline') : t('record.toast.orderCompletedSyncing'));
         onCompleted(updated);
-        // customerDue is everything else this customer owes/is owed
-        // BEFORE this payment (loaded by this modal's own effect above) -
-        // still accurate here since only this one order changed. See
-        // order-receipt-print.ts's own comment on why the slip's final
-        // ACCOUNT BALANCE line adds this order's own remaining on top of
-        // it instead of just repeating this order's own due.
+        // customerDue is passed through only because
+        // writeOrderReceiptToWindow still accepts it positionally - the
+        // slip itself no longer prints any balance figure from it (see
+        // order-receipt-print.ts's own comment on why that line was
+        // removed entirely, per the shop owner's request).
         if (printWindow && !printWindow.closed) writeOrderReceiptToWindow(printWindow, updated, customerDue);
         return;
       }
