@@ -86,7 +86,7 @@ export default function POSPage() {
   // simultaneously, sometimes duplicate order numbers too). A ref is
   // checked/set synchronously, closing that gap.
   const isSavingOrderRef = useRef(false);
-  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', billTid: '', billName: '', cashRecipientName: '' });
+  const [orderFormData, setOrderFormData] = useState<OrderFormData>({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
   const [printReadyUrl, setPrintReadyUrl] = useState<string | null>(null);
   // Shows the same Complete Payment popup RecordPage's own Complete Order
   // action uses, right after Save - see the user request this was built
@@ -452,16 +452,6 @@ export default function POSPage() {
   // here.
   const total = subtotal + tax + effectiveDeliveryFee;
 
-  // Electricity Bill / Cash special products (system-seeded into every
-  // shop - see backend/controllers/superAdminController.js's createShop and
-  // Product.specialType's own comment): their presence in the cart is what
-  // triggers the extra TID/Bill Name/Recipient Name fields below and the
-  // auto-settled payment in handleSaveOrder, keyed off the cart item's own
-  // specialType (carried over from the Product in addToCart) rather than
-  // matching on a name/translation that could change.
-  const hasElectricityBillItem = cart.some((item) => item.specialType === 'electricity_bill');
-  const hasCashItem = cart.some((item) => item.specialType === 'cash');
-
   function addToCart(product: Product) {
     // Same product and same variation merge into one cart row, matching your older POS logic.
     setCart((previousCart) => {
@@ -677,7 +667,7 @@ export default function POSPage() {
   }, [variationPickerGroup, viewMode, visibleGroups, focusedProductIndex, activeCartItemIndex, cart]);
 
   function resetOrderForm() {
-    setOrderFormData({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '', billTid: '', billName: '', cashRecipientName: '' });
+    setOrderFormData({ orderType: 'TakeAway', phone: '', customer: '', address: '', previousDues: 0, note: '', waiter: '' });
     setSuggestions([]);
     setShowNewCustomerPrompt(false);
     setSearchQuery('');
@@ -916,16 +906,6 @@ export default function POSPage() {
     if (cart.some((item) => item.specialType && item.price <= 0)) {
       return showValidationError(t('pos.specialItemAmountRequired'));
     }
-    // Electricity Bill / Cash: the whole point of these two fields is to
-    // leave a traceable record of the transaction, so (unlike note/waiter)
-    // they're required rather than optional whenever the matching special
-    // item is actually in the cart.
-    if (hasElectricityBillItem && (!orderFormData.billTid?.trim() || !orderFormData.billName?.trim())) {
-      return showValidationError(t('pos.billTidAndNameRequired'));
-    }
-    if (hasCashItem && !orderFormData.cashRecipientName?.trim()) {
-      return showValidationError(t('pos.cashRecipientNameRequired'));
-    }
     return true;
   }
 
@@ -1020,9 +1000,6 @@ export default function POSPage() {
         address: orderFormData.address,
         note: orderFormData.note,
         waiter: orderFormData.waiter,
-        billTid: hasElectricityBillItem ? orderFormData.billTid?.trim() : '',
-        billName: hasElectricityBillItem ? orderFormData.billName?.trim() : '',
-        cashRecipientName: hasCashItem ? orderFormData.cashRecipientName?.trim() : '',
         status: 'pending',
         paymentMethod: selectedPaymentMethod,
         createdAt: now,
@@ -1631,23 +1608,6 @@ export default function POSPage() {
             <FormField label={t('pos.orderNoteLabel')}>
               <input name="note" value={orderFormData.note} onChange={handleFormChange} placeholder={t('pos.orderNotePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
             </FormField>
-
-            {hasElectricityBillItem ? (
-              <>
-                <FormField label={t('pos.billTidLabel')}>
-                  <input name="billTid" value={orderFormData.billTid || ''} onChange={handleFormChange} placeholder={t('pos.billTidPlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
-                </FormField>
-                <FormField label={t('pos.billNameLabel')}>
-                  <input name="billName" value={orderFormData.billName || ''} onChange={handleFormChange} placeholder={t('pos.billNamePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
-                </FormField>
-              </>
-            ) : null}
-
-            {hasCashItem ? (
-              <FormField label={t('pos.cashRecipientNameLabel')}>
-                <input name="cashRecipientName" value={orderFormData.cashRecipientName || ''} onChange={handleFormChange} placeholder={t('pos.cashRecipientNamePlaceholder')} className="w-full rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm shadow-inner outline-none" />
-              </FormField>
-            ) : null}
 
             {selectedCustomerId ? (
               <div className="rounded-xl border border-sky-200/70 bg-sky-50/60 p-2.5 text-[11px] text-sky-700 shadow-inner">

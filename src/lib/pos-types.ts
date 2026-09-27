@@ -887,12 +887,6 @@ export interface OrderFormData {
   // Quick Delivery Charges preset (Free/30/50/Custom row) - only ever
   // meaningful for orderType 'Delivery'. Undefined/0 for every other order.
   deliveryFee?: number;
-  // Electricity Bill / Cash special-product fields - only ever shown/typed
-  // when the cart has the matching special item in it (see POSPage.tsx's
-  // hasElectricityBillItem/hasCashItem). Empty otherwise.
-  billTid?: string;
-  billName?: string;
-  cashRecipientName?: string;
 }
 
 export interface OrderPayload {
