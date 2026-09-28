@@ -250,6 +250,33 @@ export interface RecoveryHistoryRow {
   createdAt: string;
 }
 
+// Dashboard's Stock Value tile "Details" - see
+// backend/controllers/reportController.js's getStockValueDetail.
+export interface StockValueDetailRow {
+  name: string;
+  unit: string;
+  quantity: number;
+  rate: number;
+  value: number;
+}
+
+// Dashboard's Vendor Balance tile "Details" - see
+// backend/controllers/reportController.js's getVendorBalanceDetail.
+export interface VendorBalanceDetailRow {
+  name: string;
+  balance: number;
+}
+
+// Dashboard's Sale on Cash tile "Details" - see
+// backend/controllers/reportController.js's getSaleOnCashDetail.
+export interface SaleOnCashDetailRow {
+  orderNumber: number | null;
+  customerName: string;
+  paymentMethod: 'Cash' | 'Card' | 'E-Wallet' | 'Bank';
+  amount: number;
+  createdAt: string;
+}
+
 export interface LedgerOrder {
   id: string;
   dailyOrderNumber?: number;

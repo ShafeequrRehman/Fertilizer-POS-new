@@ -1,7 +1,7 @@
 import { api, getSystemApiBaseUrl } from '@/lib/api';
 export { isAuthenticated } from '@/lib/auth';
 import { AxiosError } from 'axios';
-import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, DuesPaymentOption, Expense, Grain, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LabourSummary, LedgerCustomer, LedgerTransactionsResponse, MunshiSummary, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SavedOrder, ShopSession, ShopSessionStatus, Supplier, Waiter } from '@/lib/pos-types';
+import { Bank, CancelOrderPayload, CashSummary, CloseShopResult, CompanyLedgerEntry, Customer, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, DayEndReport, DuesPaymentOption, Expense, Grain, Ingredient, IngredientCategory, IngredientLedgerResponse, IngredientPurchase, IngredientUnit, InventoryReport, LabourSummary, LedgerCustomer, LedgerTransactionsResponse, MunshiSummary, MySalesReport, OrderPayload, OrderUpdatePayload, Product, ProductInput, PurchaseOrderInput, PurchaseOrderReceiveItemInput, Recipe, RecoveryHistoryRow, SaleOnCashDetailRow, SavedOrder, ShopSession, ShopSessionStatus, StockValueDetailRow, Supplier, VendorBalanceDetailRow, Waiter } from '@/lib/pos-types';
 
 export class ApiError extends Error {
   status?: number;
@@ -419,6 +419,43 @@ export async function fetchRecoveryHistory(startDate?: string, endDate?: string)
     const response = await api.get<{ total: number; rows: RecoveryHistoryRow[] }>('/reports/recovery-history', {
       params: { startDate, endDate },
     });
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Dashboard's Stock Value tile "Details" - see
+// backend/controllers/reportController.js's getStockValueDetail. Always
+// the current live snapshot - no date range.
+export async function fetchStockValueDetail() {
+  try {
+    const response = await api.get<{ total: number; rows: StockValueDetailRow[] }>('/reports/stock-value-detail');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Dashboard's Vendor Balance tile "Details" - see
+// backend/controllers/reportController.js's getVendorBalanceDetail. Always
+// the current live snapshot - no date range.
+export async function fetchVendorBalanceDetail() {
+  try {
+    const response = await api.get<{ total: number; rows: VendorBalanceDetailRow[] }>('/reports/vendor-balance-detail');
+    return response.data;
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+// Dashboard's Sale on Cash tile "Details" - see
+// backend/controllers/reportController.js's getSaleOnCashDetail. Same
+// range params as fetchDashboardSummary, so the breakdown always matches
+// whichever period the tile itself is currently showing.
+export async function fetchSaleOnCashDetail(params?: { range?: 'today' | 'month' | 'custom'; startDate?: string; endDate?: string }) {
+  try {
+    const response = await api.get<{ total: number; rows: SaleOnCashDetailRow[] }>('/reports/sale-on-cash-detail', { params });
     return response.data;
   } catch (error) {
     handleApiError(error);

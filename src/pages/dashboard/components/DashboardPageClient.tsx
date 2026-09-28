@@ -10,8 +10,8 @@ import {
   RotateCcw, XCircle, Wallet, Landmark, Package, Truck,
   ShoppingBag, Receipt, HandCoins, PiggyBank, Pencil, History as HistoryIcon, List, Wheat, HardHat, UserCog,
 } from 'lucide-react';
-import { adjustCash, adjustDashboardTile, fetchCashSummary, fetchDashboardAdjustmentHistory, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchRecoveryHistory, fetchShopSessionHistory, type OrderSummary } from '@/lib/pos-api';
-import { CashTransaction, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, Product, RecoveryHistoryRow, SavedOrder, ShopSession } from '@/lib/pos-types';
+import { adjustCash, adjustDashboardTile, fetchCashSummary, fetchDashboardAdjustmentHistory, fetchDashboardSummary, fetchOrdersSummary, fetchProducts, fetchRecoveryHistory, fetchShopSessionHistory, fetchStockValueDetail, fetchVendorBalanceDetail, fetchSaleOnCashDetail, type OrderSummary } from '@/lib/pos-api';
+import { CashTransaction, DashboardAdjustmentHistoryEntry, DashboardAdjustmentKey, DashboardSummary, Product, RecoveryHistoryRow, SaleOnCashDetailRow, SavedOrder, ShopSession, StockValueDetailRow, VendorBalanceDetailRow } from '@/lib/pos-types';
 import { getBusinessWindow, filterOrdersInBusinessWindow, useShopSession, type BusinessWindow as SessionBusinessWindow } from '@/lib/shop-session';
 import { isDesktopApp } from '@/lib/api';
 import { useNetworkStatus } from '@/lib/network-status';
@@ -163,6 +163,9 @@ function DashboardPageClientInner() {
   const [historyTileKey, setHistoryTileKey] = useState<DashboardAdjustmentKey | null>(null);
   const [showCustomerAdvances, setShowCustomerAdvances] = useState(false);
   const [showRecoveryHistory, setShowRecoveryHistory] = useState(false);
+  const [showStockValueDetail, setShowStockValueDetail] = useState(false);
+  const [showVendorBalanceDetail, setShowVendorBalanceDetail] = useState(false);
+  const [showSaleOnCashDetail, setShowSaleOnCashDetail] = useState(false);
 
   // Accounting Overview's Day/This Month/Custom filter ("yahan bhe date
   // honi chahy... day month aur year aur custom date ka hissab say states
@@ -368,6 +371,9 @@ function DashboardPageClientInner() {
         onOpenTileHistory={(key) => setHistoryTileKey(key)}
         onOpenCustomerAdvances={() => setShowCustomerAdvances(true)}
         onOpenRecoveryHistory={() => setShowRecoveryHistory(true)}
+        onOpenStockValueDetail={() => setShowStockValueDetail(true)}
+        onOpenVendorBalanceDetail={() => setShowVendorBalanceDetail(true)}
+        onOpenSaleOnCashDetail={() => setShowSaleOnCashDetail(true)}
       />
 
       <div className="grid grid-cols-12 gap-6">
@@ -518,6 +524,19 @@ function DashboardPageClientInner() {
       ) : null}
 
       {showRecoveryHistory ? <RecoveryHistoryModal onClose={() => setShowRecoveryHistory(false)} /> : null}
+
+      {showStockValueDetail ? <StockValueDetailModal onClose={() => setShowStockValueDetail(false)} /> : null}
+
+      {showVendorBalanceDetail ? <VendorBalanceDetailModal onClose={() => setShowVendorBalanceDetail(false)} /> : null}
+
+      {showSaleOnCashDetail ? (
+        <SaleOnCashDetailModal
+          range={summaryRange}
+          customFrom={summaryCustomFrom}
+          customTo={summaryCustomTo}
+          onClose={() => setShowSaleOnCashDetail(false)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -545,6 +564,9 @@ function AccountingOverview({
   onOpenTileHistory,
   onOpenCustomerAdvances,
   onOpenRecoveryHistory,
+  onOpenStockValueDetail,
+  onOpenVendorBalanceDetail,
+  onOpenSaleOnCashDetail,
 }: {
   summary: DashboardSummary | null;
   formatter: Intl.NumberFormat;
@@ -561,6 +583,9 @@ function AccountingOverview({
   onOpenTileHistory: (key: DashboardAdjustmentKey) => void;
   onOpenCustomerAdvances: () => void;
   onOpenRecoveryHistory: () => void;
+  onOpenStockValueDetail: () => void;
+  onOpenVendorBalanceDetail: () => void;
+  onOpenSaleOnCashDetail: () => void;
 }) {
   const money = (value: number | undefined) => `Rs ${formatter.format(value ?? 0)}`;
   // Every "(Today)"-suffixed tile's label follows whichever range is
@@ -660,11 +685,30 @@ function AccountingOverview({
         <OverviewTile icon={<Wheat size={18} />} color="bg-amber-50 text-amber-600" label="Grain Stock" value={money(summary?.grainStockValue)} />
         <OverviewTile icon={<HardHat size={18} />} color="bg-orange-50 text-orange-600" label="Labour Khata" value={money(summary?.labourBalance)} />
         <OverviewTile icon={<UserCog size={18} />} color="bg-cyan-50 text-cyan-600" label="Munshi Khata" value={money(summary?.munshiBalance)} />
-        <OverviewTile icon={<Package size={18} />} color="bg-violet-50 text-violet-500" label="Stock Value" value={money(summary?.stockValue)} actions={actionsFor('stockValue')} />
-        <OverviewTile icon={<Truck size={18} />} color="bg-amber-50 text-amber-600" label="Vendor Balance" value={money(summary?.vendorBalance)} valueColor="text-amber-700" actions={actionsFor('vendorBalance')} />
+        <OverviewTile
+          icon={<Package size={18} />}
+          color="bg-violet-50 text-violet-500"
+          label="Stock Value"
+          value={money(summary?.stockValue)}
+          actions={[{ icon: <List size={12} />, onClick: onOpenStockValueDetail, label: 'Details' }, ...adjustOnlyFor('stockValue')]}
+        />
+        <OverviewTile
+          icon={<Truck size={18} />}
+          color="bg-amber-50 text-amber-600"
+          label="Vendor Balance"
+          value={money(summary?.vendorBalance)}
+          valueColor="text-amber-700"
+          actions={[{ icon: <List size={12} />, onClick: onOpenVendorBalanceDetail, label: 'Details' }, ...adjustOnlyFor('vendorBalance')]}
+        />
         <OverviewTile icon={<ShoppingBag size={18} />} color="bg-slate-100 text-slate-500" label={`Total Purchase (${periodLabel})`} value={money(summary?.totalPurchaseToday)} actions={actionsFor('totalPurchaseToday')} />
         <OverviewTile icon={<Receipt size={18} />} color="bg-slate-100 text-slate-500" label={`Total Expenses (${periodLabel})`} value={money(summary?.totalExpensesToday)} actions={actionsFor('totalExpensesToday')} />
-        <OverviewTile icon={<Wallet size={18} />} color="bg-blue-50 text-blue-500" label={`Sale on Cash (${periodLabel})`} value={money(summary?.saleOnCash)} actions={actionsFor('saleOnCash')} />
+        <OverviewTile
+          icon={<Wallet size={18} />}
+          color="bg-blue-50 text-blue-500"
+          label={`Sale on Cash (${periodLabel})`}
+          value={money(summary?.saleOnCash)}
+          actions={[{ icon: <List size={12} />, onClick: onOpenSaleOnCashDetail, label: 'Details' }, ...adjustOnlyFor('saleOnCash')]}
+        />
         <OverviewTile icon={<Landmark size={18} />} color="bg-indigo-50 text-indigo-500" label={`Sale on Bank (${periodLabel})`} value={money(summary?.saleOnBank)} actions={actionsFor('saleOnBank')} />
         <OverviewTile icon={<HandCoins size={18} />} color="bg-rose-50 text-rose-500" label={`Sale on Udhar (Credit · ${periodLabel})`} value={money(summary?.saleOnCredit)} valueColor="text-rose-600" actions={actionsFor('saleOnCredit')} />
         <OverviewTile
@@ -1274,6 +1318,236 @@ function CustomerAdvancesModal({
                   <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">As of {asOfDate}</p>
                 </div>
                 <p className="text-sm font-black text-emerald-600">Rs {customer.amount.toLocaleString()}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Task 3: Stock Value "Details" - every stock item currently in the shop
+// with its own current value (quantity x rate), so "Stock Value" isn't
+// just one opaque total. A live snapshot (like Customer Advances above),
+// fetched fresh each time the modal opens rather than reusing anything
+// already on screen, since stock quantities/rates can change between the
+// dashboard's own 45s summary refresh and the moment this is opened.
+function StockValueDetailModal({ onClose }: { onClose: () => void }) {
+  useBackspaceToClose(onClose);
+  const [rows, setRows] = useState<StockValueDetailRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+    fetchStockValueDetail()
+      .then((res) => {
+        if (cancelled) return;
+        setRows(res?.rows || []);
+        setTotal(res?.total ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load stock value details.');
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-sm flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-black text-gray-900">Stock Value</h2>
+            <p className="mt-1 text-xs text-gray-400">Every stock item and its current value.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+
+        <p className="mt-3 text-sm font-black text-violet-600">Total: Rs {total.toLocaleString()}</p>
+
+        <div className="mt-3 flex-1 space-y-2 overflow-y-auto pr-1">
+          {isLoading ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">Loading...</p>
+          ) : error ? (
+            <p className="py-8 text-center text-xs font-bold text-rose-500">{error}</p>
+          ) : rows.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No stock items found.</p>
+          ) : (
+            rows.map((item, index) => (
+              <div key={`${item.name}-${index}`} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-gray-800">{item.name}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">
+                    {item.quantity.toLocaleString()} {item.unit} × Rs {item.rate.toLocaleString()}
+                  </p>
+                </div>
+                <p className="text-sm font-black text-violet-600">Rs {item.value.toLocaleString()}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Task 4: Vendor Balance "Details" - every vendor (Khata-linked contacts
+// flagged isVendor=true AND plain free-text company-name vendors) with
+// their own outstanding balance, summing to the same total the Vendor
+// Balance tile already shows (see getVendorBalanceDetail's own comment in
+// reportController.js for how it reconciles to that exact figure).
+function VendorBalanceDetailModal({ onClose }: { onClose: () => void }) {
+  useBackspaceToClose(onClose);
+  const [rows, setRows] = useState<VendorBalanceDetailRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+    fetchVendorBalanceDetail()
+      .then((res) => {
+        if (cancelled) return;
+        setRows(res?.rows || []);
+        setTotal(res?.total ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load vendor balance details.');
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-sm flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-black text-gray-900">Vendor Balance</h2>
+            <p className="mt-1 text-xs text-gray-400">Every vendor and what is currently owed to them.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+
+        <p className="mt-3 text-sm font-black text-amber-700">Total: Rs {total.toLocaleString()}</p>
+
+        <div className="mt-3 flex-1 space-y-2 overflow-y-auto pr-1">
+          {isLoading ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">Loading...</p>
+          ) : error ? (
+            <p className="py-8 text-center text-xs font-bold text-rose-500">{error}</p>
+          ) : rows.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No vendor currently has a balance.</p>
+          ) : (
+            rows.map((vendor, index) => (
+              <div key={`${vendor.name}-${index}`} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <p className="truncate text-sm font-bold text-gray-800">{vendor.name}</p>
+                <p className="text-sm font-black text-amber-700">Rs {vendor.balance.toLocaleString()}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Task 5: Sale on Cash "Details" - the actual orders (Cash/Card/E-Wallet -
+// everything that isn't Bank, same bucket getDashboardSummary itself uses)
+// that made up the tile's total, for whichever range (Today/This Month/
+// Custom) the dashboard's own top-level filter is currently set to - see
+// getSaleOnCashDetail's own comment in reportController.js.
+function SaleOnCashDetailModal({
+  range,
+  customFrom,
+  customTo,
+  onClose,
+}: {
+  range: 'today' | 'month' | 'custom';
+  customFrom: string;
+  customTo: string;
+  onClose: () => void;
+}) {
+  useBackspaceToClose(onClose);
+  const [rows, setRows] = useState<SaleOnCashDetailRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+    fetchSaleOnCashDetail({ range, startDate: customFrom, endDate: customTo })
+      .then((res) => {
+        if (cancelled) return;
+        setRows(res?.rows || []);
+        setTotal(res?.total ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load sale details.');
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [range, customFrom, customTo]);
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[85vh] w-full max-w-sm flex-col rounded-[32px] bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-black text-gray-900">Sale on Cash</h2>
+            <p className="mt-1 text-xs text-gray-400">Every order that made up this total.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full bg-[#F6F7FB] p-2.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900">
+            <XCircle size={18} />
+          </button>
+        </div>
+
+        <p className="mt-3 text-sm font-black text-blue-600">Total: Rs {total.toLocaleString()}</p>
+
+        <div className="mt-3 flex-1 space-y-2 overflow-y-auto pr-1">
+          {isLoading ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">Loading...</p>
+          ) : error ? (
+            <p className="py-8 text-center text-xs font-bold text-rose-500">{error}</p>
+          ) : rows.length === 0 ? (
+            <p className="py-8 text-center text-xs font-bold text-gray-400">No sale in this range yet.</p>
+          ) : (
+            rows.map((order, index) => (
+              <div key={`${order.orderNumber ?? 'na'}-${index}`} className="flex items-center justify-between rounded-2xl bg-[#F8F9FB] p-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-gray-800">
+                    {order.orderNumber ? `#${order.orderNumber}` : 'Order'} · {order.customerName || 'Walk-in'}
+                  </p>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">
+                    {order.paymentMethod} · {new Date(order.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                  </p>
+                </div>
+                <p className="text-sm font-black text-blue-600">Rs {order.amount.toLocaleString()}</p>
               </div>
             ))
           )}

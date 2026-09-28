@@ -748,6 +748,162 @@ exports.getRecoveryHistory = async (req, res) => {
   }
 };
 
+// GET /api/reports/stock-value-detail
+//
+// Dashboard's Stock Value tile "Details" - the exact same
+// currentStock x averageCost (real Ingredient) / price x stock (untracked
+// Product fallback) computation getDashboardSummary's own stockValue
+// already does, just returned as one row per item instead of a single
+// summed total, so a shop owner can see which stock actually makes up
+// that figure. Always the current live snapshot (see getDashboardSummary's
+// own comment on why Stock Value never rewinds to a past date).
+exports.getStockValueDetail = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+
+    const [products, ingredients] = await Promise.all([
+      Product.find({ shopId: shopObjectId }).select("name price stock").lean(),
+      Ingredient.find({ shopId: shopObjectId }).select("name unit currentStock averageCost").lean(),
+    ]);
+
+    const ingredientNameSet = new Set(ingredients.map((i) => String(i.name || "").trim().toLowerCase()));
+    const rows = [];
+
+    for (const ingredient of ingredients) {
+      const quantity = Number(ingredient.currentStock || 0);
+      const rate = Number(ingredient.averageCost || 0);
+      rows.push({
+        name: ingredient.name,
+        unit: ingredient.unit || "",
+        quantity,
+        rate,
+        value: quantity * rate,
+      });
+    }
+    for (const product of products) {
+      if (ingredientNameSet.has(String(product.name || "").trim().toLowerCase())) continue;
+      const quantity = Number(product.stock || 0);
+      const rate = Number(product.price || 0);
+      rows.push({
+        name: product.name,
+        unit: "pcs",
+        quantity,
+        rate,
+        value: quantity * rate,
+      });
+    }
+    rows.sort((a, b) => b.value - a.value);
+
+    res.json({ total: rows.reduce((sum, row) => sum + row.value, 0), rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/reports/vendor-balance-detail
+//
+// Dashboard's Vendor Balance tile "Details" - every vendor the shop
+// currently still owes money to, one row per vendor, summing exactly to
+// the same total getDashboardSummary's own vendorBalance already shows
+// (sum of every received IngredientPurchase.remainingAmount shop-wide).
+// A purchase linked to a Khata contact (Unified Khata - Customer-Supplier
+// Netting) is grouped under that contact's own name; a plain free-text
+// purchase is grouped by its companyName; the rare purchase with neither
+// set is grouped under "Unspecified" - every received purchase lands in
+// exactly one of these three buckets, so the rows always add up to the
+// same live total the tile shows. Always the current live snapshot, same
+// reasoning as Stock Value above.
+exports.getVendorBalanceDetail = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+
+    const purchases = await IngredientPurchase.find({ shopId: shopObjectId, status: "received" })
+      .select("companyName linkedCustomerId remainingAmount")
+      .lean();
+
+    const linkedIds = [...new Set(purchases.filter((p) => p.linkedCustomerId).map((p) => String(p.linkedCustomerId)))];
+    const linkedCustomers = linkedIds.length
+      ? await Customer.find({ _id: { $in: linkedIds } }).select("name").lean()
+      : [];
+    const nameByCustomerId = new Map(linkedCustomers.map((c) => [String(c._id), c.name]));
+
+    const balanceByVendor = new Map();
+    for (const purchase of purchases) {
+      const remaining = Number(purchase.remainingAmount || 0);
+      if (remaining <= 0) continue;
+      const key = purchase.linkedCustomerId
+        ? (nameByCustomerId.get(String(purchase.linkedCustomerId)) || "Unspecified")
+        : (String(purchase.companyName || "").trim() || "Unspecified");
+      balanceByVendor.set(key, (balanceByVendor.get(key) || 0) + remaining);
+    }
+
+    const rows = [...balanceByVendor.entries()]
+      .map(([name, balance]) => ({ name, balance }))
+      .sort((a, b) => b.balance - a.balance);
+
+    res.json({ total: rows.reduce((sum, row) => sum + row.balance, 0), rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/reports/sale-on-cash-detail?range=today|month|custom&startDate=&endDate=
+//
+// Dashboard's Sale on Cash tile "Details" - one row per order that makes
+// up that figure. Same range handling as getDashboardSummary (today/
+// month/custom), and the exact same "Cash" bucket definition it already
+// uses: every non-cancelled order NOT paid by Bank (Cash, Card and
+// E-Wallet all land in this tile, same as getDashboardSummary's own
+// saleOnCash += order.paidAmount for paymentMethod !== "Bank") - each
+// row's own paymentMethod is still included so a shop owner can tell
+// which of the three it actually was.
+exports.getSaleOnCashDetail = async (req, res) => {
+  try {
+    const { shopId } = shopScope(req);
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+    const now = new Date();
+    const rangeMode = ["today", "month", "custom"].includes(req.query.range) ? req.query.range : "today";
+
+    let start;
+    let end;
+    if (rangeMode === "month") {
+      start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+      end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+    } else if (rangeMode === "custom" && req.query.startDate && req.query.endDate) {
+      start = new Date(`${req.query.startDate}T00:00:00.000Z`);
+      end = new Date(`${req.query.endDate}T23:59:59.999Z`);
+    } else {
+      start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+      end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+    }
+
+    const orders = await Order.find({
+      shopId: shopObjectId,
+      status: { $ne: "cancelled" },
+      paymentMethod: { $ne: "Bank" },
+      paidAmount: { $gt: 0 },
+      createdAt: { $gte: start, $lte: end },
+    })
+      .select("dailyOrderNumber customer paymentMethod paidAmount createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const rows = orders.map((order) => ({
+      orderNumber: order.dailyOrderNumber || null,
+      customerName: order.customer?.name || "",
+      paymentMethod: order.paymentMethod,
+      amount: Number(order.paidAmount || 0),
+      createdAt: order.createdAt,
+    }));
+
+    res.json({ total: rows.reduce((sum, row) => sum + row.amount, 0), rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // GET /api/reports/ledger-transactions?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 //
 // Shop Ledger / financial records (feature 6): a single, flat, date-sorted

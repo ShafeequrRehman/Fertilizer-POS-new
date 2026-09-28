@@ -4,7 +4,7 @@ const { requireShopMember } = require("../middleware/roleGuards");
 const requireLicenseValid = require("../middleware/requireLicenseValid");
 const requirePermission = require("../middleware/requirePermission");
 const requireAnyPermission = require("../middleware/requireAnyPermission");
-const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions, getDashboardSummary, getRecoveryHistory } = require("../controllers/reportController");
+const { getDayEndReport, getMySalesReport, getInventoryReport, getLedgerTransactions, getDashboardSummary, getRecoveryHistory, getStockValueDetail, getVendorBalanceDetail, getSaleOnCashDetail } = require("../controllers/reportController");
 
 const router = express.Router();
 
@@ -37,5 +37,11 @@ router.get("/dashboard-summary", requirePermission("view.dashboard"), getDashboa
 // Task 3's Recovery "Details" - same audience as the Dashboard tile it's
 // opened from (view.dashboard), not the narrower "reports.view".
 router.get("/recovery-history", requirePermission("view.dashboard"), getRecoveryHistory);
+
+// Stock Value / Vendor Balance / Sale on Cash "Details" - same
+// Dashboard-tile audience (view.dashboard) as recovery-history above.
+router.get("/stock-value-detail", requirePermission("view.dashboard"), getStockValueDetail);
+router.get("/vendor-balance-detail", requirePermission("view.dashboard"), getVendorBalanceDetail);
+router.get("/sale-on-cash-detail", requirePermission("view.dashboard"), getSaleOnCashDetail);
 
 module.exports = router;
