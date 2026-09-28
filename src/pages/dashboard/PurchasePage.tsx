@@ -482,7 +482,12 @@ export default function PurchasePage() {
     setOrderContactSearching(true);
     orderContactSearchTimeoutRef.current = setTimeout(async () => {
       try {
-        const result = await fetchCustomerSearch(query, 'name');
+        // vendorOnly=true - this picker is specifically "who did we buy
+        // this FROM", so it only ever offers contacts flagged as a vendor
+        // (Customer.isVendor, set from Customer Dues' Add/Edit Customer
+        // form - see backend/models/Customer.js's own comment) rather than
+        // every ordinary customer.
+        const result = await fetchCustomerSearch(query, 'name', true);
         setOrderContactResults(result || []);
       } catch {
         setOrderContactResults([]);
@@ -1132,7 +1137,7 @@ function NewPurchaseOrderModal({
 
           <div>
             <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">
-              Link to Existing Khata Contact (optional)
+              Link to Existing Vendor Contact (optional)
             </label>
             {linkedCustomer ? (
               <div className="flex items-center justify-between rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2.5">
@@ -1149,7 +1154,7 @@ function NewPurchaseOrderModal({
                 <input
                   value={contactQuery}
                   onChange={(e) => onContactQueryChange(e.target.value)}
-                  placeholder="Search a customer by name..."
+                  placeholder="Search a vendor by name..."
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-400"
                 />
                 {contactQuery.trim().length >= 2 ? (

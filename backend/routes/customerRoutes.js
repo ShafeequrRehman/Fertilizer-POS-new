@@ -50,5 +50,10 @@ router.patch("/dues/:phone", requirePermission("dues.manage"), customerControlle
 // or settling one does.
 router.delete("/:phone/dues-history", requirePermission("dues.manage"), customerController.deleteDuesHistoryEntry);
 router.patch("/:id", canWriteCustomer, customerController.updateCustomer);
+// Deleting a customer record outright is more consequential than
+// creating/editing one - gated the same as settling/removing a dues
+// entry (customers.manage or dues.manage), not the broader
+// sales.create-inclusive canWriteCustomer above.
+router.delete("/:id", requireAnyPermission("customers.manage", "dues.manage"), customerController.deleteCustomer);
 
 module.exports = router;

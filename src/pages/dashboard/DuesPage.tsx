@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react';
 import {
   fetchCustomerLedger,
   createCustomer,
+  updateCustomer,
+  deleteCustomer,
   updateCustomerDues,
   settleCustomerDues,
   sendWhatsappMessage,
@@ -21,7 +23,8 @@ import { isDesktopApp } from '@/lib/api';
 import { writeOrderReceiptToWindow, writePurchaseReceiptToWindow, writeDuesEntryReceiptToWindow } from '@/lib/order-receipt-print';
 import { isConnectivityFailure, loadCustomersFromLocalHub, queueCreateCustomerOffline, queueAddDueOffline, queueSettleDueOffline } from '@/lib/offline-dues-helpers';
 import { pushCurrentCustomersLedgerCache } from '@/lib/offline-sync';
-import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Eye, Printer, Loader2 } from 'lucide-react';
+import { hasRealPhone, generatePlaceholderPhone } from '@/lib/customer-contact';
+import { Plus, User, Phone, DollarSign, MessageCircle, AlertCircle, Save, X, RefreshCcw, Search, Download, FileText, Trash2, Pencil, Eye, Printer, Loader2 } from 'lucide-react';
 import { useToast } from '@/lib/toast';
 import OrderDetailModal from '@/components/OrderDetailModal';
 import PurchaseDetailModal from '@/components/PurchaseDetailModal';
@@ -55,7 +58,7 @@ export default function CustomerDuesPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
-  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '', previousDues: 0 });
+  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', address: '', previousDues: 0, isVendor: false });
   const [isAddingCustomer, setIsAddingCustomer] = useState(false);
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -169,19 +172,24 @@ export default function CustomerDuesPage() {
   };
 
   const handleAddCustomer = async () => {
-    if (!newCustomer.name || !newCustomer.phone) {
-      toast.error('Name and phone are required.');
+    if (!newCustomer.name.trim()) {
+      toast.error('Name is required.');
       return;
     }
+    // Phone is optional - a customer with none gets a synthetic
+    // placeholder instead of a genuinely empty string, so every other
+    // phone-keyed part of this app (dues/settle/outstanding routes) keeps
+    // working unchanged - see customer-contact.ts's own comment.
+    const payload = { ...newCustomer, phone: newCustomer.phone.trim() || generatePlaceholderPhone() };
     setIsAddingCustomer(true);
     try {
-      const created = await createCustomer(newCustomer);
+      const created = await createCustomer(payload);
       if (!created) {
         toast.error('Could not add customer.');
         return;
       }
       setShowAddCustomer(false);
-      setNewCustomer({ name: '', phone: '', address: '', previousDues: 0 });
+      setNewCustomer({ name: '', phone: '', address: '', previousDues: 0, isVendor: false });
       toast.success(`"${created.name}" added.`);
       // createCustomer only ever returns the raw Customer record, not a
       // full ledger entry (order history/totals) - reload from the ledger
@@ -197,10 +205,10 @@ export default function CustomerDuesPage() {
       // a provisional row so nothing looks lost in the meantime.
       if (isDesktopApp() && isConnectivityFailure(error)) {
         try {
-          const provisional = await queueCreateCustomerOffline(newCustomer);
+          const provisional = await queueCreateCustomerOffline(payload);
           setCustomers((previous) => [...previous, provisional].sort((a, b) => a.name.localeCompare(b.name)));
           setShowAddCustomer(false);
-          setNewCustomer({ name: '', phone: '', address: '', previousDues: 0 });
+          setNewCustomer({ name: '', phone: '', address: '', previousDues: 0, isVendor: false });
           toast.success(`"${provisional.name}" saved offline - will sync automatically once online.`);
           return;
         } catch {
@@ -392,6 +400,10 @@ export default function CustomerDuesPage() {
       toast.error('WhatsApp is not connected. Please connect it in the WhatsApp settings first.');
       return;
     }
+    if (!hasRealPhone(customer.phone)) {
+      toast.error('This customer has no phone number saved - add one (Edit) before sending a reminder.');
+      return;
+    }
     if (!customer.totalDue || customer.totalDue <= 0) {
       toast.info('Customer has no dues.');
       return;
@@ -529,7 +541,7 @@ export default function CustomerDuesPage() {
             />
             <input 
               type="text" 
-              placeholder="Phone Number (e.g. 923...)" 
+              placeholder="Phone Number (optional)" 
               value={newCustomer.phone}
               onChange={e => setNewCustomer({...newCustomer, phone: e.target.value})}
               className="p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold outline-none focus:ring-2 focus:ring-indigo-500" 
@@ -542,6 +554,15 @@ export default function CustomerDuesPage() {
               className="p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold outline-none focus:ring-2 focus:ring-indigo-500" 
             />
           </div>
+          <label className="flex items-center gap-2 text-sm font-bold text-slate-600 select-none">
+            <input
+              type="checkbox"
+              checked={newCustomer.isVendor}
+              onChange={e => setNewCustomer({...newCustomer, isVendor: e.target.checked})}
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            Is this a vendor? (someone the shop also buys stock from)
+          </label>
           <button onClick={handleAddCustomer} disabled={isAddingCustomer} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed">
             {isAddingCustomer ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} {isAddingCustomer ? 'Saving...' : 'Save Customer'}
           </button>
@@ -567,6 +588,7 @@ export default function CustomerDuesPage() {
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
                   onOrderCancelled={loadCustomers}
+                  onCustomerChanged={loadCustomers}
                   whatsappConnected={whatsappConnected}
                 />
               ))}
@@ -604,6 +626,7 @@ export default function CustomerDuesPage() {
                   onSettlePayment={handleSettlePayment}
                   onRemind={() => handleSendReminder(c)}
                   onOrderCancelled={loadCustomers}
+                  onCustomerChanged={loadCustomers}
                   whatsappConnected={whatsappConnected}
                 />
               ))}
@@ -652,8 +675,66 @@ function todayDateInputValue() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, onRemind, onOrderCancelled, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], grains: Grain[], onAddManual: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, whatsappConnected: boolean }) {
+function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, onRemind, onOrderCancelled, onCustomerChanged, whatsappConnected }: { customer: LedgerCustomer, banks: Bank[], grains: Grain[], onAddManual: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onSettlePayment: (phone: string, amount: number, note: string, payment?: DuesPaymentOption, printWindow?: Window | null) => Promise<boolean>, onRemind: () => void, onOrderCancelled: () => void, onCustomerChanged: () => void, whatsappConnected: boolean }) {
   const { confirm, toast } = useToast();
+  // Edit Customer - a small inline form toggled from the header's Pencil
+  // icon, reusing the exact same name/phone/address/isVendor shape the
+  // "Add Customer" form above uses. Delete Customer - the header's Trash2
+  // icon, guarded by the same confirm() dialog every other destructive
+  // action on this page already uses (Clear dues, cancel order/purchase).
+  const [showEditCustomer, setShowEditCustomer] = useState(false);
+  const [editCustomer, setEditCustomer] = useState({ name: customer.name, phone: hasRealPhone(customer.phone) ? customer.phone : '', address: customer.address, isVendor: Boolean(customer.isVendor) });
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isDeletingCustomer, setIsDeletingCustomer] = useState(false);
+
+  async function handleSaveEditCustomer() {
+    if (!editCustomer.name.trim()) {
+      toast.error('Name is required.');
+      return;
+    }
+    setIsSavingEdit(true);
+    try {
+      const updated = await updateCustomer(customer.id, {
+        name: editCustomer.name.trim(),
+        // Left blank on edit the same as on Add - keeps (or gets) a
+        // synthetic placeholder rather than an empty string, so this
+        // customer stays correctly keyed everywhere phone-keyed routes
+        // still look it up by phone (see customer-contact.ts).
+        phone: editCustomer.phone.trim() || (hasRealPhone(customer.phone) ? customer.phone : generatePlaceholderPhone()),
+        address: editCustomer.address,
+        isVendor: editCustomer.isVendor,
+      });
+      if (!updated) {
+        toast.error('Could not update customer.');
+        return;
+      }
+      toast.success(`"${updated.name}" updated.`);
+      setShowEditCustomer(false);
+      onCustomerChanged();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not update customer.');
+    } finally {
+      setIsSavingEdit(false);
+    }
+  }
+
+  async function handleDeleteCustomer() {
+    const confirmed = await confirm(
+      `Delete ${customer.name}? This removes them from Customer Dues entirely - their past orders/purchases keep their own record, but this contact and its dues history will be gone for good.`,
+      { title: 'Delete customer', confirmText: 'Delete', tone: 'danger' }
+    );
+    if (!confirmed) return;
+    setIsDeletingCustomer(true);
+    try {
+      await deleteCustomer(customer.id);
+      toast.success(`"${customer.name}" deleted.`);
+      onCustomerChanged();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete customer.');
+    } finally {
+      setIsDeletingCustomer(false);
+    }
+  }
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
@@ -1130,7 +1211,7 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
     return (
       <ReportPdfDocument
         title="Customer Dues Statement"
-        subtitle={`${customer.name} · ${customer.phone} · ${historyRangeLabel}`}
+        subtitle={`${customer.name}${hasRealPhone(customer.phone) ? ` · ${customer.phone}` : ''} · ${historyRangeLabel}`}
         stats={[
           { label: 'Current Dues', value: `Rs ${totalDue}` },
           { label: 'From Unpaid Orders', value: `Rs ${fromOrders}` },
@@ -1194,6 +1275,10 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
       toast.error('WhatsApp is not connected. Please connect it in the WhatsApp settings first.');
       return;
     }
+    if (!hasRealPhone(customer.phone)) {
+      toast.error('This customer has no phone number saved - add one (Edit) before sending on WhatsApp.');
+      return;
+    }
     try {
       setIsSendingPdf(true);
       const { pdfDocumentToBase64 } = await import('@/lib/pdf-export');
@@ -1215,8 +1300,80 @@ function CustomerCard({ customer, banks, grains, onAddManual, onSettlePayment, o
   return (
     <div className={`p-6 rounded-[28px] border ${isPending ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 bg-white'} shadow-sm flex flex-col gap-4`}>
       <div>
-        <h3 className="font-black text-lg text-slate-900">{customer.name}</h3>
-        <p className="text-sm font-bold text-slate-500 flex items-center gap-1 mt-1"><Phone size={14} /> {customer.phone}</p>
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="font-black text-lg text-slate-900">{customer.name}{customer.isVendor ? <span className="ml-2 align-middle rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-indigo-600">Vendor</span> : null}</h3>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => { setEditCustomer({ name: customer.name, phone: hasRealPhone(customer.phone) ? customer.phone : '', address: customer.address, isVendor: Boolean(customer.isVendor) }); setShowEditCustomer((previous) => !previous); }}
+              title="Edit customer"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+            >
+              <Pencil size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDeleteCustomer()}
+              disabled={isDeletingCustomer}
+              title="Delete customer"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+        <p className="text-sm font-bold text-slate-500 flex items-center gap-1 mt-1"><Phone size={14} /> {hasRealPhone(customer.phone) ? customer.phone : 'No phone number'}</p>
+        {showEditCustomer ? (
+          <div className="mt-3 space-y-2 rounded-2xl border border-indigo-100 bg-indigo-50/50 p-3">
+            <input
+              type="text"
+              placeholder="Full Name"
+              value={editCustomer.name}
+              onChange={e => setEditCustomer({...editCustomer, name: e.target.value})}
+              className="w-full p-2 bg-white rounded-lg border border-slate-200 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <input
+              type="text"
+              placeholder="Phone Number (optional)"
+              value={editCustomer.phone}
+              onChange={e => setEditCustomer({...editCustomer, phone: e.target.value})}
+              className="w-full p-2 bg-white rounded-lg border border-slate-200 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <input
+              type="text"
+              placeholder="Address"
+              value={editCustomer.address}
+              onChange={e => setEditCustomer({...editCustomer, address: e.target.value})}
+              className="w-full p-2 bg-white rounded-lg border border-slate-200 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 select-none">
+              <input
+                type="checkbox"
+                checked={editCustomer.isVendor}
+                onChange={e => setEditCustomer({...editCustomer, isVendor: e.target.checked})}
+                className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              Is this a vendor?
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSaveEditCustomer()}
+                disabled={isSavingEdit}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg font-bold text-xs hover:bg-indigo-700 disabled:opacity-60"
+              >
+                {isSavingEdit ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowEditCustomer(false)}
+                className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-bold text-xs text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="flex justify-between items-end border-y border-slate-100 py-3">

@@ -102,9 +102,9 @@ export async function deleteProduct(id: string | number) {
   }
 }
 
-export async function fetchCustomerSearch(query: string, searchBy: 'name' | 'phone' | 'both' = 'both') {
+export async function fetchCustomerSearch(query: string, searchBy: 'name' | 'phone' | 'both' = 'both', vendorOnly?: boolean) {
   try {
-    const response = await api.get<Customer[]>('/customers/search', { params: { q: query, searchBy } });
+    const response = await api.get<Customer[]>('/customers/search', { params: { q: query, searchBy, vendorOnly: vendorOnly ? 'true' : undefined } });
     return response.data.map((customer) => normalizeCustomer(customer as Customer & { _id?: string; updatedAt?: string }));
   } catch (error) {
     handleApiError(error);
@@ -148,6 +148,15 @@ export async function updateCustomer(id: string, payload: Partial<Customer>) {
   try {
     const response = await api.patch<Customer & { _id?: string }>(`/customers/${id}`, payload);
     return normalizeCustomer(response.data as Customer & { _id?: string; updatedAt?: string });
+  } catch (error) {
+    handleApiError(error);
+  }
+}
+
+export async function deleteCustomer(id: string) {
+  try {
+    const response = await api.delete<{ success: boolean }>(`/customers/${id}`);
+    return response.data;
   } catch (error) {
     handleApiError(error);
   }

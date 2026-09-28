@@ -59,6 +59,10 @@ export interface Customer {
   phone: string;
   address: string;
   previousDues: number;
+  // Set from Customer Dues' "Add Customer"/"Edit Customer" form (a plain
+  // checkbox) - see backend/models/Customer.js's own comment. Purely a
+  // marker for PurchasePage.tsx's "Link to Existing Khata Contact" picker.
+  isVendor?: boolean;
 }
 
 // The Bank page's own khata - same "customer, but the shop borrows from
@@ -348,6 +352,7 @@ export interface LedgerCustomer {
   phone: string;
   address: string;
   previousDues: number;
+  isVendor?: boolean;
   orderCount: number;
   totalBilled: number;
   totalPaid: number;

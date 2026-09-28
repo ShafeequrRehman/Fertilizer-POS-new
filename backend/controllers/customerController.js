@@ -76,6 +76,11 @@ exports.searchCustomers = async (req, res) => {
 
   const baseQuery = { ...shopScope(req) };
   if (filters.length) baseQuery.$or = filters;
+  // PurchasePage.tsx's "Link to Existing Khata Contact" picker passes this
+  // so it only ever offers contacts flagged as a vendor (Customer.isVendor)
+  // - every other caller of this same endpoint (POSPage.tsx's customer
+  // search, etc.) omits it and keeps searching every customer as before.
+  if (String(req.query.vendorOnly) === "true") baseQuery.isVendor = true;
 
   // Alphabetical by name - matches every other customer listing in this
   // app (getAllCustomers/getCustomerLedger both already .sort({ name: 1 }))
@@ -119,6 +124,23 @@ exports.updateCustomer = async (req, res) => {
     return res.status(404).json({ error: "Customer not found" });
   }
   res.json(serializeCustomer(customer));
+};
+
+// Hard delete - safe because Order/IngredientPurchase never actually
+// reference a Customer by id: an Order snapshots its own
+// customer.name/phone/address inline at the time it was placed (see
+// Order.js), and IngredientPurchase.linkedCustomerId is purely an
+// optional display link (see that model's own comment), never enforced
+// referential integrity. So deleting this Customer document never
+// orphans or corrupts an Order/Purchase's own historical record - it
+// just stops showing up in Customer Dues/search/the "Link to Existing
+// Khata Contact" picker going forward.
+exports.deleteCustomer = async (req, res) => {
+  const customer = await Customer.findOneAndDelete({ _id: req.params.id, ...shopScope(req) });
+  if (!customer) {
+    return res.status(404).json({ error: "Customer not found" });
+  }
+  res.json({ success: true });
 };
 
 // GET /api/customers/ledger?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
@@ -282,6 +304,7 @@ exports.getCustomerLedger = async (req, res) => {
         name: customer.name,
         phone: customer.phone,
         address: customer.address || "",
+        isVendor: Boolean(customer.isVendor),
         previousDues,
         orderCount: periodOrders.length,
         totalBilled,
