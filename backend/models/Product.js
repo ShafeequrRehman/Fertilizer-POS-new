@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { INGREDIENT_UNITS } = require("../config/ingredientUnits");
 
 const productSchema = new mongoose.Schema(
   {
@@ -39,6 +40,20 @@ const productSchema = new mongoose.Schema(
     // the moment a shop owner renamed or translated it). "" for every
     // ordinary product - the vast majority.
     specialType: { type: String, enum: ["", "electricity_bill", "cash"], default: "" },
+    // How this product is counted/measured - reuses the exact same unit
+    // list as Ingredient (see config/ingredientUnits.js) so a Product's
+    // auto-created Stock entry (see linkedIngredientId below) is tracked in
+    // the same unit the shop owner picked here. Defaults to "pcs" for a
+    // typical countable item.
+    unit: { type: String, enum: INGREDIENT_UNITS, default: "pcs" },
+    // The Ingredient (Stock page entry) auto-created for this Product when
+    // it was added (see productController.createProduct) - or, if an
+    // Ingredient of the exact same name already existed at that moment,
+    // left null so an existing, possibly already-stocked Ingredient is
+    // never silently "adopted" and later deleted out from under the shop
+    // owner (see productController.deleteProduct's own comment). Purely an
+    // internal link - never edited directly from the frontend.
+    linkedIngredientId: { type: mongoose.Schema.Types.ObjectId, ref: "Ingredient", default: null },
   },
   { timestamps: true }
 );

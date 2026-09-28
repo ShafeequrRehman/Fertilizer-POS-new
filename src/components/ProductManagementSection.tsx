@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Package, Edit, Archive, X, Trash2, Search, ChevronDown, ChevronRight, Upload } from "lucide-react";
 import { createProduct, deleteProduct, fetchProducts, updateProduct } from "@/lib/pos-api";
-import { Product } from "@/lib/pos-types";
+import { IngredientUnit, INGREDIENT_UNIT_OPTIONS, Product } from "@/lib/pos-types";
 import { useToast } from "@/lib/toast";
 import { resolveProductImage } from "@/lib/food-images";
 import { useLanguage } from "@/i18n";
@@ -98,18 +98,6 @@ export function ProductManagementSection({
 
   // General Form states
   const [editingId, setEditingId] = useState<string | number | null>(null);
-  // Editing an entire product GROUP at once (name/category/image shared by
-  // every variation, plus each variation's own name/price/qty) - distinct
-  // from editingId above, which only ever edits ONE Product document (one
-  // size/variation). Triggered by the Edit button on a multi-variation
-  // group's main row (see handleEditGroupClick) - editingId stays null the
-  // whole time, since there's no single product id this represents.
-  const [isEditingGroup, setIsEditingGroup] = useState(false);
-  // The real backend ids of the group's variations at the moment editing
-  // started - used at save time to tell "this row already exists, update
-  // it" apart from "this is a newly added row, create it", and to know
-  // which ones were removed from the list entirely (deleted).
-  const [originalGroupVariationIds, setOriginalGroupVariationIds] = useState<Set<string>>(new Set());
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
@@ -122,17 +110,12 @@ export function ProductManagementSection({
   const [variation, setVariation] = useState("Standard");
   // Product Code / SKU: optional, typed or barcode-scanned on the POS
   // screen to instantly add this exact product/deal to the cart - see
-  // POSPage.tsx's product-code entry box. Used here for a single
-  // (non-variation) product or a Deal; a multi-variation product sets its
-  // own code per size/flavour below instead (variationsData's own
-  // productCode), since each size is really a separate SKU.
+  // POSPage.tsx's product-code entry box.
   const [productCode, setProductCode] = useState("");
-
-  // Variations states (Products only) - defaults ON, see resetForm() below.
-  const [hasVariations, setHasVariations] = useState(true);
-  const [variationsData, setVariationsData] = useState<Array<{ id: string; name: string; price: string; qty: string; productCode: string }>>([
-    { id: "1", name: "", price: "", qty: "", productCode: "" },
-  ]);
+  // How this product is counted/measured - reused from Ingredient's own
+  // unit list (see backend/models/Product.js's own comment) so a newly
+  // added product's auto-created Stock entry is tracked in the same unit.
+  const [unit, setUnit] = useState<IngredientUnit>("pcs");
 
   // Deal fields (isDeal/dealItems/description) no longer have any creation
   // or editing UI here (see "Create Deal" removal) - but an existing Deal
@@ -182,8 +165,6 @@ export function ProductManagementSection({
 
   function resetForm() {
     setEditingId(null);
-    setIsEditingGroup(false);
-    setOriginalGroupVariationIds(new Set());
     setName("");
     setPrice("");
     setQty("");
@@ -192,22 +173,8 @@ export function ProductManagementSection({
     setImage("");
     setVariation("Standard");
     setProductCode("");
+    setUnit("pcs");
     setPreservedDealFields({ isDeal: false, dealItems: [], description: "" });
-    // Defaults to ON for a brand new product - most menu items (pizzas,
-    // burgers, etc.) come in more than one size, so leading with the
-    // Small/Medium/Large rows front-and-center is the common case. A
-    // single-price item (like a canned drink) is still just one unchecked
-    // click away.
-    setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
-  }
-
-  // One-tap presets for the most common size/flavour patterns - replaces
-  // whatever rows are currently in the variations list so picking a preset
-  // twice doesn't pile up duplicates.
-  function applySizePreset(names: string[]) {
-    setHasVariations(true);
-    setVariationsData(names.map((n, i) => ({ id: `${Date.now()}-${i}`, name: n, price: "", qty: "", productCode: "" })));
   }
 
   function getBasePayload() {
@@ -217,6 +184,7 @@ export function ProductManagementSection({
       company: company.trim(),
       image: image,
       color: "bg-indigo-500",
+      unit,
       // Preserved as-is from whatever was already on the product being
       // edited (or the "not a deal" defaults for a brand new product) -
       // there's no UI here to change these anymore, see preservedDealFields.
@@ -237,81 +205,15 @@ export function ProductManagementSection({
       return;
     }
 
-    if (!editingId && !hasVariations && !price) {
+    if (!price) {
       popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequired") });
       return;
-    }
-
-    if (editingId && !price) {
-      popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequired") });
-      return;
-    }
-
-    if (!editingId && hasVariations) {
-      if (variationsData.length === 0) {
-        popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.variationRequired") });
-        return;
-      }
-      for (const v of variationsData) {
-        if (!v.name.trim()) {
-           popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.variationNameRequired") });
-           return;
-        }
-        if (!v.price) {
-           popup({ tone: "error", title: t("productManagement.toasts.missingInfoTitle"), message: t("productManagement.toasts.priceRequiredForVariation", { name: v.name }) });
-           return;
-        }
-      }
     }
 
     try {
       setIsSaving(true);
 
-      if (isEditingGroup) {
-        // Full group edit - reconciles the form's variationsData rows
-        // against what the group originally had: a row whose id is one of
-        // originalGroupVariationIds is an existing Product document, so it
-        // gets updateProduct'd (carrying the possibly-changed shared
-        // name/category/image plus its own price/stock/variation name); a
-        // row with any other id was added via "Add Pattern" just now, so
-        // it gets createProduct'd; anything from the original set that's
-        // no longer present in the list was removed via the row's Trash2
-        // button, so it gets deleted for real.
-        const basePayload = getBasePayload();
-        const keptIds = new Set<string>();
-        const savedProducts: Product[] = [];
-
-        for (const v of variationsData) {
-          const variationName = v.name.trim();
-          const payload = {
-            ...basePayload,
-            price: Number(v.price),
-            stock: v.qty ? Number(v.qty) : 0,
-            variation: variationName,
-            productCode: v.productCode.trim(),
-          };
-          if (originalGroupVariationIds.has(v.id)) {
-            keptIds.add(v.id);
-            const updated = await updateProduct(v.id, payload);
-            if (updated) savedProducts.push(updated);
-          } else {
-            const created = await createProduct(payload);
-            if (created) savedProducts.push(created);
-          }
-        }
-
-        const removedIds = [...originalGroupVariationIds].filter((id) => !keptIds.has(id));
-        for (const id of removedIds) {
-          await deleteProduct(id);
-        }
-
-        setProducts((prev) => [
-          ...prev.filter((p) => !originalGroupVariationIds.has(String(p.id))),
-          ...savedProducts,
-        ]);
-        setStatusMessage({ tone: "success", text: t("productManagement.toasts.groupUpdated", { name }) });
-        resetForm();
-      } else if (editingId) {
+      if (editingId) {
         const payload = {
           ...getBasePayload(),
           price: Number(price),
@@ -326,39 +228,18 @@ export function ProductManagementSection({
           resetForm();
         }
       } else {
-        if (hasVariations) {
-          const newProducts: Product[] = [];
-          
-          for (const v of variationsData) {
-             const variationName = v.name.trim();
-             const payload = {
-               ...getBasePayload(),
-               price: Number(v.price),
-               stock: v.qty ? Number(v.qty) : 0,
-               variation: variationName,
-               productCode: v.productCode.trim(),
-             };
-             const created = await createProduct(payload);
-             if (created) newProducts.push(created);
-          }
-          
-          setProducts((prev) => [...prev, ...newProducts]);
-          setStatusMessage({ tone: "success", text: t("productManagement.toasts.variantsAdded", { count: newProducts.length, name }) });
+        const payload = {
+          ...getBasePayload(),
+          price: Number(price),
+          stock: qty ? Number(qty) : 0,
+          variation: "Standard",
+          productCode: productCode.trim(),
+        };
+        const created = await createProduct(payload);
+        if (created) {
+          setProducts((prev) => [...prev, created]);
+          setStatusMessage({ tone: "success", text: t("productManagement.toasts.productAdded", { name: created.name }) });
           resetForm();
-        } else {
-          const payload = {
-            ...getBasePayload(),
-            price: Number(price),
-            stock: qty ? Number(qty) : 0,
-            variation: "Standard",
-            productCode: productCode.trim(),
-          };
-          const created = await createProduct(payload);
-          if (created) {
-            setProducts((prev) => [...prev, created]);
-            setStatusMessage({ tone: "success", text: t("productManagement.toasts.productAdded", { name: created.name }) });
-            resetForm();
-          }
         }
       }
     } catch (error) {
@@ -370,8 +251,6 @@ export function ProductManagementSection({
 
   function handleEditClick(product: Product) {
     setEditingId(product.id);
-    setIsEditingGroup(false);
-    setOriginalGroupVariationIds(new Set());
     setName(product.name);
     setPrice(product.price.toString());
     setQty(product.stock > 0 ? product.stock.toString() : "");
@@ -379,7 +258,7 @@ export function ProductManagementSection({
     setProductCode(product.productCode || "");
     setCategory(product.category);
     setCompany(product.company || "");
-    setHasVariations(false);
+    setUnit(product.unit || "pcs");
     setVariation(product.variation || "Standard");
     // Carry through whatever deal-only fields this product already had
     // (there's no UI here to change them) so saving doesn't strip an
@@ -412,65 +291,6 @@ export function ProductManagementSection({
     } catch (error) {
       popup({ tone: "error", title: t("productManagement.toasts.deleteFailedTitle"), message: error instanceof Error ? error.message : t("productManagement.toasts.deleteFailedFallback") });
     }
-  }
-
-  // Full edit of an entire product group at once - the name/category/icon
-  // shared by every variation, plus each variation's own name/price/stock,
-  // all in the same form used to add a brand new product (same "Add
-  // Pattern"/remove-row/preset controls). See isEditingGroup's own comment
-  // above for how this differs from handleEditClick (which only ever edits
-  // one variation/Product document at a time).
-  function handleEditGroupClick(group: ProductGroup) {
-    resetForm();
-    setIsEditingGroup(true);
-    setName(group.name);
-    setCategory(group.category);
-    setCompany(group.company || "");
-    setImage(group.image || "");
-    setHasVariations(true);
-    setOriginalGroupVariationIds(new Set(group.variations.map((v) => String(v.id))));
-    setVariationsData(
-      group.variations.map((v) => ({
-        id: String(v.id),
-        name: v.variation && v.variation !== "Standard" ? v.variation : "Standard",
-        price: v.price.toString(),
-        qty: v.stock > 0 ? v.stock.toString() : "",
-        productCode: v.productCode || "",
-      }))
-    );
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  // Prefills the top form to add another variation to an existing product
-  // group (e.g. adding "Large" to a Pizza that currently only has Small/Medium).
-  function handleAddVariationClick(group: ProductGroup) {
-    resetForm();
-    setName(group.name);
-    setCategory(group.category);
-    setCompany(group.company || "");
-    setImage(group.image || "");
-    setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  // Same idea as handleAddVariationClick, but triggered from inside the Edit
-  // Product form itself (the "Add Pattern" button next to Variation Name) -
-  // reuses whatever name/category/icon are currently on screen instead of
-  // needing a ProductGroup, since we're already editing one of its variations.
-  function handleAddVariationFromEdit() {
-    const groupName = name;
-    const groupCategory = category;
-    const groupCompany = company;
-    const groupImage = image;
-    resetForm();
-    setName(groupName);
-    setCategory(groupCategory);
-    setCompany(groupCompany);
-    setImage(groupImage);
-    setHasVariations(true);
-    setVariationsData([{ id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   // Handles a file picked (or dropped) via the "Upload Photo" button/input -
@@ -541,9 +361,9 @@ export function ProductManagementSection({
 
       <div className="rounded-[32px] border border-slate-100 bg-slate-50 p-6 space-y-6 shadow-sm">
 
-        {(editingId || isEditingGroup) && (
+        {editingId && (
           <h4 className="text-sm font-black uppercase text-indigo-600 tracking-wider flex items-center gap-2 border-b border-indigo-100 pb-3">
-            <Edit size={16} /> {isEditingGroup ? t("productManagement.editHeading.group") : t("productManagement.editHeading.single")}
+            <Edit size={16} /> {t("productManagement.editHeading.single")}
           </h4>
         )}
 
@@ -611,184 +431,72 @@ export function ProductManagementSection({
           </div>
         </div>
 
-        {/* Global Price & Qty for a single (non-variation) product */}
-        {(!hasVariations || editingId) && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-2">
-            <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("common.price")}</label>
-              <div className="relative">
-                <span className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-slate-300 font-black text-[14px]">PKR</span>
-                <input
-                  type="number"
-                  value={price}
-                  onChange={(e) => setPrice(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white pl-12 pr-4 rtl:pl-4 rtl:pr-12 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.quantity")}</label>
+        {/* Price, Unit, Quantity, Product Code - every product is now
+            single-variation only (the old "Add sizes/flavours" multi-
+            variation creation flow has been removed entirely). Existing
+            multi-variation products created before this change still
+            display/expand correctly in the directory list below, and each
+            of their variations can still be edited/deleted individually. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-2">
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("common.price")}</label>
+            <div className="relative">
+              <span className="absolute left-4 rtl:left-auto rtl:right-4 top-1/2 -translate-y-1/2 text-slate-300 font-black text-[14px]">PKR</span>
               <input
                 type="number"
-                value={qty}
-                onChange={(e) => setQty(e.target.value)}
-                placeholder={t("productManagement.fields.quantityPlaceholder")}
-                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+                value={price}
+                onChange={(e) => setPrice(e.target.value)}
+                placeholder="0.00"
+                className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white pl-12 pr-4 rtl:pl-4 rtl:pr-12 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.quantity")}</label>
+            <input
+              type="number"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              placeholder={t("productManagement.fields.quantityPlaceholder")}
+              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.unit")}</label>
+            <select
+              value={unit}
+              onChange={(e) => setUnit(e.target.value as IngredientUnit)}
+              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            >
+              {INGREDIENT_UNIT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-[10px] font-bold text-slate-400 ml-1">{t("productManagement.fields.unitHint")}</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.productCode")}</label>
+            <input
+              type="text"
+              value={productCode}
+              onChange={(e) => setProductCode(e.target.value)}
+              placeholder={t("productManagement.fields.productCodePlaceholder")}
+              className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            />
+          </div>
+          {editingId && (
             <div className="space-y-2 md:col-span-2">
-              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.productCode")}</label>
+              <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.variationName")}</label>
               <input
                 type="text"
-                value={productCode}
-                onChange={(e) => setProductCode(e.target.value)}
-                placeholder={t("productManagement.fields.productCodePlaceholder")}
+                value={variation}
+                onChange={(e) => setVariation(e.target.value)}
+                placeholder={t("productManagement.fields.variationNamePlaceholder")}
                 className="w-full rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
               />
             </div>
-            {editingId && (
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">{t("productManagement.fields.variationName")}</label>
-                <div className="flex flex-wrap items-center gap-3">
-                  <input
-                    type="text"
-                    value={variation}
-                    onChange={(e) => setVariation(e.target.value)}
-                    placeholder={t("productManagement.fields.variationNamePlaceholder")}
-                    className="flex-1 min-w-[200px] rounded-2xl border-none ring-1 ring-slate-200 bg-white px-4 py-3.5 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddVariationFromEdit}
-                    title={t("productManagement.fields.addPatternTitle")}
-                    className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-5 py-3.5 rounded-2xl transition-colors shadow-sm shrink-0"
-                  >
-                    <Plus size={14} /> {t("productManagement.variations.addPattern")}
-                  </button>
-                </div>
-                <p className="text-[10px] font-bold text-slate-400 ml-1">{t("productManagement.fields.addPatternHint")}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Variations UI - only when creating a brand new product */}
-        {!editingId && (
-          <div className="pt-2">
-            <label className="flex items-center gap-3 cursor-pointer mb-4 p-4 rounded-2xl bg-white ring-1 ring-slate-200 hover:bg-slate-50 transition-colors">
-              <input
-                type="checkbox"
-                checked={hasVariations}
-                onChange={(e) => {
-                  setHasVariations(e.target.checked);
-                  if (e.target.checked) setPrice("");
-                }}
-                className="w-5 h-5 text-indigo-600 rounded accent-indigo-600"
-              />
-              <div className="flex flex-col">
-                <span className="text-sm font-black text-slate-800">{t("productManagement.variations.addToggleLabel")}</span>
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">{t("productManagement.variations.addToggleHint")}</span>
-              </div>
-            </label>
-
-            {hasVariations && (
-              <div className="space-y-3 pl-6 rtl:pl-0 rtl:pr-6 border-l-2 rtl:border-l-0 rtl:border-r-2 border-indigo-100 py-2">
-                <div className="flex flex-wrap items-center gap-2 pb-1">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1 rtl:mr-0 rtl:ml-1">{t("productManagement.variations.quickFill")}</span>
-                  <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    {t("productManagement.variations.presetSmallMediumLarge")}
-                  </button>
-                  <button type="button" onClick={() => applySizePreset(["Small", "Medium", "Large", "X-Large"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    {t("productManagement.variations.presetXLarge")}
-                  </button>
-                  <button type="button" onClick={() => applySizePreset(["Half", "Full"])} className="rounded-full bg-slate-100 hover:bg-indigo-100 hover:text-indigo-700 px-3 py-1.5 text-[11px] font-black text-slate-600 transition-colors">
-                    {t("productManagement.variations.presetHalfFull")}
-                  </button>
-                </div>
-                {variationsData.map((v, i) => (
-                  <div key={v.id} className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-2xl ring-1 ring-slate-200 shadow-sm relative group">
-                    <div className="flex-1 min-w-[150px]">
-                      <input 
-                        type="text" 
-                        placeholder={t("productManagement.variations.namePlaceholder")}
-                        value={v.name} 
-                        onChange={(e) => {
-                          const newVars = [...variationsData];
-                          newVars[i].name = e.target.value;
-                          setVariationsData(newVars);
-                        }} 
-                        className="w-full rounded-[14px] border border-slate-200 px-4 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all" 
-                      />
-                    </div>
-                    <div className="relative w-28">
-                      <span className="absolute left-3 rtl:left-auto rtl:right-3 top-1/2 -translate-y-1/2 text-slate-300 font-bold text-[10px]">PKR</span>
-                      <input
-                        type="number"
-                        placeholder={t("productManagement.variations.pricePlaceholder")}
-                        value={v.price}
-                        onChange={(e) => {
-                          const newVars = [...variationsData];
-                          newVars[i].price = e.target.value;
-                          setVariationsData(newVars);
-                        }}
-                        className="w-full rounded-[14px] border border-slate-200 pl-9 pr-2 rtl:pl-2 rtl:pr-9 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
-                      />
-                    </div>
-                    <div className="w-24">
-                      <input
-                        type="number"
-                        placeholder={t("productManagement.variations.qtyPlaceholder")}
-                        value={v.qty}
-                        onChange={(e) => {
-                          const newVars = [...variationsData];
-                          newVars[i].qty = e.target.value;
-                          setVariationsData(newVars);
-                        }}
-                        className="w-full rounded-[14px] border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
-                      />
-                    </div>
-                    <div className="w-36">
-                      <input
-                        type="text"
-                        placeholder={t("productManagement.variations.codePlaceholder")}
-                        value={v.productCode}
-                        onChange={(e) => {
-                          const newVars = [...variationsData];
-                          newVars[i].productCode = e.target.value;
-                          setVariationsData(newVars);
-                        }}
-                        className="w-full rounded-[14px] border border-slate-200 px-3 py-2.5 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
-                      />
-                    </div>
-                    {variationsData.length > 1 && (
-                      <button 
-                        type="button"
-                        onClick={() => {
-                          setVariationsData(variationsData.filter(item => item.id !== v.id));
-                        }}
-                        className="p-2.5 text-rose-400 hover:text-white hover:bg-rose-500 rounded-[12px] transition-colors shadow-sm"
-                        title={t("productManagement.variations.removeTitle")}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
-                ))}
-                
-                <button
-                  type="button"
-                  onClick={() => {
-                    setVariationsData([...variationsData, { id: Date.now().toString(), name: "", price: "", qty: "", productCode: "" }]);
-                  }}
-                  className="mt-3 inline-flex items-center gap-2 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-5 py-3 rounded-[16px] transition-colors shadow-sm"
-                >
-                  <Plus size={14} /> {t("productManagement.variations.addPattern")}
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Product Photo - manual upload only (the old preset restaurant-
             icon grid - burgers, pizza slices, etc. - was removed as not
@@ -843,11 +551,11 @@ export function ProductManagementSection({
             disabled={isSaving}
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-2xl border-[0.5px] border-white/30 bg-indigo-600 px-8 py-4 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-3px_7px_rgba(49,46,129,0.5)] transition-all hover:-translate-y-0.5"
           >
-            {(editingId || isEditingGroup) ? <Edit size={16} /> : <Plus size={16} />}
-            {isSaving ? t("common.saving") : ((editingId || isEditingGroup) ? t("productManagement.actions.updateProduct") : t("productManagement.actions.publishProduct"))}
+            {editingId ? <Edit size={16} /> : <Plus size={16} />}
+            {isSaving ? t("common.saving") : (editingId ? t("productManagement.actions.updateProduct") : t("productManagement.actions.publishProduct"))}
           </button>
 
-          {(editingId || isEditingGroup) && (
+          {editingId && (
             <button
               type="button"
               onClick={resetForm}
@@ -963,28 +671,7 @@ export function ProductManagementSection({
                         <span>{totalStock > 0 ? t("productManagement.directory.inStock", { count: totalStock }) : t("common.unlimited")}</span>
                       </div>
                     </div>
-                    {hasMultiple ? (
-                      !group.isDeal && (
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handleEditGroupClick(group)}
-                            title={t("productManagement.directory.editGroupTitle")}
-                            className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-sm"
-                          >
-                            <Edit size={16} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleAddVariationClick(group)}
-                            title={t("productManagement.directory.addVariationTitle")}
-                            className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-black text-indigo-700 bg-indigo-100 hover:bg-indigo-200 px-3 py-2.5 rounded-xl transition-colors shadow-sm shrink-0"
-                          >
-                            <Plus size={14} /> {t("common.add")}
-                          </button>
-                        </div>
-                      )
-                    ) : (
+                    {hasMultiple ? null : (
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                         <button
                           onClick={() => handleEditClick(single)}

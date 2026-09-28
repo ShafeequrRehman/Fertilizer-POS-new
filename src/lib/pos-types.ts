@@ -35,6 +35,18 @@ export interface Product {
   // See backend/models/Product.js's own comment; drives POSPage.tsx's
   // special Bill/Cash checkout fields and auto-settled payment.
   specialType?: '' | 'electricity_bill' | 'cash';
+  // How this product is counted/measured (defaults to 'pcs' server-side) -
+  // reused from Ingredient's own unit list so a Product's auto-created
+  // Stock entry (see linkedIngredientId below) is tracked in the same unit
+  // the shop owner picked for it here.
+  unit?: IngredientUnit;
+  // The Ingredient (Stock page entry) this Product was auto-linked to at
+  // creation time - see backend/controllers/productController.js's
+  // createProduct. null/undefined when no same-named Ingredient existed yet
+  // at creation time and none was auto-created (e.g. very old products from
+  // before this feature existed). Read-only from the frontend's point of
+  // view - never sent back up in ProductInput.
+  linkedIngredientId?: string | null;
 }
 
 export interface ProductInput {
@@ -51,6 +63,7 @@ export interface ProductInput {
   productCode?: string;
   company?: string;
   specialType?: '' | 'electricity_bill' | 'cash';
+  unit?: IngredientUnit;
 }
 
 export interface Customer {

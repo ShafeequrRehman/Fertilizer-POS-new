@@ -14,6 +14,8 @@ export const productManagement = {
     productNameHint: 'یہ "{{category}}" کے تحت اپنے کارڈ کی صورت میں ظاہر ہوگا - نیچے اس کے سائز/اقسام شامل کریں۔',
     quantity: "مقدار / اسٹاک (اختیاری)",
     quantityPlaceholder: "خالی چھوڑنے پر لامحدود",
+    unit: "یونٹ",
+    unitHint: "یہ پروڈکٹ کس طرح گنا/ناپا جاتا ہے - اسٹاک پیج پر ٹریک کرنے کے لیے استعمال ہوگا۔",
     productCode: "پروڈکٹ کوڈ / SKU (اختیاری)",
     productCodePlaceholder: "بار کوڈ ٹائپ کریں یا اسکین کریں - عملہ اسے فوراً POS اسکرین پر شامل کر سکے گا",
     variationName: "قسم کا نام",

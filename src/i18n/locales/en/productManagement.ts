@@ -16,6 +16,8 @@ export const productManagement = {
     productNameHint: 'This is what shows as its own card under "{{category}}" - add its sizes/flavours below.',
     quantity: "Quantity / Stock (Optional)",
     quantityPlaceholder: "Unlimited if empty",
+    unit: "Unit",
+    unitHint: "How this product is counted/measured - used to track it on the Stock page.",
     productCode: "Product Code / SKU (Optional)",
     productCodePlaceholder: "Type or scan a barcode - lets staff add this instantly on the POS screen",
     variationName: "Variation Name",

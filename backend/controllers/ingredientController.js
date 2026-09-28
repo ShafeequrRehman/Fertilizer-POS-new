@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const IngredientCategory = require("../models/IngredientCategory");
 const Ingredient = require("../models/Ingredient");
+const Product = require("../models/Product");
 const Recipe = require("../models/Recipe");
 const IngredientPurchase = require("../models/IngredientPurchase");
 const Order = require("../models/Order");
@@ -199,9 +200,24 @@ exports.restockIngredient = async (req, res) => {
   res.json(ingredient);
 };
 
+// Deleting a Stock/Ingredient entry directly from the Stock page never
+// touches the Product it may be linked from (Product.linkedIngredientId -
+// see productController.createProduct/deleteProduct) - that link is only
+// ever used the other way around (Product delete -> also remove its own
+// auto-created Stock entry). Just clears the now-dangling reference on any
+// Product(s) pointing at this Ingredient so it doesn't silently point at a
+// deleted document; purely hygiene, never fails/blocks the delete itself.
 exports.deleteIngredient = async (req, res) => {
   const ingredient = await Ingredient.findOneAndDelete({ _id: req.params.id, ...shopScope(req) });
   if (!ingredient) return res.status(404).json({ error: "Ingredient not found" });
+  try {
+    await Product.updateMany(
+      { shopId: ingredient.shopId, linkedIngredientId: ingredient._id },
+      { $set: { linkedIngredientId: null } }
+    );
+  } catch (error) {
+    console.error("[Product->Stock auto-link] Failed to clear dangling Stock link:", error.message);
+  }
   res.json({ message: "Ingredient deleted", id: req.params.id });
 };
 

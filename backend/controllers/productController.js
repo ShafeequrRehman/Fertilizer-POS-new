@@ -1,4 +1,5 @@
 const Product = require("../models/Product");
+const Ingredient = require("../models/Ingredient");
 const { shopScope } = require("../middleware/attachShopScope");
 const { escapeRegex } = require("../utils/escapeRegex");
 
@@ -40,9 +41,42 @@ exports.getProduct = async (req, res) => {
   res.json(product);
 };
 
+// Task 6: a brand new Product should automatically show up on the Stock
+// page with 0 starting quantity, so the shop owner never has to remember
+// to manually create a matching Ingredient by hand. Only creates a NEW
+// Ingredient when no Ingredient of that exact same name already exists for
+// this shop - if one does, it's left alone entirely (linkedIngredientId
+// stays null) rather than "adopting" it, since an existing Ingredient may
+// already carry real purchase history/stock that must never be at risk of
+// being deleted later just because a same-named Product gets deleted (see
+// deleteProduct below). This is purely a convenience side-effect - it never
+// blocks/fails product creation itself if it errors for any reason.
+async function autoLinkIngredientForNewProduct(product) {
+  try {
+    const trimmedName = String(product.name || "").trim();
+    if (!trimmedName) return;
+    const existing = await Ingredient.findOne({
+      shopId: product.shopId,
+      name: { $regex: `^${escapeRegex(trimmedName)}$`, $options: "i" },
+    });
+    if (existing) return;
+    const ingredient = await Ingredient.create({
+      shopId: product.shopId,
+      name: trimmedName,
+      unit: product.unit || "pcs",
+      currentStock: 0,
+    });
+    product.linkedIngredientId = ingredient._id;
+    await product.save();
+  } catch (error) {
+    console.error("[Product->Stock auto-link] Failed to auto-create Stock entry:", error.message);
+  }
+}
+
 exports.createProduct = async (req, res) => {
   try {
     const product = await Product.create({ ...req.body, shopId: req.user.shopId });
+    await autoLinkIngredientForNewProduct(product);
     res.status(201).json(product);
   } catch (error) {
     // Duplicate Product Code within this shop (see Product.js's partial
@@ -80,10 +114,27 @@ exports.updateProduct = async (req, res) => {
 // single-variation product). There was previously no way to remove a
 // product/variation at all once created; this is what backs the trash
 // icon on each variation row in Manage Products.
+//
+// Task 6: deleting a Product from Manage Products also removes its Stock
+// entry (linkedIngredientId, set at creation time by
+// autoLinkIngredientForNewProduct above) - but ONLY the exact Ingredient
+// this Product itself auto-created; an Ingredient the shop owner manually
+// created (or one that already existed under the same name before this
+// Product was added) is never touched by this, since linkedIngredientId is
+// only ever set on that auto-create path. The reverse (deleting from the
+// Stock page) intentionally does NOT delete the Product - see
+// ingredientController.deleteIngredient.
 exports.deleteProduct = async (req, res) => {
   const product = await Product.findOneAndDelete({ _id: req.params.id, ...shopScope(req) });
   if (!product) {
     return res.status(404).json({ error: "Product not found" });
+  }
+  if (product.linkedIngredientId) {
+    try {
+      await Ingredient.findOneAndDelete({ _id: product.linkedIngredientId, shopId: product.shopId });
+    } catch (error) {
+      console.error("[Product->Stock auto-link] Failed to remove linked Stock entry:", error.message);
+    }
   }
   res.json({ message: "Product deleted", id: req.params.id });
 };
