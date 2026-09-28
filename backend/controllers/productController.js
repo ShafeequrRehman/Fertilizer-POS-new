@@ -60,11 +60,15 @@ async function autoLinkIngredientForNewProduct(product) {
       name: { $regex: `^${escapeRegex(trimmedName)}$`, $options: "i" },
     });
     if (existing) return;
+    // Starting Stock quantity - whatever the shop owner typed into the
+    // "Quantity" field on the Add Product form (product.stock) becomes the
+    // new Ingredient's starting currentStock; left blank on the form,
+    // Product.stock already defaults to 0 on the schema, so this is 0 too.
     const ingredient = await Ingredient.create({
       shopId: product.shopId,
       name: trimmedName,
       unit: product.unit || "pcs",
-      currentStock: 0,
+      currentStock: Number(product.stock) || 0,
     });
     product.linkedIngredientId = ingredient._id;
     await product.save();
