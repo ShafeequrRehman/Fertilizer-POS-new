@@ -41,6 +41,7 @@ export const purchase = {
   status: {
     received: "موصول ہو گیا",
     pending: "زیر التوا",
+    cancelled: "منسوخ شدہ",
     paidInFull: "مکمل ادائیگی",
     awaitingDelivery: "ترسیل کا انتظار",
   },
@@ -125,6 +126,14 @@ export const purchase = {
     loading: "خریداری آرڈرز لوڈ ہو رہے ہیں...",
     noMatches: "موجودہ فلٹرز سے کوئی خریداری آرڈر مماثل نہیں ہے۔",
     markReceived: "موصول شدہ نشان زد کریں",
+    cancelOrder: "آرڈر منسوخ کریں",
+    cancelling: "منسوخ ہو رہا ہے...",
+  },
+
+  cancelOrderConfirm: {
+    title: "خریداری آرڈر منسوخ کریں",
+    message: '"{{po}}" منسوخ کریں؟ اس سے شامل ہونے والا اسٹاک واپس ہو جائے گا اور یہ منسوخ شدہ نشان زد ہو جائے گا - کبھی ڈیلیٹ نہیں ہوگا۔',
+    confirmText: "آرڈر منسوخ کریں",
   },
 
   newOrderModal: {
@@ -173,6 +182,8 @@ export const purchase = {
   toast: {
     loadDirectoryFailed: "سپلائرز/اجزاء لوڈ نہیں ہو سکے۔",
     loadPurchasesFailed: "خریداری آرڈرز لوڈ نہیں ہو سکے۔",
+    cancelOrderSuccess: '"{{po}}" منسوخ کر دیا گیا۔',
+    cancelOrderFailed: "یہ آرڈر منسوخ نہیں ہو سکا۔",
     supplierAdded: '"{{name}}" کو بطور سپلائر کمپنی شامل کر دیا گیا۔',
     addSupplierFailed: "یہ سپلائر شامل نہیں ہو سکا۔",
     selectSupplierFirst: "پہلے ایک سپلائر کمپنی منتخب کریں۔",

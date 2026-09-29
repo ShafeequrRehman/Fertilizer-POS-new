@@ -620,7 +620,7 @@ export interface PurchaseOrderGroup {
   purchaseOrderNumber: string;
   companyName: string;
   supplierId: string | null;
-  status: 'pending' | 'received';
+  status: 'pending' | 'received' | 'cancelled';
   purchaseDate: string;
   receivedAt: string | null;
   items: IngredientPurchase[];

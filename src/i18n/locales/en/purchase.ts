@@ -46,6 +46,7 @@ export const purchase = {
   status: {
     received: "Received",
     pending: "Pending",
+    cancelled: "Cancelled",
     paidInFull: "Paid in full",
     awaitingDelivery: "Awaiting delivery",
   },
@@ -130,6 +131,14 @@ export const purchase = {
     loading: "Loading purchase orders...",
     noMatches: "No purchase orders match the current filters.",
     markReceived: "Mark Received",
+    cancelOrder: "Cancel Order",
+    cancelling: "Cancelling...",
+  },
+
+  cancelOrderConfirm: {
+    title: "Cancel Purchase Order",
+    message: 'Cancel "{{po}}"? This reverses any stock it added and marks it Cancelled - it is never deleted.',
+    confirmText: "Cancel Order",
   },
 
   newOrderModal: {
@@ -178,6 +187,8 @@ export const purchase = {
   toast: {
     loadDirectoryFailed: "Could not load suppliers/ingredients.",
     loadPurchasesFailed: "Could not load purchase orders.",
+    cancelOrderSuccess: '"{{po}}" was cancelled.',
+    cancelOrderFailed: "Could not cancel this order.",
     supplierAdded: 'Added "{{name}}" as a supplier company.',
     addSupplierFailed: "Could not add this supplier.",
     selectSupplierFirst: "Select a Supplier Company first.",

@@ -6,7 +6,7 @@ import {
 import {
   fetchSuppliers, createSupplier, fetchIngredients, fetchIngredientPurchases,
   fetchCompanyLedger, createPurchaseOrder, receivePurchaseOrder, sendWhatsappDocument,
-  fetchCustomerSearch,
+  fetchCustomerSearch, cancelIngredientPurchase,
 } from '@/lib/pos-api';
 import { CompanyLedgerEntry, Customer, Ingredient, IngredientPurchase, PurchaseOrderGroup, PurchaseOrderReceiveItemInput, Supplier } from '@/lib/pos-types';
 import { useToast } from '@/lib/toast';
@@ -121,7 +121,7 @@ function groupPurchasesByOrder(purchases: IngredientPurchase[], t: (key: string,
 }
 
 export default function PurchasePage() {
-  const { toast } = useToast();
+  const { toast, confirm } = useToast();
   const { t } = useLanguage();
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -604,6 +604,9 @@ export default function PurchasePage() {
   const [receivePaymentType, setReceivePaymentType] = useState<'full' | 'partial'>('full');
   const [receivePartialAmount, setReceivePartialAmount] = useState('');
   const [submittingReceive, setSubmittingReceive] = useState(false);
+  // Which purchase order's Cancel button is mid-flight - disables just
+  // that one row's button rather than the whole table while it runs.
+  const [cancellingOrderNumber, setCancellingOrderNumber] = useState<string | null>(null);
 
   function openReceiveModal(group: PurchaseOrderGroup) {
     setReceiveTarget(group);
@@ -668,6 +671,38 @@ export default function PurchasePage() {
       toast.error(error instanceof Error ? error.message : t('purchase.toast.receiveFailed'));
     } finally {
       setSubmittingReceive(false);
+    }
+  }
+
+  // Issue 1 (owner's own ask): a purchase order needs a way to be
+  // "deleted" from this page. A real hard delete would need to losslessly
+  // rewind Ingredient.averageCost (a running weighted average later
+  // purchases/sales may already build on top of), which can't be done
+  // safely - so this reuses the same audited soft-cancel every other
+  // purchase-cancel path in the app already uses (cancelIngredientPurchase -
+  // see backend/controllers/ingredientPurchaseController.js's cancelPurchase
+  // and CancelPurchaseModal.tsx's own comment on why). Vendor Balance and
+  // this page's own Total Purchase figure need no extra bookkeeping here -
+  // both are live-aggregated off IngredientPurchase.status:"received", so a
+  // cancelled order simply drops out of them the next time this page (or
+  // the Dashboard) reloads. A PO can be more than one line item
+  // (groupPurchasesByOrder), so every line sharing this purchaseOrderNumber
+  // is cancelled together.
+  async function handleCancelOrder(group: PurchaseOrderGroup) {
+    const confirmed = await confirm(
+      t('purchase.cancelOrderConfirm.message', { po: group.purchaseOrderNumber }),
+      { title: t('purchase.cancelOrderConfirm.title'), confirmText: t('purchase.cancelOrderConfirm.confirmText'), tone: 'danger' }
+    );
+    if (!confirmed) return;
+    setCancellingOrderNumber(group.purchaseOrderNumber);
+    try {
+      await Promise.all(group.items.map((item) => cancelIngredientPurchase(item.id, {})));
+      toast.success(t('purchase.toast.cancelOrderSuccess', { po: group.purchaseOrderNumber }));
+      refreshAfterMutation();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('purchase.toast.cancelOrderFailed'));
+    } finally {
+      setCancellingOrderNumber(null);
     }
   }
 
@@ -915,11 +950,14 @@ export default function PurchasePage() {
                 ) : filteredOrders.length === 0 ? (
                   <tr><td colSpan={6} className="px-8 py-10 text-center text-sm font-bold text-slate-400">{t('purchase.table.noMatches')}</td></tr>
                 ) : (
-                  filteredOrders.map((po) => (
-                    <tr key={po.purchaseOrderNumber} className="group hover:bg-slate-50/50 transition-colors">
+                  filteredOrders.map((po) => {
+                    const isCancelled = po.status === 'cancelled';
+                    const isCancelling = cancellingOrderNumber === po.purchaseOrderNumber;
+                    return (
+                    <tr key={po.purchaseOrderNumber} className={`group hover:bg-slate-50/50 transition-colors ${isCancelled ? 'opacity-60' : ''}`}>
                       <td className="px-8 py-6">
                         <div className="flex items-center gap-4">
-                          <div className={`w-2 h-2 rounded-full ${po.status === 'received' ? 'bg-emerald-500' : 'bg-indigo-500'}`} />
+                          <div className={`w-2 h-2 rounded-full ${isCancelled ? 'bg-rose-500' : po.status === 'received' ? 'bg-emerald-500' : 'bg-indigo-500'}`} />
                           <div>
                             <div className="text-sm font-black text-slate-900">{po.purchaseOrderNumber}</div>
                             <div className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">{formatDisplayDate(po.purchaseDate)}</div>
@@ -939,35 +977,49 @@ export default function PurchasePage() {
                       </td>
                       <td className="px-8 py-6">
                         <span className={`flex items-center gap-1.5 text-[10px] font-black uppercase px-3 py-1.5 rounded-lg w-fit ${
-                          po.status === 'received' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'
+                          isCancelled ? 'bg-rose-50 text-rose-600' : po.status === 'received' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'
                         }`}>
-                          {po.status === 'received' ? <CheckCircle2 size={12} /> : <Clock size={12} />}
-                          {po.status === 'received' ? t('purchase.status.received') : t('purchase.tabs.pendingDispatched')}
+                          {isCancelled ? <X size={12} /> : po.status === 'received' ? <CheckCircle2 size={12} /> : <Clock size={12} />}
+                          {isCancelled ? t('purchase.status.cancelled') : po.status === 'received' ? t('purchase.status.received') : t('purchase.tabs.pendingDispatched')}
                         </span>
                       </td>
                       <td className="px-8 py-6 text-right rtl:text-left">
                         <div className="text-sm font-black text-slate-900">{formatMoney(po.totalAmount)}</div>
-                        {po.status === 'received' && po.remainingAmount > 0 ? (
+                        {isCancelled ? null : po.status === 'received' && po.remainingAmount > 0 ? (
                           <div className="text-[10px] font-bold text-rose-500 uppercase">{t('purchase.sidebar.dueAmount', { amount: formatMoney(po.remainingAmount) })}</div>
                         ) : (
                           <div className="text-[10px] font-bold text-indigo-500 uppercase">{po.status === 'received' ? t('purchase.status.paidInFull') : t('purchase.status.awaitingDelivery')}</div>
                         )}
                       </td>
                       <td className="px-8 py-6 text-right rtl:text-left">
-                        {po.status === 'pending' ? (
-                          <button
-                            type="button"
-                            onClick={() => openReceiveModal(po)}
-                            className="rounded-xl bg-emerald-500 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-white hover:bg-emerald-600 transition-colors"
-                          >
-                            {t('purchase.table.markReceived')}
-                          </button>
-                        ) : (
+                        {isCancelled ? (
                           <span className="text-[10px] font-bold text-slate-300">-</span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1.5">
+                            {po.status === 'pending' ? (
+                              <button
+                                type="button"
+                                onClick={() => openReceiveModal(po)}
+                                className="rounded-xl bg-emerald-500 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-white hover:bg-emerald-600 transition-colors"
+                              >
+                                {t('purchase.table.markReceived')}
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => void handleCancelOrder(po)}
+                              disabled={isCancelling}
+                              title={t('purchase.table.cancelOrder')}
+                              className="rounded-xl bg-rose-50 p-2 text-rose-500 hover:bg-rose-100 hover:text-rose-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>

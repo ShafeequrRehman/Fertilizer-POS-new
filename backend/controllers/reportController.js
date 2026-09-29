@@ -592,11 +592,46 @@ exports.getDashboardSummary = async (req, res) => {
       // Manual per-tile corrections (Task 1's "every box editable" ask) -
       // see DashboardAdjustment.js's own comment on why cashInHand/
       // balanceOnBank are excluded (they already own a real edit home).
-      DashboardAdjustment.find({ shopId: shopObjectId }).select("key total").lean(),
+      // `history` is selected too (not just the running `total`) because
+      // the period-based tiles below need to know WHEN each correction was
+      // made, not just its all-time running sum - see PERIOD_ADJUSTMENT_KEYS.
+      DashboardAdjustment.find({ shopId: shopObjectId }).select("key total history").lean(),
+    ]);
+    // Which corrections are tied to a specific day (Today/This Month/
+    // Custom all bucket by date) vs. a plain running BALANCE that has no
+    // "day" of its own (Stock Value, Vendor Balance, Customer Udhar/
+    // Advance are live snapshots - a correction to one of these should
+    // stay applied no matter which range is being viewed).
+    //
+    // Bug this fixes: a correction made on the "(Today)"/"(This Month)"
+    // tiles used to be one single all-time running total
+    // (DashboardAdjustment.total) added on top of EVERY range's own live
+    // figure, regardless of range - so a -700 correction entered while
+    // looking at This Month would also show up as -700 on Today (and any
+    // other day), even though it had nothing to do with today. Now, for
+    // these period tiles only, each correction is scoped to the day it was
+    // actually entered on (its own history entry's createdAt) and only
+    // counted when that day falls inside the range currently being viewed.
+    const PERIOD_ADJUSTMENT_KEYS = new Set([
+      "totalSaleToday",
+      "saleOnCash",
+      "saleOnBank",
+      "saleOnCredit",
+      "totalPurchaseToday",
+      "totalExpensesToday",
+      "totalRecoveryToday",
     ]);
     const adjustmentByKey = {};
     dashboardAdjustmentDocs.forEach((doc) => {
-      adjustmentByKey[doc.key] = Number(doc.total || 0);
+      if (!PERIOD_ADJUSTMENT_KEYS.has(doc.key)) {
+        adjustmentByKey[doc.key] = Number(doc.total || 0);
+        return;
+      }
+      adjustmentByKey[doc.key] = (doc.history || []).reduce((sum, entry) => {
+        const t = entry.createdAt ? new Date(entry.createdAt).getTime() : null;
+        if (t === null || t < start.getTime() || t > end.getTime()) return sum;
+        return sum + (entry.direction === "out" ? -Number(entry.amount || 0) : Number(entry.amount || 0));
+      }, 0);
     });
 
     let saleOnCash = 0;
