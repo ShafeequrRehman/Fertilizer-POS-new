@@ -703,7 +703,14 @@ exports.getDashboardSummary = async (req, res) => {
     // computed figure - see DashboardAdjustment.js's own comment. cashInHand
     // and balanceOnBank are deliberately never touched here; they already
     // have their own real editable home (CashRegister/Bank).
-    const adjusted = (key, value) => value + (adjustmentByKey[key] || 0);
+    //
+    // Every tile here is a money total that can never truly be negative
+    // (you can't have sold, purchased, spent, recovered, or be holding
+    // less than Rs 0) - so if the owner corrects one down by more than
+    // its live value (e.g. Total Purchase is Rs 9,600 and they enter a
+    // -9,600 correction to zero it out, or slightly overshoot), floor the
+    // result at 0 instead of showing a confusing negative number.
+    const adjusted = (key, value) => Math.max(0, value + (adjustmentByKey[key] || 0));
 
     res.json({
       date: start.toISOString().slice(0, 10),
